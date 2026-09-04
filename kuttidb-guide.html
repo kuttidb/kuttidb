@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KuttiDB — How it works · Production guide</title>
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#10161f; --panel2:#141c28; --code:#0d131c;
+    --line:#223042; --line2:#2c3e54; --text:#e7eef6; --muted:#94a6b8; --dim:#6b7d90;
+    --cyan:#39d5f0; --green:#3ddc97; --violet:#b195f5; --amber:#ffc857;
+    --red:#ff7b7b; --blue:#6aaefc; --pink:#f472b6;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:
+      radial-gradient(1200px 500px at 70% -100px, rgba(57,213,240,.07), transparent 60%),
+      radial-gradient(900px 420px at 10% -80px, rgba(177,149,245,.06), transparent 60%),
+      var(--bg);
+    color:var(--text);
+    font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  code,pre,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+  a{color:var(--cyan);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 22px}
+
+  /* ---------- hero ---------- */
+  header.hero{padding:64px 0 34px;border-bottom:1px solid var(--line)}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--cyan);border:1px solid rgba(57,213,240,.35);
+    background:rgba(57,213,240,.08);padding:5px 12px;border-radius:999px;font-weight:700}
+  h1{font-size:46px;margin:18px 0 10px;letter-spacing:-.02em}
+  h1 .accent{background:linear-gradient(90deg,var(--cyan),var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .tagline{font-size:18px;color:var(--muted);max-width:820px;margin:0 0 22px}
+  .tagline b{color:var(--text)}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:26px}
+  .chip{font-size:12px;color:var(--muted);border:1px solid var(--line);background:var(--panel);
+    padding:4px 11px;border-radius:999px;white-space:nowrap}
+  .chip b{color:var(--text);font-weight:600}
+  .cta{display:flex;gap:12px;flex-wrap:wrap}
+  .btn{display:inline-block;padding:10px 20px;border-radius:10px;font-weight:600;font-size:14px;border:1px solid var(--line2)}
+  .btn.primary{background:linear-gradient(90deg,#0e7490,#155e75);border-color:#0e7490;color:#eafcff}
+  .btn.ghost{color:var(--text);background:var(--panel)}
+
+  /* ---------- nav ---------- */
+  nav.top{position:sticky;top:0;z-index:50;background:rgba(10,14,20,.86);backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line)}
+  nav.top .wrap{display:flex;gap:4px;overflow-x:auto;padding-top:9px;padding-bottom:9px;scrollbar-width:none}
+  nav.top a{flex:none;font-size:12.5px;color:var(--muted);padding:5px 11px;border-radius:8px;font-weight:600}
+  nav.top a:hover{color:var(--text);background:var(--panel2);text-decoration:none}
+
+  /* ---------- sections ---------- */
+  main{padding-bottom:60px}
+  section{padding:52px 0 8px}
+  h2{font-size:29px;margin:0 0 8px;letter-spacing:-.015em}
+  h2 .no{color:var(--dim);font-weight:600;font-size:15px;vertical-align:middle;margin-right:10px;font-family:ui-monospace,monospace}
+  h3{font-size:18px;margin:26px 0 10px}
+  .lede{color:var(--muted);max-width:860px;margin:0 0 26px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px}
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+  .g4{grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px;position:relative;overflow:hidden}
+  .card .bar{position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:3px 0 0 3px}
+  .card h4{margin:0 0 8px;font-size:15px}
+  .card p{margin:0;font-size:13.5px;color:var(--muted)}
+  .card p b{color:var(--text);font-weight:600}
+  .bar.c-cyan{background:var(--cyan)} .bar.c-green{background:var(--green)}
+  .bar.c-violet{background:var(--violet)} .bar.c-amber{background:var(--amber)}
+  .bar.c-red{background:var(--red)} .bar.c-blue{background:var(--blue)}
+  .bar.c-pink{background:var(--pink)}
+  .kicker{font-size:10.5px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;margin:0 0 6px}
+  .kicker.k-cyan{color:var(--cyan)} .kicker.k-green{color:var(--green)}
+  .kicker.k-violet{color:var(--violet)} .kicker.k-amber{color:var(--amber)}
+  .kicker.k-red{color:var(--red)} .kicker.k-blue{color:var(--blue)} .kicker.k-pink{color:var(--pink)}
+
+  .callout{border:1px solid var(--line);border-left:3px solid var(--amber);background:rgba(255,200,87,.05);
+    border-radius:0 12px 12px 0;padding:14px 18px;margin:20px 0;font-size:14px;color:var(--muted)}
+  .callout b{color:var(--amber)}
+  .callout.red{border-left-color:var(--red);background:rgba(255,123,123,.05)}
+  .callout.red b{color:var(--red)}
+  .callout.green{border-left-color:var(--green);background:rgba(61,220,151,.05)}
+  .callout.green b{color:var(--green)}
+
+  .svgbox{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin:8px 0 6px}
+  .svgbox svg{display:block;width:100%;height:auto}
+  .caption{font-size:12.5px;color:var(--dim);margin:10px 4px 0;text-align:center}
+
+  /* ---------- svg text ---------- */
+  svg text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif}
+  .t-title{fill:#e8eef5;font-size:13px;font-weight:700}
+  .t-sub{fill:#93a4b4;font-size:11px}
+  .t-tag{fill:#6b7d90;font-size:10px;font-weight:700;letter-spacing:.12em}
+  .t-small{fill:#93a4b4;font-size:10.5px}
+  .t-white{fill:#e8eef5;font-size:11.5px;font-weight:600}
+  .edge{stroke:#56708a;stroke-width:1.6;fill:none}
+  .nbox{fill:#151d29;stroke:#2a3947;stroke-width:1.2}
+
+  /* ---------- code ---------- */
+  pre{position:relative;background:var(--code);border:1px solid #1d2937;border-radius:12px;
+    padding:16px 18px;overflow-x:auto;font-size:13px;line-height:1.55;margin:12px 0}
+  pre .c{color:#5f7a8f}      /* comments */
+  pre .s{color:#9ecbff}      /* strings-ish */
+  pre .k{color:#c3a6ff}      /* keywords */
+  .codewrap{position:relative}
+  .copy{position:absolute;top:8px;right:8px;font-size:11px;color:var(--muted);background:#182230;
+    border:1px solid var(--line2);border-radius:7px;padding:3px 9px;cursor:pointer;opacity:.75}
+  .copy:hover{opacity:1;color:var(--text)}
+  .fname{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.12em;font-weight:700;margin:16px 0 -4px}
+
+  /* ---------- tables ---------- */
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:12px 0}
+  th{text-align:left;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
+    border-bottom:1px solid var(--line2);padding:8px 12px;font-weight:700}
+  td{border-bottom:1px solid var(--line);padding:9px 12px;color:var(--muted);vertical-align:top}
+  td:first-child{color:var(--text);font-weight:600;white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  .ok{color:var(--green);font-weight:700}
+  .no2{color:var(--red);font-weight:700}
+
+  /* ---------- tabs ---------- */
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0 0}
+  .tab{font-size:13px;font-weight:600;color:var(--muted);background:var(--panel);border:1px solid var(--line);
+    padding:8px 16px;border-radius:10px;cursor:pointer}
+  .tab.active{color:#eafcff;background:linear-gradient(90deg,#0e7490,#155e75);border-color:#0e7490}
+  .tabpanel{display:none}
+  .tabpanel.active{display:block}
+
+  /* ---------- checklist ---------- */
+  .check{display:flex;gap:12px;align-items:flex-start;padding:13px 16px;background:var(--panel);
+    border:1px solid var(--line);border-radius:12px;cursor:pointer}
+  .check input{margin-top:3px;accent-color:var(--cyan);width:15px;height:15px;flex:none}
+  .check span b{display:block;font-size:13.5px;color:var(--text);margin-bottom:2px}
+  .check span i{font-style:normal;font-size:12.5px;color:var(--muted)}
+  .check input:checked + span b{color:var(--dim);text-decoration:line-through}
+
+  footer{border-top:1px solid var(--line);padding:28px 0 44px;color:var(--dim);font-size:13px}
+  .src{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .src span{border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:11.5px;font-family:ui-monospace,monospace;color:var(--muted)}
+  @media (max-width:720px){ h1{font-size:34px} section{padding:38px 0 4px} }
+</style>
+</head>
+<body>
+
+<!-- shared SVG arrow markers -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="mG" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6b8299"/></marker>
+  <marker id="mCyan" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#39d5f0"/></marker>
+  <marker id="mGreen" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#3ddc97"/></marker>
+  <marker id="mViolet" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#b195f5"/></marker>
+  <marker id="mAmber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#ffc857"/></marker>
+  <marker id="mRed" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#ff7b7b"/></marker>
+  <marker id="mBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6aaefc"/></marker>
+</defs></svg>
+
+<!-- ============================= HERO ============================= -->
+<header class="hero">
+  <div class="wrap">
+    <span class="eyebrow">● Single-binary event cache · queues · streams</span>
+    <h1>KuttiDB<span class="accent">, explained.</span></h1>
+    <p class="tagline">One C11 executable, one data directory. A <b>fast TTL cache</b>, <b>durable work queues</b>,
+      <b>routed exchanges</b> and <b>partitioned streams</b> — plus <b>atomic cache-plus-event commits</b> that span both worlds.
+      This page shows how it works inside, and exactly how to run it in production.</p>
+    <div class="chips">
+      <span class="chip">Binary protocol <b>v1.5</b> (little-endian)</span>
+      <span class="chip">TCP :7379 · Unix socket · <b>shared-memory embed</b></span>
+      <span class="chip"><b>CRC-checked WALs</b> + snapshots</span>
+      <span class="chip">kqueue (macOS) · <b>epoll</b> (Linux)</span>
+      <span class="chip">Delivery: <b>at-least-once</b></span>
+      <span class="chip">Clients: <b>Python · Go · Java · Rust · Node · CLI</b></span>
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="#architecture">How it works ↓</a>
+      <a class="btn ghost" href="#production">Run it in production ↓</a>
+    </div>
+  </div>
+</header>
+
+<nav class="top"><div class="wrap">
+  <a href="#overview">Overview</a><a href="#architecture">Architecture</a>
+  <a href="#durability">Write path &amp; durability</a><a href="#atomic">Atomic ops</a>
+  <a href="#queues">Queues</a><a href="#exchanges">Exchanges</a><a href="#streams">Streams</a>
+  <a href="#singleflight">Stampede &amp; SWR</a><a href="#production">Production</a>
+  <a href="#operations">Operations</a><a href="#limits">Honest limits</a><a href="#cheatsheet">Cheat sheet</a>
+</div></nav>
+
+<main class="wrap">
+
+<!-- ============================= OVERVIEW ============================= -->
+<section id="overview">
+  <h2><span class="no">01</span>What KuttiDB is</h2>
+  <p class="lede">KuttiDB is a lightweight, <b>crash-recoverable event cache</b>: zero-copy between local processes,
+     network-accessible across machines, with cache, queues, exchanges and streams in one binary.
+     No JVM, no Erlang, no external dependencies for a plaintext build.</p>
+  <div class="grid g3">
+    <div class="card"><i class="bar c-cyan"></i><p class="kicker k-cyan">Cache engine</p>
+      <h4>Fast in-memory key/value + TTL</h4>
+      <p>256-shard hash table, batching, pipelining, bounded memory with eviction, CRC-checked WAL &amp; snapshots,
+         shared-memory embedded mode.</p></div>
+    <div class="card"><i class="bar c-green"></i><p class="kicker k-green">Queue engine</p>
+      <h4>Durable work queues</h4>
+      <p>Durable declarations, publish confirms, manual ACK/NACK, visibility timeouts, redelivery flags, prefetch,
+         dead-letter queues, retry delays, crash recovery. <b>At-least-once.</b></p></div>
+    <div class="card"><i class="bar c-green"></i><p class="kicker k-green">Exchanges</p>
+      <h4>Routing in front of queues</h4>
+      <p>Direct, fanout and topic routing, an unnamed default exchange, alternate-exchange routing, unroutable
+         reporting, durable bindings. Stateless — never stores messages.</p></div>
+    <div class="card"><i class="bar c-violet"></i><p class="kicker k-violet">Stream engine</p>
+      <h4>Partitioned append logs</h4>
+      <p>Topics with 1–256 partitions, keyed partition choice, replay from offsets, age/byte retention, persisted
+         consumer-group offsets, lease-based groups.</p></div>
+    <div class="card"><i class="bar c-amber"></i><p class="kicker k-amber">Atomic cache + event</p>
+      <h4>One commit id, two engines</h4>
+      <p><span class="mono">put_and_publish</span>, <span class="mono">put_and_enqueue</span>,
+         <span class="mono">delete_and_publish</span>, <span class="mono">update_and_emit</span>: after recovery,
+         <b>both sides exist or neither does</b>.</p></div>
+    <div class="card"><i class="bar c-pink"></i><p class="kicker k-pink">Anti-stampede + SWR</p>
+      <h4>Single-flight loading, built in</h4>
+      <p>First requester for a missing key loads it; others wait <b>server-side</b>. Plus stale-while-revalidate and
+         refresh-ahead, and negative caching.</p></div>
+  </div>
+
+  <div class="callout red" style="margin-top:22px">
+    <b>What it is not:</b> it is not Redis, RabbitMQ or Kafka and speaks none of their wire protocols.
+    It does <b>not</b> guarantee “no data loss” — evictable cache entries may be lost by policy, and a single node does
+    not protect against disk or machine loss (replication is not implemented). There is <b>no exactly-once</b> claim anywhere.
+  </div>
+</section>
+
+<!-- ============================= ARCHITECTURE ============================= -->
+<section id="architecture">
+  <h2><span class="no">02</span>The big picture — how a request flows</h2>
+  <p class="lede">Everything below lives in <b>one process</b>. Clients arrive over TCP or a Unix socket (or attach directly
+     to shared memory when on the same, trusted host). A handful of event loops (not one thread per connection) parse the
+     binary protocol and hand work to three logically separate engines, each with its own durability path.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 980 625" role="img" aria-label="KuttiDB architecture diagram">
+    <!-- clients -->
+    <rect class="nbox" x="30" y="16" width="450" height="78" rx="10"/>
+    <rect x="30" y="16" width="450" height="4" rx="2" fill="#6aaefc"/>
+    <text x="50" y="42" class="t-title">Network clients</text>
+    <text x="50" y="60" class="t-sub">Python · Go · Java · Rust · Node.js · C/C++ · kuttidb-cli</text>
+    <text x="50" y="76" class="t-sub">TCP :7379 or Unix socket · pipelining · batch ops · AUTH → TLS</text>
+
+    <rect class="nbox" x="520" y="16" width="430" height="78" rx="10"/>
+    <rect x="520" y="16" width="430" height="4" rx="2" fill="#f472b6"/>
+    <text x="540" y="42" class="t-title">Embedded mode — same host, mutually trusted</text>
+    <text x="540" y="60" class="t-sub">mmap CEMBv3 region: fixed-width offsets, ASLR-safe, zero-copy</text>
+    <text x="540" y="76" class="t-sub">LocalKuttiDB fallback chain: embed → Unix socket → TCP/TLS</text>
+
+    <path class="edge" marker-end="url(#mG)" d="M255 94 L255 128"/>
+    <path class="edge" marker-end="url(#mG)" d="M735 94 L735 128"/>
+
+    <!-- event loops -->
+    <rect class="nbox" x="30" y="132" width="920" height="46" rx="10"/>
+    <rect x="30" y="132" width="920" height="4" rx="2" fill="#6aaefc"/>
+    <text x="50" y="153" class="t-title">Event loops — kqueue (macOS) · epoll (Linux)</text>
+    <text x="50" y="169" class="t-sub">--threads 1–64 (default: CPU count, max 4) · bounded I/O · limits: value 64 MiB, batch 64 MiB, 1024 clients (defaults)</text>
+
+    <path class="edge" marker-end="url(#mG)" d="M490 178 L490 192"/>
+
+    <!-- protocol -->
+    <rect class="nbox" x="30" y="196" width="920" height="42" rx="10"/>
+    <text x="50" y="215" class="t-title">Binary protocol v1.5 — little-endian, 3 statuses (OK · MISS · ERROR)</text>
+    <text x="50" y="230" class="t-sub">AUTH (constant-time) · optional native TLS 1.2+ · CAPABILITIES handshake · malformed frames fail closed</text>
+
+    <path class="edge" marker-end="url(#mCyan)" d="M174 238 L174 288"/>
+    <path class="edge" marker-end="url(#mGreen)" d="M490 238 L490 246"/>
+    <path class="edge" marker-end="url(#mViolet)" d="M806 238 L806 288"/>
+
+    <!-- exchange bar -->
+    <rect class="nbox" x="346" y="250" width="288" height="30" rx="8"/>
+    <text x="366" y="269" class="t-white" fill="#3ddc97">Exchange routing (stateless)</text>
+    <text x="560" y="269" class="t-small">direct · fanout · topic · default + AE</text>
+    <path class="edge" marker-end="url(#mGreen)" d="M490 280 L490 288"/>
+
+    <!-- engines -->
+    <rect class="nbox" x="30" y="292" width="288" height="128" rx="10"/>
+    <rect x="30" y="292" width="288" height="4" rx="2" fill="#39d5f0"/>
+    <text x="50" y="316" class="t-title">Cache engine</text>
+    <text x="50" y="334" class="t-sub">256-shard table, per-shard locks</text>
+    <text x="50" y="350" class="t-sub">absolute TTL · lazy delete + sweep</text>
+    <text x="50" y="366" class="t-sub">slab allocator · memory budget</text>
+    <text x="50" y="382" class="t-sub">random eviction (cache-only loss)</text>
+    <text x="50" y="398" class="t-sub">zero-copy GET into response vector</text>
+
+    <rect class="nbox" x="346" y="292" width="288" height="128" rx="10"/>
+    <rect x="346" y="292" width="288" height="4" rx="2" fill="#3ddc97"/>
+    <text x="366" y="316" class="t-title">Queue engine</text>
+    <text x="366" y="334" class="t-sub">durable declare · publish confirms</text>
+    <text x="366" y="350" class="t-sub">consume → ACK / NACK · visibility lease</text>
+    <text x="366" y="366" class="t-sub">prefetch · DLQ · delayed retries</text>
+    <text x="366" y="382" class="t-sub">named durable consumers</text>
+    <text x="366" y="398" class="t-sub">at-least-once delivery</text>
+
+    <rect class="nbox" x="662" y="292" width="288" height="128" rx="10"/>
+    <rect x="662" y="292" width="288" height="4" rx="2" fill="#b195f5"/>
+    <text x="682" y="316" class="t-title">Stream engine</text>
+    <text x="682" y="334" class="t-sub">topics · 1–256 partitions</text>
+    <text x="682" y="350" class="t-sub">keyed routing · monotonic offsets</text>
+    <text x="682" y="366" class="t-sub">consumer groups: leases, generations</text>
+    <text x="682" y="382" class="t-sub">retention (age / bytes) · replay</text>
+    <text x="682" y="398" class="t-sub">fetch ≠ commit → at-least-once</text>
+
+    <!-- coordinator -->
+    <path class="edge" stroke-dasharray="5 4" marker-end="url(#mAmber)" d="M174 420 L174 446"/>
+    <path class="edge" stroke-dasharray="5 4" marker-end="url(#mAmber)" d="M490 420 L490 446"/>
+    <rect class="nbox" x="30" y="450" width="920" height="52" rx="10" stroke="#8a6d1f"/>
+    <rect x="30" y="450" width="920" height="4" rx="2" fill="#ffc857"/>
+    <text x="50" y="472" class="t-title">Durable commit coordinator — atomic cache + event operations</text>
+    <text x="50" y="490" class="t-sub">put_and_publish · put_and_enqueue · delete_and_publish · update_and_emit — one durable commit id across the cache and queue WALs</text>
+
+    <!-- persistence -->
+    <path class="edge" marker-end="url(#mCyan)" d="M174 502 L174 524"/>
+    <path class="edge" marker-end="url(#mGreen)" d="M490 502 L490 524"/>
+    <path class="edge" marker-end="url(#mViolet)" d="M806 502 L806 524"/>
+
+    <rect class="nbox" x="30" y="528" width="288" height="58" rx="10"/>
+    <text x="50" y="550" class="t-white" fill="#39d5f0">cache WAL  +  &lt;WAL&gt;.snap</text>
+    <text x="50" y="567" class="t-sub">CRC32 records · snapshot folds the log</text>
+
+    <rect class="nbox" x="346" y="528" width="288" height="58" rx="10"/>
+    <text x="366" y="550" class="t-white" fill="#3ddc97">&lt;WAL&gt;.queues</text>
+    <text x="366" y="567" class="t-sub">publish / delivery / ACK records, fsynced</text>
+
+    <rect class="nbox" x="662" y="528" width="288" height="58" rx="10"/>
+    <text x="682" y="550" class="t-white" fill="#b195f5">&lt;WAL&gt;.streams</text>
+    <text x="682" y="567" class="t-sub">appends + group commits, fsynced</text>
+
+    <text x="490" y="612" text-anchor="middle" class="t-small">One data directory · recovery = valid prefix, torn/corrupt tail truncated · WAL failure latches fail-closed: op → 0x02 · HEALTH → 0x02 · /ready → 503</text>
+  </svg></div>
+  <p class="caption">Three engines, three WALs, one process. The commit coordinator is the only component allowed to write across two logs — that is what makes cache+event operations atomic.</p>
+
+  <div class="grid g3" style="margin-top:18px">
+    <div class="card"><i class="bar c-cyan"></i><h4>Cache core details</h4>
+      <p>Entries store key+value in one allocation; small entries come from 16 KiB slabs. TTLs are <b>absolute Unix
+         seconds</b> — downtime never extends them. A global memory budget triggers <b>random eviction</b> (memcached-style).
+         Evicted = gone, by policy.</p></div>
+    <div class="card"><i class="bar c-green"></i><h4>Engines don’t share memory budgets</h4>
+      <p>Queue messages never enter the cache’s eviction pool, and stream retention is separate accounting. A cache under
+         pressure can never evict a durable queue message or a stream record.</p></div>
+    <div class="card"><i class="bar c-pink"></i><h4>Embedded mode (CEMBv3)</h4>
+      <p>The shared file stores only <b>fixed-width offsets</b>, never pointers — each process may map it at a different
+         address, so ASLR is safe. Locks recover when an owner process dies. Trusted local processes only.</p></div>
+  </div>
+</section>
+
+<!-- ============================= DURABILITY ============================= -->
+<section id="durability">
+  <h2><span class="no">03</span>Write path &amp; durability — when is a write “safe”?</h2>
+  <p class="lede">Every mutation follows the same shape: parse → execute → append to a CRC-checked WAL → sync at the
+     configured point → acknowledge. The two durability modes only change <b>when the fsync happens for cache writes</b>;
+     queues, streams and atomic operations always fsync at their own acknowledgement points.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 980 262" role="img" aria-label="Write path pipeline">
+    <rect class="nbox" x="20" y="34" width="150" height="64" rx="10"/>
+    <text x="95" y="60" text-anchor="middle" class="t-title">Client request</text>
+    <text x="95" y="77" text-anchor="middle" class="t-sub">binary frame [op][klen][vlen]</text>
+    <path class="edge" marker-end="url(#mG)" d="M170 66 L206 66"/>
+
+    <rect class="nbox" x="210" y="34" width="170" height="64" rx="10"/>
+    <text x="295" y="60" text-anchor="middle" class="t-title">Event loop</text>
+    <text x="295" y="77" text-anchor="middle" class="t-sub">AUTH · limits · parse</text>
+    <path class="edge" marker-end="url(#mG)" d="M380 66 L416 66"/>
+
+    <rect class="nbox" x="420" y="34" width="170" height="64" rx="10"/>
+    <text x="505" y="60" text-anchor="middle" class="t-title">Engine executes</text>
+    <text x="505" y="77" text-anchor="middle" class="t-sub">cache · queue · stream</text>
+    <path class="edge" marker-end="url(#mG)" d="M590 66 L626 66"/>
+
+    <rect class="nbox" x="630" y="34" width="150" height="64" rx="10"/>
+    <text x="705" y="60" text-anchor="middle" class="t-title">WAL append</text>
+    <text x="705" y="77" text-anchor="middle" class="t-sub">CRC32 record</text>
+    <path class="edge" marker-end="url(#mAmber)" d="M780 66 L816 66"/>
+
+    <rect class="nbox" x="820" y="34" width="140" height="64" rx="10" stroke="#8a6d1f"/>
+    <text x="890" y="60" text-anchor="middle" class="t-title" fill="#ffc857">fsync point</text>
+    <text x="890" y="77" text-anchor="middle" class="t-sub">then the ACK is sent</text>
+
+    <path class="edge" stroke-dasharray="5 4" marker-end="url(#mBlue)" d="M890 30 C 700 -8, 300 -8, 96 30"/>
+    <text x="493" y="16" text-anchor="middle" class="t-small" fill="#6aaefc">ack / confirm returns only after the durability point</text>
+
+    <rect class="nbox" x="20" y="130" width="460" height="92" rx="10"/>
+    <text x="40" y="154" class="t-title" fill="#ffc857">--durability periodic  (default)</text>
+    <text x="40" y="172" class="t-sub">Cache WAL records are batched and fsynced every FSYNC_MS</text>
+    <text x="40" y="188" class="t-sub">(e.g. 100). An OS/power crash can lose cache writes acknowledged</text>
+    <text x="40" y="204" class="t-sub">inside that window. Queue, stream and atomic ops still fsync at</text>
+    <text x="40" y="220" class="t-sub" fill="#3ddc97">their own ack points — this mode never weakens them.</text>
+
+    <rect class="nbox" x="520" y="130" width="440" height="92" rx="10"/>
+    <text x="540" y="154" class="t-title" fill="#3ddc97">--durability always</text>
+    <text x="540" y="172" class="t-sub">Every cache mutation is flushed + fsynced before its response —</text>
+    <text x="540" y="188" class="t-sub">acknowledged writes survive a process crash on a healthy</text>
+    <text x="540" y="204" class="t-sub">single node. Higher latency per write; batches sync once per</text>
+    <text x="540" y="220" class="t-sub">complete batch, not per item.</text>
+
+    <text x="490" y="250" text-anchor="middle" class="t-small" fill="#ff7b7b">Fail-closed: if a WAL write fails, the engine latches *_wal_failed = 1 — mutations answer 0x02, HEALTH answers 0x02, /ready answers 503.</text>
+  </svg></div>
+
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><i class="bar c-amber"></i><h4>Crash recovery</h4>
+      <p>Recovery replays the <b>valid prefix</b> of each WAL and idempotently truncates a torn or checksum-corrupt tail.
+         Tests inject torn tails, corrupt CRCs, SIGKILL mid-write and disk exhaustion. Restoring the same backup twice is safe.</p></div>
+    <div class="card"><i class="bar c-cyan"></i><h4>Snapshots ≠ backups</h4>
+      <p><span class="mono">&lt;WAL&gt;.snap</span> is a checkpoint that folds acknowledged cache state so the WAL stays small.
+         A graceful shutdown writes a snapshot, then flushes and syncs the remaining log.</p></div>
+    <div class="card"><i class="bar c-red"></i><h4>Single node, stated plainly</h4>
+      <p>Acknowledged durable data survives <b>process crashes and clean restarts</b> on a healthy node.
+         Disk loss, machine loss or site loss needs replication — which does not exist yet. Never describe this as zero-data-loss or HA.</p></div>
+  </div>
+</section>
+
+<!-- ============================= ATOMIC ============================= -->
+<section id="atomic">
+  <h2><span class="no">04</span>Atomic cache-plus-event commits — the differentiator</h2>
+  <p class="lede">Invalidating a cache and notifying workers is normally two systems and two failure modes. KuttiDB commits
+     a cache mutation and a queue/stream delivery under <b>one durable commit id</b>: after recovery, both sides exist or
+     neither does. <span class="mono">update_and_emit</span> is conditional — an absent key commits nothing.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 980 470" role="img" aria-label="Atomic commit sequence">
+    <text x="40" y="20" class="t-tag">COMMIT SEQUENCE (ALL STEPS FSYNC)</text>
+
+    <rect class="nbox" x="40" y="32" width="520" height="62" rx="10"/>
+    <text x="60" y="56" class="t-title">1 · Queue WAL — TX_PREPARE</text>
+    <text x="60" y="74" class="t-sub">tx id + pre-allocated message ids + payload → written and fsynced</text>
+    <path class="edge" marker-end="url(#mG)" d="M300 94 L300 116"/>
+
+    <rect class="nbox" x="40" y="120" width="520" height="66" rx="10" stroke="#8a6d1f" stroke-width="2"/>
+    <text x="60" y="144" class="t-title" fill="#ffc857">2 · Cache WAL — commit marker 0x08 ★ COMMIT POINT</text>
+    <text x="60" y="162" class="t-sub">carries the cache mutation → written, flushed and fsynced</text>
+    <text x="60" y="178" class="t-sub" fill="#ffc857">before this record: nothing happened. after it: everything will.</text>
+    <path class="edge" marker-end="url(#mG)" d="M300 186 L300 208"/>
+
+    <rect class="nbox" x="40" y="212" width="520" height="62" rx="10"/>
+    <text x="60" y="236" class="t-title">3 · Queue WAL — TX_COMMIT</text>
+    <text x="60" y="254" class="t-sub">the reserved messages materialize into their queues → fsynced</text>
+    <path class="edge" marker-end="url(#mG)" d="M300 274 L300 296"/>
+
+    <rect class="nbox" x="40" y="300" width="520" height="56" rx="10"/>
+    <text x="60" y="324" class="t-title">4 · Response</text>
+    <text x="60" y="342" class="t-sub">client receives { tx_id, routed } — only after step 3 · tx_id is a traceable commit id</text>
+
+    <rect class="nbox" x="40" y="384" width="520" height="72" rx="10"/>
+    <text x="60" y="406" class="t-small" fill="#e8eef5" font-weight="700">Always fsyncs both WALs — even under --durability periodic.</text>
+    <text x="60" y="422" class="t-sub">Refused unless cache persistence + healthy queue WAL are on and every target queue is durable.</text>
+    <text x="60" y="438" class="t-sub">Unroutable publish → MISS, nothing committed (cache mutation refused with it).</text>
+
+    <!-- right column: crash outcomes -->
+    <text x="620" y="20" class="t-tag">IF THE PROCESS CRASHES…</text>
+    <rect class="nbox" x="620" y="32" width="330" height="88" rx="10"/>
+    <text x="640" y="56" class="t-white">…after step 1 (no marker)</text>
+    <text x="640" y="74" class="t-sub">prepare is discarded on recovery:</text>
+    <text x="640" y="90" class="t-sub" fill="#ff7b7b">neither side is visible</text>
+    <rect class="nbox" x="620" y="136" width="330" height="104" rx="10" stroke="#3a5c3a"/>
+    <text x="640" y="160" class="t-white">…after step 2 (no TX_COMMIT)</text>
+    <text x="640" y="178" class="t-sub">startup reconciliation materializes the</text>
+    <text x="640" y="194" class="t-sub">reserved messages and writes TX_COMMIT:</text>
+    <text x="640" y="212" class="t-sub" fill="#3ddc97">both sides visible</text>
+    <rect class="nbox" x="620" y="256" width="330" height="88" rx="10"/>
+    <text x="640" y="280" class="t-white">…after step 3 (both records)</text>
+    <text x="640" y="298" class="t-sub">replay materializes the messages</text>
+    <text x="640" y="314" class="t-sub" fill="#3ddc97">exactly once</text>
+    <rect class="nbox" x="620" y="360" width="330" height="96" rx="10"/>
+    <text x="640" y="384" class="t-white" fill="#ffc857">In-doubt window</text>
+    <text x="640" y="402" class="t-sub">An error after the marker was written is the</text>
+    <text x="640" y="418" class="t-sub">standard commit-protocol window: the op may</text>
+    <text x="640" y="434" class="t-sub" fill="#ffc857">still appear after recovery (at-least-once, never dropped).</text>
+  </svg></div>
+  <p class="caption">WAL folding defers while any transaction is inside its commit window, so a cache commit marker can never be folded away before its queue side is self-contained.</p>
+
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card"><i class="bar c-amber"></i><h4>Use it for</h4>
+      <p>Cache invalidation events (<span class="mono">delete_and_publish</span>), “state changed” broadcasts
+         (<span class="mono">put_and_publish</span>), enqueuing work for the exact bytes you just cached
+         (<span class="mono">put_and_enqueue</span>), and counters/state machines that must emit an event only when the
+         update happened (<span class="mono">update_and_emit</span> — missing key → MISS, nothing committed).</p></div>
+    <div class="card"><i class="bar c-blue"></i><h4>From Python</h4>
+      <p><span class="mono">r = db.put_and_publish("user:42", blob, exchange="events", routing_key="user.updated", ttl=60)</span>
+         returns <span class="mono">{"tx_id": …, "routed": n}</span>. Log <span class="mono">tx_id</span> — it is the durable
+         transaction id recorded in <b>both</b> WALs.</p></div>
+  </div>
+</section>
+
+<!-- ============================= QUEUES ============================= -->
+<section id="queues">
+  <h2><span class="no">05</span>Durable queues — the life of a message</h2>
+  <p class="lede">Queues are a separate engine with their own CRC-checked WAL. A durable message is removed only after its
+     <b>durable ACK record</b>; everything else — visibility timeout, NACK requeue, dropped connection — makes it eligible
+     for redelivery, which is flagged to the consumer. Delivery is <b>at-least-once</b>; design consumers to be idempotent.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 980 505" role="img" aria-label="Queue message lifecycle">
+    <rect class="nbox" x="20" y="90" width="120" height="64" rx="10"/>
+    <text x="80" y="116" text-anchor="middle" class="t-title">Publisher</text>
+    <text x="80" y="133" text-anchor="middle" class="t-sub">queue_publish</text>
+    <path class="edge" marker-end="url(#mGreen)" d="M140 122 L186 122"/>
+    <text x="163" y="112" text-anchor="middle" class="t-small">confirm after fsync</text>
+
+    <rect class="nbox" x="190" y="80" width="180" height="88" rx="10" stroke="#2f5c46"/>
+    <text x="280" y="104" text-anchor="middle" class="t-title" fill="#3ddc97">READY (depth)</text>
+    <text x="280" y="122" text-anchor="middle" class="t-sub">bounded by max_depth →</text>
+    <text x="280" y="137" text-anchor="middle" class="t-sub">full queue: publish ERRORS</text>
+    <text x="280" y="153" text-anchor="middle" class="t-sub">TTL expiry discards first</text>
+    <path class="edge" marker-end="url(#mGreen)" d="M370 112 L426 112"/>
+    <text x="398" y="102" text-anchor="middle" class="t-small">consume</text>
+
+    <rect class="nbox" x="430" y="80" width="200" height="88" rx="10" stroke="#2f5c46"/>
+    <text x="530" y="102" text-anchor="middle" class="t-title" fill="#3ddc97">IN FLIGHT</text>
+    <text x="530" y="120" text-anchor="middle" class="t-sub">delivery record fsynced first</text>
+    <text x="530" y="135" text-anchor="middle" class="t-sub">delivery_tag (one-use, conn-bound)</text>
+    <text x="530" y="150" text-anchor="middle" class="t-sub">visibility lease · delivery_count</text>
+
+    <!-- ACK -->
+    <path class="edge" marker-end="url(#mGreen)" d="M630 96 L756 66"/>
+    <rect class="nbox" x="760" y="36" width="200" height="60" rx="10" stroke="#2f5c46"/>
+    <text x="860" y="60" text-anchor="middle" class="t-title" fill="#3ddc97">ACK</text>
+    <text x="860" y="78" text-anchor="middle" class="t-sub">ACK record fsynced → removed</text>
+
+    <!-- DLQ -->
+    <path class="edge" marker-end="url(#mRed)" d="M630 128 C 690 150, 690 236, 756 244"/>
+    <rect class="nbox" x="760" y="216" width="200" height="104" rx="10" stroke="#6b3030"/>
+    <text x="860" y="240" text-anchor="middle" class="t-title" fill="#ff7b7b">DEAD LETTER / DISCARD</text>
+    <text x="860" y="258" text-anchor="middle" class="t-sub">NACK requeue=false · TTL expired ·</text>
+    <text x="860" y="273" text-anchor="middle" class="t-sub">over max_deliveries</text>
+    <text x="860" y="289" text-anchor="middle" class="t-sub" fill="#ffc857">routed to DLQ durably BEFORE</text>
+    <text x="860" y="303" text-anchor="middle" class="t-sub" fill="#ffc857">source removal · full DLQ → error</text>
+
+    <!-- return arcs -->
+    <path class="edge" marker-end="url(#mAmber)" d="M530 168 C 560 216, 400 208, 296 172"/>
+    <text x="452" y="214" text-anchor="middle" class="t-small" fill="#ffc857">NACK requeue=true (+ optional retry delay)</text>
+    <path class="edge" marker-end="url(#mAmber)" d="M520 172 C 560 258, 380 258, 288 174"/>
+    <text x="452" y="254" text-anchor="middle" class="t-small" fill="#ffc857">visibility lease expires</text>
+    <path class="edge" marker-end="url(#mAmber)" d="M500 172 C 560 300, 360 300, 280 174"/>
+    <text x="452" y="296" text-anchor="middle" class="t-small" fill="#ffc857">owning connection closes / cancel / unregister</text>
+    <text x="420" y="180" text-anchor="middle" class="t-small" fill="#ff7b7b">redelivered flag = delivery_count &gt; 1</text>
+
+    <rect class="nbox" x="20" y="360" width="940" height="118" rx="10"/>
+    <text x="40" y="384" class="t-small" fill="#e8eef5" font-weight="700">Contract: at-least-once, never exactly-once.</text>
+    <text x="40" y="402" class="t-sub">A crash between delivery and ACK leaves the message in the log → it is redelivered (flagged) after restart. Delayed NACK requeues are durable — a restart before the due time keeps the message unavailable until then.</text>
+    <text x="40" y="422" class="t-sub">Prefetch bounds deliveries per connection (0 = unlimited). Durable named consumers (register/heartbeat) survive restarts: a dropped connection’s work follows its visibility deadline instead of requeueing instantly, and reconnecting with the same name keeps ownership + prefetch accounting.</text>
+    <text x="40" y="442" class="t-sub">Delivery tags are one-use per process: deliveries made before a restart are redelivered rather than ACKable with a stale tag. Lease timing uses a monotonic clock — wall-clock (NTP) changes cannot expire a live delivery early.</text>
+    <text x="40" y="462" class="t-sub" fill="#ffc857">Exhausted/expired/rejected messages route to the declared dead-letter queue; if the DLQ itself is full, the operation fails closed — the message stays, it is never silently dropped.</text>
+  </svg></div>
+
+  <div class="fname">python — durable work queue</div>
+<pre><span class="c"># pip install path/to/clients (src/kuttidb_client.py)</span>
+<span class="k">from</span> kuttidb_client <span class="k">import</span> KuttiDBClient
+
+<span class="k">with</span> KuttiDBClient(port=7379) <span class="k">as</span> db:
+    db.queue_declare(<span class="s">"jobs"</span>, durable=<span class="k">True</span>, max_depth=10_000,
+                     dead_letter_queue=<span class="s">"jobs.dead"</span>, max_deliveries=5)
+    msg_id = db.queue_publish(<span class="s">"jobs"</span>, b<span class="s">"resize:123"</span>)   <span class="c"># confirmed after queue-WAL fsync</span>
+
+    delivery = db.queue_consume(<span class="s">"jobs"</span>, visibility=30)  <span class="c"># lease for 30 s</span>
+    <span class="k">if</span> delivery:
+        <span class="k">try</span>:
+            process(delivery[<span class="s">"value"</span>])
+            db.queue_ack(<span class="s">"jobs"</span>, delivery[<span class="s">"id"</span>])         <span class="c"># durable ACK → message removed</span>
+        <span class="k">except</span> Exception:
+            db.queue_nack(<span class="s">"jobs"</span>, delivery[<span class="s">"id"</span>], requeue=<span class="k">True</span>, delay=5)</pre>
+</section>
+
+<!-- ============================= EXCHANGES ============================= -->
+<section id="exchanges">
+  <h2><span class="no">06</span>Exchanges — routing without storage</h2>
+  <p class="lede">An exchange never stores a message: a publish resolves the matching bound queues and writes
+     <b>one independent copy into each</b> (a queue matching several bindings still gets one copy). Exchanges and queues live
+     in separate namespaces. Routing is at-least-once and never silently lossy.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 980 445" role="img" aria-label="Exchange routing example">
+    <rect class="nbox" x="20" y="170" width="180" height="78" rx="10"/>
+    <text x="110" y="198" text-anchor="middle" class="t-title">Publisher</text>
+    <text x="110" y="216" text-anchor="middle" class="t-sub mono">exchange_publish(</text>
+    <text x="110" y="231" text-anchor="middle" class="t-sub mono">"events","orders.eu.paid")</text>
+    <path class="edge" marker-end="url(#mGreen)" d="M200 209 L226 209"/>
+
+    <rect class="nbox" x="230" y="164" width="200" height="90" rx="10" stroke="#2f5c46"/>
+    <text x="330" y="192" text-anchor="middle" class="t-title" fill="#3ddc97">topic exchange “events”</text>
+    <text x="330" y="210" text-anchor="middle" class="t-sub">durable · alternate →</text>
+    <text x="330" y="225" text-anchor="middle" class="t-sub mono">"events.unroutable"</text>
+    <text x="330" y="242" text-anchor="middle" class="t-sub">matches evaluated once per publish</text>
+
+    <rect class="nbox" x="230" y="296" width="280" height="86" rx="10"/>
+    <text x="250" y="318" class="t-tag">BINDINGS (DURABLE, MAX 1024)</text>
+    <text x="250" y="340" class="t-sub mono">orders.#     →  orders.all</text>
+    <text x="250" y="358" class="t-sub mono">orders.eu.*  →  orders.eu</text>
+
+    <path class="edge" marker-end="url(#mGreen)" d="M430 190 L696 120"/>
+    <text x="560" y="140" class="t-small" fill="#3ddc97">orders.# matches ✔</text>
+    <path class="edge" marker-end="url(#mGreen)" d="M430 218 L696 214"/>
+    <text x="560" y="200" class="t-small" fill="#3ddc97">orders.eu.* matches ✔</text>
+
+    <rect class="nbox" x="700" y="86" width="200" height="62" rx="10"/>
+    <text x="800" y="110" text-anchor="middle" class="t-white">queue: orders.all</text>
+    <text x="800" y="128" text-anchor="middle" class="t-sub">gets its own durable copy</text>
+    <rect class="nbox" x="700" y="186" width="200" height="62" rx="10"/>
+    <text x="800" y="210" text-anchor="middle" class="t-white">queue: orders.eu</text>
+    <text x="800" y="228" text-anchor="middle" class="t-sub">gets its own durable copy</text>
+
+    <rect class="nbox" x="560" y="286" width="340" height="54" rx="10"/>
+    <text x="730" y="308" text-anchor="middle" class="t-white" fill="#ffc857">response: routed = 2</text>
+    <text x="730" y="325" text-anchor="middle" class="t-sub">one queue-WAL fsync confirms the whole publish</text>
+
+    <path class="edge" stroke-dasharray="5 4" marker-end="url(#mRed)" d="M330 254 L330 296"/>
+    <rect class="nbox" x="700" y="360" width="200" height="56" rx="10" stroke="#6b3030"/>
+    <text x="800" y="382" text-anchor="middle" class="t-white" fill="#ff7b7b">no match → unroutable</text>
+    <text x="800" y="398" text-anchor="middle" class="t-sub">alternate exchange (1 hop) · else MISS</text>
+
+    <rect class="nbox" x="20" y="392" width="600" height="36" rx="8"/>
+    <text x="40" y="415" class="t-sub">direct = byte-equal key · fanout = every bound queue · topic = “.” words, * = one word, # = zero+ · default (unnamed) = key names the queue</text>
+  </svg></div>
+  <p class="caption">Fail-closed routing: if any target queue is full (or persistence fails), the whole publish errors before any copy is written. Unroutable is an outcome, not an error — status MISS + the <span class="mono">exchange_unroutable</span> counter.</p>
+
+  <div class="fname">python — topic routing with an alternate exchange</div>
+<pre><span class="k">with</span> KuttiDBClient(port=7379) <span class="k">as</span> db:
+    db.queue_declare(<span class="s">"orders.all"</span>, durable=<span class="k">True</span>)
+    db.queue_declare(<span class="s">"orders.eu"</span>,  durable=<span class="k">True</span>)
+    db.exchange_declare(<span class="s">"events"</span>, type=<span class="s">"topic"</span>, durable=<span class="k">True</span>,
+                        alternate_exchange=<span class="s">"events.unroutable"</span>)
+    db.exchange_bind(<span class="s">"events"</span>, <span class="s">"orders.all"</span>, <span class="s">"orders.#"</span>)
+    db.exchange_bind(<span class="s">"events"</span>, <span class="s">"orders.eu"</span>,  <span class="s">"orders.eu.*"</span>)
+
+    routed = db.exchange_publish(<span class="s">"events"</span>, <span class="s">"orders.eu.paid"</span>, payload)
+    <span class="k">if</span> routed == 0:
+        ...  <span class="c"># unroutable: went to the alternate exchange, or was reported MISS</span></pre>
+</section>
+
+<!-- ============================= STREAMS ============================= -->
+<section id="streams">
+  <h2><span class="no">07</span>Streams — replayable partition logs</h2>
+  <p class="lede">Streams are for <b>replayable events, not work distribution</b>: reading never removes a record — only
+     retention does. Ordering is guaranteed <b>only within a partition</b>. Appends and group-offset commits are fsynced to
+     the stream WAL before their response; fetch and commit are deliberately separate, so consumption is at-least-once.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 980 490" role="img" aria-label="Streams: partitions, offsets, groups, retention">
+    <text x="260" y="18" class="t-tag">TOPIC “payments” — DURABLE · PARTITIONS 1–256 · DECLARED max_bytes + max_age</text>
+
+    <rect class="nbox" x="20" y="36" width="200" height="66" rx="10"/>
+    <text x="120" y="60" text-anchor="middle" class="t-title">stream_append(…)</text>
+    <text x="120" y="78" text-anchor="middle" class="t-sub">key=<span class="mono">"u-42"</span> → FNV-1a hash → P1</text>
+    <text x="120" y="93" text-anchor="middle" class="t-sub">keyless records → P0</text>
+    <path class="edge" marker-end="url(#mViolet)" d="M220 69 L256 69"/>
+
+    <!-- partition strips -->
+    <g font-family="ui-monospace,monospace">
+    <rect class="nbox" x="260" y="40" width="690" height="52" rx="9"/>
+    <text x="276" y="70" class="t-white" fill="#b195f5">P0</text>
+    <g><rect x="316" y="52" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="338" y="71" text-anchor="middle" font-size="10" fill="#93a4b4">0</text>
+       <rect x="368" y="52" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="390" y="71" text-anchor="middle" font-size="10" fill="#93a4b4">1</text>
+       <rect x="420" y="52" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="442" y="71" text-anchor="middle" font-size="10" fill="#93a4b4">2</text>
+       <rect x="472" y="52" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="494" y="71" text-anchor="middle" font-size="10" fill="#93a4b4">3</text>
+       <rect x="524" y="52" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="546" y="71" text-anchor="middle" font-size="10" fill="#93a4b4">4</text></g>
+    <text x="600" y="71" class="t-small">… oldest ← retention window → newest</text>
+
+    <rect class="nbox" x="260" y="120" width="690" height="52" rx="9" stroke="#4c3a6e"/>
+    <text x="276" y="150" class="t-white" fill="#b195f5">P1</text>
+    <g><rect x="316" y="132" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="338" y="151" text-anchor="middle" font-size="10" fill="#93a4b4">0</text>
+       <rect x="368" y="132" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="390" y="151" text-anchor="middle" font-size="10" fill="#93a4b4">1</text>
+       <rect x="420" y="132" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="442" y="151" text-anchor="middle" font-size="10" fill="#93a4b4">2</text>
+       <rect x="472" y="132" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="494" y="151" text-anchor="middle" font-size="10" fill="#93a4b4">3</text>
+       <rect x="524" y="132" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="546" y="151" text-anchor="middle" font-size="10" fill="#93a4b4">4</text>
+       <rect x="576" y="132" width="44" height="30" rx="5" fill="#2a2344" stroke="#b195f5" stroke-dasharray="4 3"/><text x="598" y="151" text-anchor="middle" font-size="10" fill="#b195f5">5</text></g>
+    <text x="640" y="151" class="t-small" fill="#b195f5">← new record lands here (offset 5)</text>
+
+    <rect class="nbox" x="260" y="200" width="690" height="52" rx="9"/>
+    <text x="276" y="230" class="t-white" fill="#b195f5">P2</text>
+    <g><rect x="316" y="212" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="338" y="231" text-anchor="middle" font-size="10" fill="#93a4b4">0</text>
+       <rect x="368" y="212" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="390" y="231" text-anchor="middle" font-size="10" fill="#93a4b4">1</text>
+       <rect x="420" y="212" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="442" y="231" text-anchor="middle" font-size="10" fill="#93a4b4">2</text>
+       <rect x="472" y="212" width="44" height="30" rx="5" fill="#1b2534" stroke="#31435c"/><text x="494" y="231" text-anchor="middle" font-size="10" fill="#93a4b4">3</text></g>
+    </g>
+
+    <path class="edge" marker-end="url(#mViolet)" d="M316 262 C 316 286, 500 286, 512 264"/>
+    <text x="410" y="284" class="t-small" fill="#3ddc97">billing @ P0: committed next-offset 3 → lag = 2</text>
+    <path class="edge" marker-end="url(#mViolet)" d="M568 264 C 580 286, 380 286, 372 262"/>
+    <text x="700" y="284" class="t-small" fill="#3ddc97">billing @ P1: committed next-offset 5 → lag = 0</text>
+
+    <!-- groups -->
+    <rect class="nbox" x="20" y="316" width="430" height="118" rx="10"/>
+    <text x="40" y="340" class="t-title">Consumer group “billing” — lease-based</text>
+    <text x="40" y="358" class="t-sub">stream_group_join(topic, group, lease=30) = join + heartbeat</text>
+    <text x="40" y="374" class="t-sub">assignment: round-robin by connection id · m1 → P0, P2 · m2 → P1</text>
+    <text x="40" y="390" class="t-sub">generation increments on every membership change (rebalance signal)</text>
+    <text x="40" y="406" class="t-sub">disconnect removes a member immediately · stream_group_leave drains</text>
+    <text x="40" y="422" class="t-sub" fill="#ffc857">server refuses commits from members that no longer own a partition</text>
+
+    <rect class="nbox" x="470" y="316" width="480" height="118" rx="10"/>
+    <text x="490" y="340" class="t-title">Fetch ≠ commit</text>
+    <text x="490" y="358" class="t-sub">stream_fetch(topic, partition, offset, max ≤ 1024) replays records</text>
+    <text x="490" y="374" class="t-sub">stream_commit(topic, group, partition, next_offset) — durable, per</text>
+    <text x="490" y="390" class="t-sub">group/partition. Process first, commit after → a crash in between</text>
+    <text x="490" y="406" class="t-sub">replays: at-least-once by design, exactly-once is not claimed.</text>
+    <text x="490" y="422" class="t-sub" fill="#ffc857">Retention ignores consumer commits — stay inside the window.</text>
+
+    <text x="490" y="464" text-anchor="middle" class="t-small" fill="#ff7b7b">Storage note: retained records live in memory in front of one WAL — max_bytes bounds RAM as well as disk. Records are never removed by reading; only retention removes them.</text>
+  </svg></div>
+
+  <div class="fname">python — keyed produce + group consume</div>
+<pre><span class="k">with</span> KuttiDBClient(port=7379) <span class="k">as</span> db:
+    db.stream_declare(<span class="s">"payments"</span>, partitions=3, max_bytes=64*1024*1024, max_age=3600)
+
+    r = db.stream_append(<span class="s">"payments"</span>, payload, key=<span class="s">"u-42"</span>)   <span class="c"># → {partition, offset}</span>
+
+    <span class="k">while</span> <span class="k">True</span>:
+        a = db.stream_group_join(<span class="s">"payments"</span>, <span class="s">"billing"</span>, lease=30)  <span class="c"># heartbeat each loop</span>
+        <span class="k">for</span> p <span class="k">in</span> a.partitions:
+            off = db.stream_group_offset(<span class="s">"payments"</span>, <span class="s">"billing"</span>, p) <span class="k">or</span> 0
+            recs = db.stream_fetch(<span class="s">"payments"</span>, partition=p, offset=off, max_records=256)
+            <span class="k">for</span> rec <span class="k">in</span> recs:
+                handle(rec[<span class="s">"value"</span>])
+                db.stream_commit(<span class="s">"payments"</span>, <span class="s">"billing"</span>, p, rec[<span class="s">"offset"</span>] + 1)</pre>
+</section>
+
+<!-- ============================= SINGLE-FLIGHT ============================= -->
+<section id="singleflight">
+  <h2><span class="no">08</span>Anti-stampede — single-flight &amp; stale-while-revalidate</h2>
+  <p class="lede">When a hot key expires, a thousand clients normally thunder toward your database. KuttiDB coordinates the
+     miss <b>server-side</b>: the first requester claims a lease and loads; everyone else waits for the same result.
+     Negative answers are cached too, so absent keys don’t stampede either.</p>
+
+  <div class="svgbox"><svg viewBox="0 0 980 408" role="img" aria-label="Single-flight sequence">
+    <rect class="nbox" x="20" y="36" width="120" height="46" rx="9"/><text x="80" y="64" text-anchor="middle" class="t-white">client 1</text>
+    <rect class="nbox" x="20" y="116" width="120" height="46" rx="9"/><text x="80" y="144" text-anchor="middle" class="t-white">client 2</text>
+    <rect class="nbox" x="20" y="196" width="120" height="46" rx="9"/><text x="80" y="224" text-anchor="middle" class="t-white">client 3</text>
+
+    <path class="edge" marker-end="url(#mCyan)" d="M140 59 L336 70"/>
+    <text x="238" y="50" text-anchor="middle" class="t-small">get_or_load("hot-key")</text>
+    <path class="edge" marker-end="url(#mCyan)" d="M140 139 L336 128"/>
+    <path class="edge" marker-end="url(#mCyan)" d="M140 219 L336 136"/>
+
+    <rect class="nbox" x="340" y="36" width="310" height="110" rx="10" stroke="#7c3aed" stroke-opacity="0.5"/>
+    <text x="360" y="60" class="t-title" fill="#b195f5">GET_OR_CLAIM — server-side single-flight</text>
+    <text x="360" y="80" class="t-sub">client 1 → claimed: in-memory lease (≤ 60 s)</text>
+    <text x="360" y="96" class="t-sub">clients 2, 3 → wait: deferred, ≤ 256/key,</text>
+    <text x="360" y="112" class="t-sub">server-side timeout sweep — never blocks an event loop</text>
+    <text x="360" y="130" class="t-sub" fill="#ffc857">loader crash? lease expires → key claimable again</text>
+
+    <path class="edge" marker-end="url(#mG)" d="M650 70 L746 70"/>
+    <text x="698" y="60" text-anchor="middle" class="t-small">loader runs once</text>
+    <rect class="nbox" x="750" y="40" width="200" height="60" rx="10"/>
+    <text x="850" y="64" text-anchor="middle" class="t-white">your origin</text>
+    <text x="850" y="82" text-anchor="middle" class="t-sub">DB / API — hit exactly 1×</text>
+    <path class="edge" marker-end="url(#mGreen)" d="M746 88 L650 96"/>
+
+    <rect class="nbox" x="340" y="176" width="310" height="84" rx="10" stroke="#2f5c46"/>
+    <text x="360" y="200" class="t-title" fill="#3ddc97">PUT_AND_RELEASE(value, ttl)</text>
+    <text x="360" y="218" class="t-sub">wakes every waiter of that key with the</text>
+    <text x="360" y="234" class="t-sub">same value. negative=1 caches an absence</text>
+    <text x="360" y="250" class="t-sub">(4,096 entries, TTL 60 s) · plain PUTs wake too</text>
+
+    <path class="edge" marker-end="url(#mGreen)" d="M340 200 C 240 210, 220 160, 142 142"/>
+    <path class="edge" marker-end="url(#mGreen)" d="M340 236 C 240 240, 220 232, 142 224"/>
+    <text x="225" y="258" text-anchor="middle" class="t-small" fill="#3ddc97">all three get the same value</text>
+
+    <rect class="nbox" x="700" y="140" width="260" height="200" rx="10"/>
+    <text x="720" y="164" class="t-title" fill="#f472b6">Stale-while-revalidate</text>
+    <text x="720" y="182" class="t-sub">put_swr(ttl, stale_for, refresh_after?)</text>
+    <text x="720" y="198" class="t-sub">keeps a stale copy — memory-only,</text>
+    <text x="720" y="214" class="t-sub">≤ 4,096 entries / 32 MiB, windows ≤ 7 days</text>
+    <text x="720" y="236" class="t-sub">get_or_refresh: fresh → value (0)</text>
+    <text x="720" y="252" class="t-sub">expired → stale (7) instantly + holder=1</text>
+    <text x="720" y="268" class="t-sub">refresh-due → (8): one caller revalidates</text>
+    <text x="720" y="290" class="t-sub" fill="#ffc857">plain GET never changes:</text>
+    <text x="720" y="306" class="t-sub" fill="#ffc857">expired = miss. Coordination state is</text>
+    <text x="720" y="322" class="t-sub" fill="#ffc857">ephemeral — cleared by restart, never persisted.</text>
+  </svg></div>
+
+  <div class="fname">python — cache-aside without stampedes</div>
+<pre><span class="k">def</span> loader():
+    data = expensive_db_call()          <span class="c"># runs once per miss, no matter how many waiters</span>
+    <span class="k">return</span> json.dumps(data).encode()    <span class="c"># return None → negatively cached (absence)</span>
+
+value = db.get_or_load(<span class="s">"hot-key"</span>, loader, ttl=60, lease=5, wait=10)
+
+<span class="c"># stale-while-revalidate: serve stale instantly while one caller refreshes</span>
+db.put_swr(<span class="s">"hot-key"</span>, value, ttl=60, stale_for=30, refresh_after=45)
+result = db.get_or_load_swr(<span class="s">"hot-key"</span>, loader, ttl=60, stale_for=30)</pre>
+</section>
+
+<!-- ============================= PRODUCTION ============================= -->
+<section id="production">
+  <h2><span class="no">09</span>Running it in production</h2>
+  <p class="lede">KuttiDB ships as one executable with checked-in Docker and Kubernetes assets. Pick the shape that matches
+     your durability needs — and remember the honest rule: <b>durable mode is single-node durability</b>. It survives process
+     crashes and clean restarts, not disk or machine loss.</p>
+
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="t-bare">Bare metal / VM</button>
+    <button class="tab" data-tab="t-docker">Docker Compose</button>
+    <button class="tab" data-tab="t-k8s">Kubernetes</button>
+  </div>
+
+  <div id="t-bare" class="tabpanel active">
+    <div class="fname">build + run (loopback, authenticated, durable)</div>
+<pre>make                 <span class="c"># builds kuttidb, kuttidb-bench, embedded lib (TLS=1 by default)</span>
+make test            <span class="c"># core, platform, queues, exchanges, clients, crash tests</span>
+
+umask 077
+openssl rand -hex 32 &gt; /run/kuttidb.token      <span class="c"># owner-only token file (1–1024 bytes)</span>
+
+./kuttidb 7379 /var/lib/kuttidb/kuttidb.wal 100 \
+  --bind 127.0.0.1 \
+  --auth-file /run/kuttidb.token \
+  --durability always \
+  --metrics-bind 127.0.0.1:9099
+
+<span class="c"># positionals: [PORT [WAL [FSYNC_MS [UNIX_PATH [MAX_MEM_MB [EMBED_PATH]]]]]]</span>
+<span class="c"># cross untrusted networks? add --tls-cert / --tls-key  (or terminate TLS at your LB)</span></pre>
+    <div class="callout"><b>Flag intuition:</b> <span class="mono">FSYNC_MS</span> only tunes the <i>periodic</i> cache mode —
+      queues, streams and atomic ops always fsync at their own acknowledgement points.
+      <span class="mono">MAX_MEM_MB</span> budgets the <i>evictable cache</i> only; queue/stream data is accounted separately
+      (<span class="mono">--stream-wal</span> topics are RAM-bounded by their declared <span class="mono">max_bytes</span>).</div>
+  </div>
+
+  <div id="t-docker" class="tabpanel">
+    <div class="fname">docker compose (from the repo’s compose.yaml)</div>
+<pre>umask 077
+head -c 32 /dev/urandom | base64 &gt; ./kuttidb.token
+KUTTIDB_AUTH_TOKEN_FILE=<span class="s">"$PWD/kuttidb.token"</span> docker compose up --build</pre>
+    <p style="color:var(--muted);font-size:14px;margin-top:6px">The checked-in Compose file runs <b>one durable instance</b>:
+      named volume at <span class="mono">/var/lib/kuttidb</span>, loopback-only ports 7379 + 9099,
+      <span class="mono">--durability always</span>, auth token from a mounted secret, non-root image (uid 10001, plaintext
+      build — terminate TLS at your ingress). <span class="mono">docker stop</span> sends SIGTERM → WALs are flushed and closed cleanly.
+      Remove the volume only when intentionally discarding cache <b>and</b> queue state.</p>
+    <div class="callout red"><b>Do not scale to two containers.</b> There is no replication: two writers on separate volumes
+      are independent databases, not a cluster.</div>
+  </div>
+
+  <div id="t-k8s" class="tabpanel">
+    <div class="fname">kubernetes — two supported shapes</div>
+<pre><span class="c"># create the auth + metrics token secret first</span>
+kubectl create secret generic kuttidb-auth --from-file=token=./kuttidb.token
+
+<span class="c"># durable: 1-replica StatefulSet, PVC, --durability always, auth on 0.0.0.0</span>
+kubectl apply -f deploy/kubernetes/durable-single-node.yaml
+
+<span class="c"># or: evictable cache-only Deployment, no volume, disposable pods</span>
+kubectl apply -f deploy/kubernetes/ephemeral-cache.yaml</pre>
+    <div class="grid g2" style="margin-top:14px">
+      <div class="card"><i class="bar c-green"></i><h4>Durable StatefulSet gives you</h4>
+        <p>PVC via <span class="mono">volumeClaimTemplates</span> at <span class="mono">/var/lib/kuttidb</span> · auth + metrics
+           token from a secret (staged to a 0600 tmpfs by the entrypoint) · <span class="mono">/ready</span> +
+           <span class="mono">/live</span> probes with a Bearer header (503 while any WAL is fail-closed) · non-root
+           uid 10001, caps dropped, read-only rootfs.</p></div>
+      <div class="card"><i class="bar c-amber"></i><h4>Keep in mind</h4>
+        <p><b>replicas must stay 1</b> on the durable manifest. Survives pod restarts and rescheduling onto a healthy node;
+           not node/disk loss. Give <span class="mono">terminationGracePeriodSeconds</span> room for a final fsync (default 30 s
+           is ample). Tune requests/limits to the working set.</p></div>
+    </div>
+  </div>
+
+  <h3>Production checklist</h3>
+  <div class="grid g2">
+    <label class="check"><input type="checkbox"><span><b>1 · Durability mode matches the data</b>
+      <i><span class="mono">--durability always</span> for must-survive cache writes; queues/streams/atomic ops fsync regardless of mode.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>2 · Auth always on</b>
+      <i>Non-loopback binds are refused without <span class="mono">--auth-file</span> (0600, owner-only). Rotate by restarting with a new file.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>3 · TLS where traffic can be observed</b>
+      <i>Native TLS (<span class="mono">make TLS=1</span>) or terminate at ingress/VPN. AUTH alone does not encrypt.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>4 · Never expose plaintext to the internet</b>
+      <i>Loopback by default; use a private network, VPN or mutually-authenticated proxy in front.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>5 · One data dir on a reliable volume</b>
+      <i>All WALs + snapshot in one directory — back up the directory, not individual files.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>6 · Size the two memory knobs</b>
+      <i><span class="mono">MAX_MEM_MB</span> = evictable cache budget. Stream <span class="mono">max_bytes</span> = RAM bound for retained records.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>7 · Metrics + authenticated probes</b>
+      <i><span class="mono">--metrics-bind</span> (:9099) → /metrics, /ready, /live. Bearer token required off-loopback. TCP-only checks are liveness-only.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>8 · Alert on the durability flags</b>
+      <i><span class="mono">wal_failed</span> / <span class="mono">queue_wal_failed</span> / <span class="mono">stream_wal_failed</span> and <span class="mono">kuttidb_ready</span> mean “cannot durably acknowledge”.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>9 · Scheduled cold backups + restore drill</b>
+      <i>Graceful stop → tar the data dir → verify with <span class="mono">kuttidb-cli health</span>. Live copies are not supported.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>10 · Every business queue gets a DLQ + max_deliveries</b>
+      <i>And a bounded <span class="mono">max_depth</span>: a full queue fails publishes closed instead of dropping silently.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>11 · Run as non-root</b>
+      <i>Image uid 10001; 0600 persistence files; read-only rootfs + dropped capabilities in the K8s manifests.</i></span></label>
+    <label class="check"><input type="checkbox"><span><b>12 · One replica on durable storage — no more</b>
+      <i>Replicas would be independent databases. Availability needs replication, which is future work.</i></span></label>
+  </div>
+</section>
+
+<!-- ============================= OPERATIONS ============================= -->
+<section id="operations">
+  <h2><span class="no">10</span>Day-2 operations</h2>
+
+  <h3>Monitoring — what to scrape and watch</h3>
+  <p class="lede" style="margin-bottom:10px"><span class="mono">--metrics-bind IPv4:PORT</span> serves Prometheus exposition
+     format at <span class="mono">/metrics</span>, plus <span class="mono">/ready</span> and <span class="mono">/live</span>.
+     Non-loopback scrapes need <span class="mono">--metrics-token-file</span> + <span class="mono">Authorization: Bearer …</span>.</p>
+  <table>
+    <tr><th>Signal</th><th>Healthy</th><th>Meaning when it moves</th></tr>
+    <tr><td class="mono">kuttidb_ready / /ready</td><td class="ok">1 / 200</td><td><span class="no2">503</span> while cache, queue or stream persistence is fail-closed — the pod is removed from Service endpoints.</td></tr>
+    <tr><td class="mono">wal_failed (+ queue_/stream_)</td><td class="ok">0</td><td><span class="no2">1</span> latches fail-closed: mutations answer 0x02 until restart. Usually disk full / permission.</td></tr>
+    <tr><td class="mono">kuttidb_queue_depth{name}</td><td>steady</td><td>Climbing = consumers too slow. Climbing <span class="mono">redeliveries</span> = failures/timeouts. Check <span class="mono">deadlettered</span> + the DLQ.</td></tr>
+    <tr><td class="mono">kuttidb_queue_inflight{name}</td><td>&lt; prefetch × consumers</td><td>Stuck high = workers stalled or visibility leases about to expire.</td></tr>
+    <tr><td class="mono">kuttidb_topic_records / _retained_bytes</td><td>&lt; max_bytes</td><td>Approaching the declared bound: retention will trim old records consumers may still need.</td></tr>
+    <tr><td class="mono">stream_group_lag (CLI/API)</td><td>→ 0</td><td>Growing = group behind; add members (≤ partitions), bigger fetches, or faster handlers.</td></tr>
+    <tr><td class="mono">exchange_unroutable</td><td>~0</td><td>Publishes matched no binding — check bindings / routing keys / alternate exchange.</td></tr>
+    <tr><td class="mono">auth_failures, rejected_connections</td><td>~0</td><td>Rising = wrong/leaked token or scanning. Rotate the token (restart), check client config.</td></tr>
+    <tr><td class="mono">mem_bytes / allocated_bytes</td><td>&lt; budget</td><td>Cache pressure → evictions begin; raise <span class="mono">MAX_MEM_MB</span> or shorten TTLs.</td></tr>
+  </table>
+
+  <div class="fname">verify + scrape</div>
+<pre>./kuttidb-cli health                        <span class="c"># exit 0 only when all persistence engines are writable</span>
+./kuttidb-cli stats                         <span class="c"># durability, event_backend, wal_failed, depths…</span>
+./kuttidb-cli queues                        <span class="c"># inventory: depth + in-flight per queue</span>
+curl -H <span class="s">"Authorization: Bearer $(cat ./kuttidb.token)"</span> \
+     http://127.0.0.1:9099/metrics | head</pre>
+
+  <h3>Backup &amp; restore</h3>
+  <div class="grid g3">
+    <div class="card"><i class="bar c-green"></i><h4>1 · Cold backup (the only supported kind)</h4>
+      <p><span class="mono">kill -TERM $(pidof kuttidb)</span> (or delete the pod) — graceful shutdown flushes and closes every
+         engine — then <span class="mono">tar -czf backup.tgz /var/lib/kuttidb</span>.</p></div>
+    <div class="card"><i class="bar c-cyan"></i><h4>2 · Restore</h4>
+      <p>Copy the directory back, start with the same flags. Recovery replays each CRC-checked WAL and idempotently truncates
+         torn tails — restoring twice is safe. Cross-host restore works (all state is file-based).</p></div>
+    <div class="card"><i class="bar c-red"></i><h4>3 · What a backup restores</h4>
+      <p>Acknowledged durable queue messages, stream records, group offsets and persisted cache records as of the last clean
+         stop. Evictable entries that were evicted are gone. <b>Live copies of open WALs are torn copies — don’t.</b></p></div>
+  </div>
+
+  <h3>Upgrades</h3>
+  <p class="lede" style="margin-bottom:8px">Upgrade = <b>clean stop → replace binary → start on the same data directory</b>.
+     Protocol <span class="mono">major.minor</span>: different majors are refused at capability negotiation; higher minors are
+     additive (clients check the feature bitset). A crash mid-upgrade resumes through the tested recovery path.
+     Never run an <i>older</i> binary against data written by a <i>newer</i> one unless its release notes say formats are unchanged.</p>
+
+  <h3>Troubleshooting quick reference</h3>
+  <table>
+    <tr><th>Symptom</th><th>What it means</th><th>Do this</th></tr>
+    <tr><td class="mono">/ready 503 · HEALTH 0x02 · ops → 0x02</td><td>A WAL latched fail-closed (disk full, permission)</td><td>Fix the disk/permission, restart; recovery replays the valid prefix.</td></tr>
+    <tr><td class="mono">queue_publish → ERROR</td><td>Target queue full (max_depth counts in-flight) or persistence failure</td><td>Raise depth / scale consumers / free disk. Nothing was confirmed.</td></tr>
+    <tr><td class="mono">exchange_publish → MISS</td><td>Unroutable — no binding matched</td><td>Check bindings &amp; routing keys; declare an alternate exchange; watch the counter.</td></tr>
+    <tr><td class="mono">GET MISS on a key you “set”</td><td>TTL expired, or evicted by the memory budget</td><td>Cache is best-effort by policy. Must-survive data belongs in durable queues/streams.</td></tr>
+    <tr><td class="mono">atomic op → ERROR</td><td>Persistence or healthy queue WAL unavailable, or a target queue is non-durable</td><td>Enable <span class="mono">--queue-wal</span>; make all targets durable. Mixed-durability transactions are refused, never degraded.</td></tr>
+    <tr><td class="mono">fetch answers OK, count 0</td><td>Requested stream offset is beyond the retained range</td><td>Replay is position-based — reset to the returned base offset.</td></tr>
+    <tr><td class="mono">Lease conflict on <span class="mono">get_or_claim</span></td><td>Not an error — another loader holds the lease (<span class="mono">wait</span> state)</td><td>Call <span class="mono">wait_for_key</span>; leases self-expire ≤ 60 s.</td></tr>
+  </table>
+
+  <div class="callout green"><b>Proven, not promised:</b> CI’s <span class="mono">container-recovery</span> job seeds durable
+    cache, queue and stream state into a container volume, SIGKILLs the container, restarts on the same volume, and verifies
+    every acknowledged item survived — recorded runs: cache 500/500, queue 50/50, stream 20/20.</div>
+</section>
+
+<!-- ============================= LIMITS ============================= -->
+<section id="limits">
+  <h2><span class="no">11</span>Honest limits, sizing &amp; alternatives</h2>
+
+  <h3>The durability contract, one table</h3>
+  <table>
+    <tr><th>Data class</th><th>Acknowledgement point</th><th>Guarantee after crash / restart</th></tr>
+    <tr><td>Evictable cache entry</td><td>per durability mode (periodic = batched)</td><td>Best effort — may be evicted by policy, may be lost inside the periodic window.</td></tr>
+    <tr><td>Cache entry (<span class="mono">always</span>)</td><td>fsync of cache WAL record before response</td><td class="ok">Present after recovery — healthy single node.</td></tr>
+    <tr><td>Durable queue message</td><td>fsync of queue WAL publish record</td><td class="ok">Present; delivery is at-least-once.</td></tr>
+    <tr><td>Durable ACK</td><td>fsync of queue WAL ACK record</td><td class="ok">Message not removed before its ACK is durable.</td></tr>
+    <tr><td>Stream record / offset commit</td><td>fsync of stream WAL record</td><td class="ok">Same single-node process-crash guarantee.</td></tr>
+    <tr><td>Atomic cache + event</td><td>fsync of the cache WAL commit marker</td><td class="ok">Both sides visible after recovery, or neither.</td></tr>
+  </table>
+  <div class="callout red"><b>A single node does not protect against:</b> disk loss (both WALs share one volume) ·
+    machine/node loss (no replication) · mid-log media corruption (CRC failure = end-of-log). Replication with a documented
+    consensus design is a prerequisite for any availability claim beyond a healthy single node.</div>
+
+  <h3>Sizing &amp; hard limits</h3>
+  <div class="grid g2">
+    <table>
+      <tr><th>Resource</th><th>Limit</th></tr>
+      <tr><td>Key size</td><td>65,535 bytes</td></tr>
+      <tr><td>Value size</td><td>64 MiB default (<span class="mono">--max-value-mb</span>)</td></tr>
+      <tr><td>Batch</td><td>64 MiB default · ≤ 65,536 items (<span class="mono">--max-batch-mb</span>)</td></tr>
+      <tr><td>Clients</td><td>1,024 default (<span class="mono">--max-clients</span>)</td></tr>
+      <tr><td>Event loops</td><td>1–64 (<span class="mono">--threads</span>; default min(CPUs, 4))</td></tr>
+      <tr><td>Queue / exchange / topic names</td><td>255 bytes</td></tr>
+    </table>
+    <table>
+      <tr><th>Resource</th><th>Limit</th></tr>
+      <tr><td>Bindings per exchange</td><td>1,024 — bounds a fanout publish</td></tr>
+      <tr><td>Stream partitions</td><td>1–256 per topic</td></tr>
+      <tr><td>Stream fetch</td><td>≤ 1,024 records &amp; batch-byte budget</td></tr>
+      <tr><td>Group lease</td><td>1–60 s (heartbeat = rejoin)</td></tr>
+      <tr><td>Single-flight</td><td>lease ≤ 60 s · ≤ 256 waiters/key · negatives 4,096 × 60 s</td></tr>
+      <tr><td>SWR registry</td><td>4,096 entries / 32 MiB · windows ≤ 7 days</td></tr>
+    </table>
+  </div>
+
+  <h3>When to use something else</h3>
+  <table>
+    <tr><th>Choose</th><th>When</th></tr>
+    <tr><td>Redis</td><td>You need rich data structures (lists, hashes, sorted sets, Lua) or its ecosystem modules. KuttiDB’s cache is deliberately smaller: key/value + TTL + batch + single-flight.</td></tr>
+    <tr><td>RabbitMQ</td><td>You need AMQP semantics, complex topologies, or a mature broker ecosystem. KuttiDB queues cover the core work-queue contract natively — not AMQP.</td></tr>
+    <tr><td>Kafka</td><td>You need its retention ecosystem, exactly-once transactions, log compaction, or Kafka tooling. KuttiDB streams are a focused, at-least-once subset — use native clients or a bridge.</td></tr>
+    <tr><td>SQLite</td><td>You need queries, secondary indexes, relational integrity. KuttiDB is not a database in that sense.</td></tr>
+  </table>
+
+  <h3>Clients &amp; recorded performance</h3>
+  <div class="grid g2">
+    <div class="card"><i class="bar c-blue"></i><h4>Native clients (protocol v1.5)</h4>
+      <p><b>Python</b> (socket, shared-memory embed, local fallback chain) · <b>Go</b> (built-in pool) · <b>Java</b> ·
+         <b>Rust</b> (Pool) · <b>Node.js</b> (zero deps) · <b>kuttidb-cli</b> · C/C++ embed via
+         <span class="mono">libkuttidb_embed.dylib/.so</span>. All smoke-tested by <span class="mono">make test</span>.</p></div>
+    <div class="card"><i class="bar c-cyan"></i><h4>Recorded benchmarks (evidence, not marketing)</h4>
+      <p>Batched cache ops, 4 clients: <b>3.3 M ops/s</b> (macOS ARM64, p50 244 µs) · <b>7.2 M ops/s</b> (Linux/epoll container),
+         8.4 M @ 8 clients · single-op p50 <b>12–17 µs</b> · durable queue publish <b>22.1 k/s</b> · fanout ×8 ≈
+         <b>92 k durable copies/s</b>. Idle RSS ≈ 1.8 MiB. <span class="mono">make bench-quick / bench-matrix</span> reproduce them.</p></div>
+  </div>
+</section>
+
+<!-- ============================= CHEAT SHEET ============================= -->
+<section id="cheatsheet">
+  <h2><span class="no">12</span>Cheat sheet</h2>
+  <div class="grid g2">
+    <div>
+      <div class="fname">server lifecycle</div>
+<pre>./kuttidb 7379 kuttidb.wal 100          <span class="c"># minimal: port, WAL, fsync-ms</span>
+./kuttidb --features                     <span class="c"># check TLS / build capabilities</span>
+kill -TERM $(pidof kuttidb)              <span class="c"># graceful: snapshot + flush + sync</span></pre>
+      <div class="fname">cli</div>
+<pre>kuttidb-cli put greeting "hello"         <span class="c"># or '-' to read value from stdin</span>
+kuttidb-cli get greeting
+kuttidb-cli mget k1 k2 k3
+kuttidb-cli mput                         <span class="c"># KEY&lt;TAB&gt;VALUE lines on stdin</span>
+kuttidb-cli stats | health | capabilities
+kuttidb-cli queues | topics | groups
+kuttidb-cli --tls --ca-file ca.pem --auth-file token get k</pre>
+    </div>
+    <div>
+      <div class="fname">the five atomic ops</div>
+<pre>db.put_and_publish(key, val, exchange=, routing_key=, ttl=)
+db.put_and_enqueue(key, val, queue=, ttl=)
+db.delete_and_publish(key, exchange=, routing_key=)
+db.update_and_emit(key, val, exchange=, routing_key=)  <span class="c"># conditional</span>
+<span class="c"># each → {"tx_id": …, "routed": n} — one durable commit id</span></pre>
+      <div class="fname">status codes on the wire</div>
+<pre>0x00  OK / HIT
+0x01  MISS  (cache miss · unroutable publish · not found)
+0x02  ERROR (durable effect did NOT happen — fail closed)</pre>
+      <div class="fname">files in one data directory</div>
+<pre>kuttidb.wal          <span class="c"># cache WAL (CRC32)</span>
+kuttidb.wal.snap     <span class="c"># cache snapshot / checkpoint</span>
+kuttidb.wal.queues   <span class="c"># queue WAL (declare/publish/delivery/ACK)</span>
+kuttidb.wal.streams  <span class="c"># stream WAL (appends + group commits)</span></pre>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    Built from the KuttiDB repository documentation — every claim above traces to one of:
+    <div class="src">
+      <span>README.md</span><span>ARCHITECTURE.md</span><span>PROTOCOL.md (v1.5)</span><span>DURABILITY.md</span>
+      <span>QUEUES.md</span><span>EXCHANGES.md</span><span>STREAMS.md</span><span>SECURITY.md</span>
+      <span>DEPLOYMENT.md</span><span>DOCKER.md</span><span>KUBERNETES.md</span><span>BENCHMARKS.md</span><span>MIGRATION.md</span>
+    </div>
+    <p style="margin-top:14px">KuttiDB — one binary · one configuration · one data directory. Numbers are recorded runs,
+    not guarantees on other hardware. Durability = single-node, process-crash-safe; replication is future work.</p>
+  </div>
+</footer>
+
+<script>
+  // tabs
+  document.querySelectorAll('.tab').forEach(function(t){
+    t.addEventListener('click', function(){
+      document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active')});
+      document.querySelectorAll('.tabpanel').forEach(function(x){x.classList.remove('active')});
+      t.classList.add('active');
+      document.getElementById(t.dataset.tab).classList.add('active');
+    });
+  });
+  // copy buttons on code blocks
+  document.querySelectorAll('pre').forEach(function(pre){
+    var btn = document.createElement('button');
+    btn.className = 'copy'; btn.textContent = 'copy';
+    btn.addEventListener('click', function(){
+      var text = pre.innerText.replace(/copy\s*$/,'');
+      navigator.clipboard.writeText(text).then(function(){ btn.textContent='copied ✓';
+        setTimeout(function(){btn.textContent='copy';},1400); });
+    });
+    pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

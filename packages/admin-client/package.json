@@ -1,0 +1,19 @@
+{
+  "name": "@kuttidb/admin-client",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1-beta",
+  "scripts": {
+    "generate": "openapi-typescript ../../openapi/management-v1.yaml -o src/generated/management.ts",
+    "check:generated": "pnpm generate && git diff --exit-code -- src/generated/management.ts",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.10.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@kuttidb/ui",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1-beta",
+  "scripts": {
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

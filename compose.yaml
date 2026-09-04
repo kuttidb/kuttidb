@@ -1,0 +1,38 @@
+services:
+  kuttidb:
+    build: .
+    image: kuttidb:local
+    ports:
+      - "127.0.0.1:7379:7379"
+      - "127.0.0.1:9099:9099"
+    command:
+      - "7379"
+      - "/var/lib/kuttidb/kuttidb.wal"
+      - "100"
+      - "-"
+      - "64"
+      - "--bind"
+      - "0.0.0.0"
+      - "--auth-file"
+      - "/var/lib/kuttidb/auth.token"
+      - "--durability"
+      - "always"
+      - "--queue-wal"
+      - "/var/lib/kuttidb/queue.wal"
+      # Loopback-only scrape: no metrics token required on 127.0.0.1.
+      - "--metrics-bind"
+      - "127.0.0.1:9099"
+    volumes:
+      - kuttidb-data:/var/lib/kuttidb
+    secrets:
+      - kuttidb-token
+    environment:
+      KUTTIDB_AUTH_SOURCE: /run/secrets/kuttidb-token
+    restart: unless-stopped
+
+secrets:
+  kuttidb-token:
+    file: ${KUTTIDB_AUTH_TOKEN_FILE:?Set this to a path containing a 1..1024-byte token}
+
+volumes:
+  kuttidb-data:

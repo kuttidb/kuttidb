@@ -1,0 +1,124 @@
+# Create the referenced token first; see DEPLOYMENT.md. This is a single-node
+# durable deployment, not a replicated no-node-loss configuration.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kuttidb
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: kuttidb
+    app.kubernetes.io/component: durable
+  ports:
+    - name: client
+      port: 7379
+      targetPort: client
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kuttidb
+  labels:
+    app.kubernetes.io/name: kuttidb
+    app.kubernetes.io/component: durable
+spec:
+  serviceName: kuttidb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuttidb
+      app.kubernetes.io/component: durable
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kuttidb
+        app.kubernetes.io/component: durable
+    spec:
+      securityContext: {fsGroup: 10001}
+      containers:
+        - name: kuttidb
+          image: kuttidb:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KUTTIDB_AUTH_SOURCE
+              value: /etc/kuttidb-auth/token
+            - name: KUTTIDB_AUTH_DEST
+              value: /run/kuttidb/auth.token
+            - name: KUTTIDB_METRICS_TOKEN_SOURCE
+              value: /etc/kuttidb-auth/token
+            - name: KUTTIDB_METRICS_TOKEN_DEST
+              value: /run/kuttidb/metrics.token
+          args:
+            - "7379"
+            - "/var/lib/kuttidb/kuttidb.wal"
+            - "100"
+            - "-"
+            - "256"
+            - "--bind"
+            - "0.0.0.0"
+            - "--auth-file"
+            - "/run/kuttidb/auth.token"
+            - "--durability"
+            - "always"
+            - "--queue-wal"
+            - "/var/lib/kuttidb/queue.wal"
+            # Prometheus scrape plus authenticated readiness/liveness probes.
+            - "--metrics-bind"
+            - "0.0.0.0:9099"
+            - "--metrics-token-file"
+            - "/run/kuttidb/metrics.token"
+          ports:
+            - name: client
+              containerPort: 7379
+            - name: metrics
+              containerPort: 9099
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kuttidb
+            - name: auth
+              mountPath: /etc/kuttidb-auth
+              readOnly: true
+            - name: auth-runtime
+              mountPath: /run/kuttidb
+          readinessProbe:
+            # /ready reports 503 while any persistence engine is degraded.
+            # The bearer token must equal the metrics token; see DEPLOYMENT.md.
+            httpGet:
+              path: /ready
+              port: metrics
+              httpHeaders:
+                - name: Authorization
+                  value: Bearer REPLACE_WITH_METRICS_TOKEN
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: metrics
+              httpHeaders:
+                - name: Authorization
+                  value: Bearer REPLACE_WITH_METRICS_TOKEN
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: auth
+          secret:
+            secretName: kuttidb-auth
+            defaultMode: 0440
+        - name: auth-runtime
+          emptyDir: {medium: Memory}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: {storage: 5Gi}

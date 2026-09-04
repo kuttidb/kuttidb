@@ -1,0 +1,520 @@
+openapi: 3.1.0
+info:
+  title: KuttiDB Management API
+  version: v1
+  description: Bounded authenticated Management API. It is disabled by default; mutation-capable deployments require an audit log.
+servers:
+  - url: http://127.0.0.1:7380/api/admin/v1
+security:
+  - bearerAuth: []
+paths:
+  /capabilities:
+    get: { summary: Discover Management API capabilities, responses: { '200': { description: Capabilities, content: { application/json: { schema: { $ref: '#/components/schemas/Capabilities' } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } } }
+  /status:
+    get: { summary: Read bounded process and engine status, responses: { '200': { description: Status, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } } }
+  /jobs:
+    get:
+      summary: List bounded asynchronous Management jobs
+      responses: { '200': { description: Job collection } }
+  /jobs/{job_id}:
+    get:
+      summary: Inspect one asynchronous Management job
+      parameters: [ { name: job_id, in: path, required: true, schema: { type: string, pattern: '^j-[0-9]+$' } } ]
+      responses: { '200': { description: Job state }, '404': { $ref: '#/components/responses/NotFound' } }
+    delete:
+      summary: Cancel a queued Management job
+      parameters: [ { name: job_id, in: path, required: true, schema: { type: string, pattern: '^j-[0-9]+$' } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Cancellation result }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
+  /keyspaces:
+    get: { summary: List Keyspace aggregate state, parameters: [ { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: Keyspaces, content: { application/json: { schema: { $ref: '#/components/schemas/Collection' } } } }, '400': { $ref: '#/components/responses/BadRequest' } } }
+  /queues:
+    get: { summary: List Queues without message bodies, parameters: [ { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: Queues, content: { application/json: { schema: { $ref: '#/components/schemas/Collection' }, example: { data: [ { name: jobs, ready_depth: 2, in_flight: 1 } ], meta: { count: 1, limit: 100, truncated: false } } } } }, '400': { $ref: '#/components/responses/BadRequest' } } }
+    post:
+      summary: Declare a Queue
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/QueueDeclare' } } } }
+      responses: { '201': { description: Queue declaration }, '409': { $ref: '#/components/responses/Conflict' } }
+  /streams:
+    get: { summary: List Streams without record bodies, parameters: [ { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: Streams, content: { application/json: { schema: { $ref: '#/components/schemas/Collection' } } } } } }
+    post:
+      summary: Declare a Stream
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/StreamDeclare' } } } }
+      responses: { '201': { description: Stream declaration } }
+  /consumer-groups:
+    get: { summary: List Consumer Groups without member identities, parameters: [ { $ref: '#/components/parameters/Limit' } ], responses: { '200': { description: Consumer Groups, content: { application/json: { schema: { $ref: '#/components/schemas/Collection' } } } } } }
+  /keyspaces/default/entries:
+    get:
+      summary: List bounded Keyspace entry metadata
+      description: The collection snapshot_revision is a native process-lifetime mutation epoch. The opaque cursor is also process-lifetime, so both become invalid on restart rather than implying cross-restart continuity.
+      parameters: [ { $ref: '#/components/parameters/Limit' }, { name: prefix, in: query, required: false, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, description: Exact binary-key prefix, encoded as a canonical opaque binary identifier. }, { name: expires, in: query, required: false, schema: { type: string, enum: [ present, none ] }, description: Filter live entries by whether they have an expiry. }, { name: cursor, in: query, required: false, schema: { type: string, pattern: '^ke:[0-9a-f]{32}$' }, description: Opaque process-lifetime cursor, valid for ten minutes and tied to the prefix and expiry filters. } ]
+      responses: { '200': { description: Entry metadata collection }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /keyspaces/default:
+    get:
+      summary: Read aggregate state for the default Keyspace
+      responses: { '200': { description: Default Keyspace aggregate state with a process-lifetime mutation revision and ETag, headers: { ETag: { schema: { type: string, pattern: '^"k-[0-9]+"$' }, description: Current process-lifetime Keyspace mutation revision. } } }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /keyspaces/default/entries/{entry_id}:
+    get:
+      summary: Read an exact Keyspace entry
+      parameters: [ { $ref: '#/components/parameters/EntryId' } ]
+      responses: { '200': { description: Entry value }, '404': { $ref: '#/components/responses/NotFound' } }
+    put:
+      summary: Put an exact Keyspace entry through the durable adapter
+      parameters: [ { $ref: '#/components/parameters/EntryId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KeyspacePut' } } } }
+      responses: { '200': { description: Durable put result }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+    delete:
+      summary: Delete an exact Keyspace entry through the durable adapter
+      parameters: [ { $ref: '#/components/parameters/EntryId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Deletion result }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /keyspaces/default/entries:batch-get:
+    post:
+      summary: Read up to 100 exact Keyspace entries in request order
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BatchGet' } } } }
+      responses: { '200': { description: Values are Base64-encoded only when they fit the response cap }, '400': { $ref: '#/components/responses/BadRequest' } }
+  /keyspaces/default/entries:batch-put:
+    post:
+      summary: Validate then durably write up to 100 Keyspace entries in request order
+      description: "Every identifier, Base64 value, and optional TTL is validated before the first write. The current native Keyspace adapter has no multi-key transaction, so successful responses explicitly report atomic: false."
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ entries ], properties: { entries: { type: array, minItems: 1, maxItems: 100, items: { type: object, required: [ entry_id, value ], properties: { entry_id: { type: string }, value: { type: string, description: Canonical Base64 value }, ttl_ms: { type: integer, minimum: 0 } } } } } } } } }
+      responses: { '200': { description: Ordered non-atomic batch result }, '400': { $ref: '#/components/responses/BadRequest' }, '500': { description: A non-atomic batch may be partially applied } }
+  /keyspaces/default/entries:batch-delete:
+    post:
+      summary: Validate then durably delete up to 100 Keyspace entries in request order
+      description: "Every identifier is validated before the first delete. The result reports missing entries and explicitly states atomic: false."
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ entry_ids ], properties: { entry_ids: { type: array, minItems: 1, maxItems: 100, items: { type: string } } } } } } }
+      responses: { '200': { description: Ordered non-atomic delete result }, '400': { $ref: '#/components/responses/BadRequest' }, '500': { description: A non-atomic batch may be partially applied } }
+  /keyspaces/default/claims:
+    post:
+      summary: Acquire a bounded opaque single-flight claim for one exact Keyspace entry
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ entry_id ], properties: { entry_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, lease_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 } } } } } }
+      responses: { '201': { description: Claim identifier and key }, '409': { $ref: '#/components/responses/Conflict' }, '429': { description: Claim registry exhausted } }
+  /keyspaces/default/claims/{claim_id}:
+    get:
+      summary: Inspect a live opaque Keyspace claim without exposing its native owner token
+      parameters: [ { name: claim_id, in: path, required: true, schema: { type: string, pattern: '^kc:[0-9a-f]{32}$' } } ]
+      responses: { '200': { description: Claim key and remaining lease }, '410': { description: Claim has expired or is no longer reusable } }
+  /keyspaces/default/claims/{claim_id}:complete:
+    post:
+      summary: Durably write a Base64 value and terminate the matching opaque Keyspace claim
+      parameters: [ { name: claim_id, in: path, required: true, schema: { type: string, pattern: '^kc:[0-9a-f]{32}$' } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/KeyspacePut' } } } }
+      responses: { '200': { description: Durable completion result }, '409': { $ref: '#/components/responses/Conflict' }, '410': { description: Claim expired } }
+  /keyspaces/default/claims/{claim_id}:release:
+    post:
+      summary: Release a live opaque Keyspace claim without writing a value
+      parameters: [ { name: claim_id, in: path, required: true, schema: { type: string, pattern: '^kc:[0-9a-f]{32}$' } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Release result }, '409': { $ref: '#/components/responses/Conflict' }, '410': { description: Claim expired } }
+  /keyspaces/default/entries/{entry_id}:get-or-refresh:
+    post:
+      summary: Return a current Keyspace value or acquire an opaque claim for an absent entry
+      parameters: [ { $ref: '#/components/parameters/EntryId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { lease_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 } } } } } }
+      responses: { '200': { description: Present Base64 value }, '201': { description: Newly acquired opaque claim }, '409': { $ref: '#/components/responses/Conflict' }, '429': { description: Claim registry exhausted } }
+  /queue-consumers:
+    get:
+      summary: List durable Queue consumers without native owner tokens
+      parameters: [ { $ref: '#/components/parameters/Limit' } ]
+      responses: { '200': { description: Durable Queue consumer collection } }
+    post:
+      summary: Register a durable Queue consumer without exposing its native owner token
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/QueueConsumerDeclare' } } } }
+      responses: { '201': { description: Durable consumer registration } }
+  /queue-consumers/{consumer_id}:
+    get:
+      summary: Inspect one durable Queue consumer without exposing its owner token
+      parameters: [ { $ref: '#/components/parameters/ConsumerId' } ]
+      responses: { '200': { description: Durable Queue consumer }, '404': { $ref: '#/components/responses/NotFound' } }
+    delete:
+      summary: Durably unregister one Queue consumer and requeue its in-flight messages
+      parameters: [ { $ref: '#/components/parameters/ConsumerId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"c-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact consumer_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Durable unregistration result }, '404': { $ref: '#/components/responses/NotFound' }, '412': { description: Consumer ETag changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /queue-consumers/{consumer_id}/deliveries:
+    post:
+      summary: Consume one Queue message through a named durable consumer
+      parameters: [ { $ref: '#/components/parameters/ConsumerId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ queue_id ], properties: { queue_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, visibility_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 } } } } } }
+      responses: { '201': { description: Opaque delivery receipt and Base64 body }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '429': { description: Delivery registry exhausted } }
+  /atomic-operations:
+    post:
+      summary: Execute one native all-or-nothing Keyspace-plus-delivery operation
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AtomicOperation' } } } }
+      responses: { '200': { description: Native transaction identifier and routed Queue count }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /queues/{queue_id}/messages:
+    get:
+      summary: Browse a bounded, non-mutating snapshot of retained Queue messages
+      description: This never consumes, requeues, changes delivery counts, changes visibility, or writes Queue WAL state. Use the opaque `cursor` returned in `meta.next_cursor` to continue a scan. It is tied to this Queue and filter, expires after ten minutes, and is invalid after a server restart; it remains valid if older messages disappear. Bodies are included only when `include=body` and fit the bounded response budget.
+      parameters:
+        - { $ref: '#/components/parameters/QueueId' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { name: cursor, in: query, required: false, schema: { type: string, pattern: '^mc:[0-9a-f]{32}$' }, description: Opaque process-lifetime cursor from meta.next_cursor, valid for ten minutes and tied to this Queue and its state/body filters. }
+        - { name: state, in: query, required: false, schema: { type: string, enum: [ ready, delayed, in-flight ] }, description: Defaults to all retained public states. }
+        - { name: include, in: query, required: false, schema: { type: string, enum: [ body ] }, description: Set to body to request complete Base64 bodies within the aggregate response budget. }
+      responses: { '200': { description: Message snapshot collection }, '400': { $ref: '#/components/responses/BadRequest' }, '404': { $ref: '#/components/responses/NotFound' } }
+    post:
+      summary: Publish one Queue message
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EncodedBody' } } } }
+      responses: { '201': { description: Publish result } }
+  /queues/{queue_id}/messages:batch:
+    post:
+      summary: Publish a bounded batch of Queue messages
+      description: Validates every complete Base64 body and capacity-checks the entire batch before it writes any Queue message. Batch messages do not carry per-message TTL values.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ messages ], properties: { messages: { type: array, minItems: 1, maxItems: 100, items: { type: object, required: [ body ], properties: { body: { type: string, description: Canonical padded Base64 data } } } } } } } } }
+      responses: { '201': { description: Durable batch publish count }, '409': { $ref: '#/components/responses/Conflict' } }
+  /queues/{queue_id}/messages/{message_id}:
+    get:
+      summary: Inspect one exact retained Queue message without consuming it
+      description: Optional include=body returns one complete Base64 body only when it fits the bounded response limit. This endpoint never changes ordering, delivery count, visibility, or Queue WAL state.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { name: message_id, in: path, required: true, schema: { type: integer, minimum: 1 } }, { name: include, in: query, required: false, schema: { type: string, enum: [ body ] } } ]
+      responses: { '200': { description: Exact Queue message snapshot }, '404': { $ref: '#/components/responses/NotFound' }, '413': { description: Body exceeds the response limit } }
+  /queues/{queue_id}:
+    get:
+      summary: Inspect one Queue without browsing messages
+      parameters: [ { $ref: '#/components/parameters/QueueId' } ]
+      responses: { '200': { description: Queue depth and in-flight count }, '404': { $ref: '#/components/responses/NotFound' } }
+    patch:
+      summary: Validate a conditional Queue option update
+      description: The current durable Queue engine intentionally exposes no post-declaration mutable options. A current Queue ETag is required and every request returns a precise unsupported_option conflict rather than silently accepting an ineffective update.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"q-[0-9]+"$' } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '404': { $ref: '#/components/responses/NotFound' }, '409': { description: No requested Queue option is atomically mutable }, '412': { description: Queue changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+    delete:
+      summary: Durably delete one Queue and every retained delivery
+      description: Requires the current Queue ETag and exact opaque queue_id confirmation. Deletion is refused while a durable route still targets the Queue.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"q-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact queue_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Durable deleted Queue and removed-message count }, '409': { $ref: '#/components/responses/Conflict' }, '412': { description: Queue changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /queues/{queue_id}:purge:
+    post:
+      summary: Durably purge every retained Queue message
+      description: Discards ready, delayed, and in-flight messages only when the exact Queue identifier is confirmed and its current ETag matches.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"q-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact queue_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Durable removed-message count }, '412': { description: Queue changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /queues/{queue_id}/deliveries:
+    post:
+      summary: Consume one message through an opaque Management delivery
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '201': { description: Delivery or empty result }, '429': { description: Delivery registry exhausted } }
+  /queues/{queue_id}/deliveries:batch:
+    post:
+      summary: Consume a bounded batch as opaque Management delivery receipts
+      description: Reserves every registry slot before consuming. The response contains compact receipt IDs and message IDs; retrieve a body only through the corresponding active delivery GET with include=body.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { max_messages: { type: integer, minimum: 1, maximum: 50, default: 10 }, visibility_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 } } } } } }
+      responses: { '201': { description: Durable delivery receipts; an empty data array means no ready messages }, '429': { description: Delivery registry exhausted } }
+  /queues/{queue_id}/deliveries/{delivery_id}:
+    get:
+      summary: Inspect an active opaque Management delivery
+      description: Returns the delivery's Queue, message ID, and remaining lease without exposing its native owner or acknowledgement tag. include=body returns the complete body only after the Queue engine verifies the active private tag and owner.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/DeliveryId' } ]
+      responses: { '200': { description: Active delivery lease }, '404': { $ref: '#/components/responses/NotFound' }, '410': { description: Delivery expired or was released } }
+  /queues/{queue_id}/deliveries/{delivery_id}:ack:
+    post:
+      summary: ACK a one-use opaque delivery
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/DeliveryId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: ACK result }, '410': { description: Delivery expired } }
+  /queues/{queue_id}/deliveries/{delivery_id}:nack:
+    post:
+      summary: NACK a one-use opaque delivery
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/DeliveryId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Nack' } } } }
+      responses: { '200': { description: NACK result }, '410': { description: Delivery expired } }
+  /queues/{queue_id}/deliveries:ack-batch:
+    post:
+      summary: ACK 1–50 active opaque deliveries from one Queue and owner cohort
+      description: Validates every ID, Queue, owner, and duplicate before one native durable batch acknowledgement. The response contains one outcome per requested ID.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ delivery_ids ], properties: { delivery_ids: { type: array, minItems: 1, maxItems: 50, items: { type: string } } } } } } }
+      responses: { '200': { description: Durable per-delivery ACK outcomes }, '404': { $ref: '#/components/responses/NotFound' }, '410': { description: Delivery expired }, '409': { $ref: '#/components/responses/Conflict' } }
+  /queues/{queue_id}/deliveries:nack-batch:
+    post:
+      summary: NACK 1–50 active opaque deliveries from one Queue and owner cohort
+      description: Validates every ID before one native durable batch NACK. A batch NACK supports immediate requeue or discard/dead-letter policy; delayed requeue remains a single-delivery action.
+      parameters: [ { $ref: '#/components/parameters/QueueId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ delivery_ids ], properties: { delivery_ids: { type: array, minItems: 1, maxItems: 50, items: { type: string } }, requeue: { type: boolean, default: true } } } } } }
+      responses: { '200': { description: Durable per-delivery NACK outcomes }, '404': { $ref: '#/components/responses/NotFound' }, '410': { description: Delivery expired }, '409': { $ref: '#/components/responses/Conflict' } }
+  /streams/{stream_id}/records:
+    post:
+      summary: Append one Stream record with an optional binary key
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/StreamRecord' } } } }
+      responses: { '201': { description: Append result } }
+  /maintenance:
+    get:
+      summary: Discover checkpoint availability for every persistent engine
+      responses: { '200': { description: Engine checkpoint inventory } }
+  /maintenance/keyspace-checkpoint:
+    post:
+      summary: Queue a crash-safe Keyspace checkpoint
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '202': { description: Queued checkpoint job }, '429': { description: Job registry exhausted } }
+  /maintenance/queue-checkpoint:
+    post:
+      summary: Queue a crash-safe Queue checkpoint
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '202': { description: Queued checkpoint job }, '429': { description: Job registry exhausted } }
+  /maintenance/stream-checkpoint:
+    post:
+      summary: Queue a crash-safe Stream checkpoint
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '202': { description: Queued checkpoint job }, '429': { description: Job registry exhausted } }
+  /maintenance/checkpoint-all:
+    post:
+      summary: Queue one ordered checkpoint across Keyspace, Queue, and Stream
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '202': { description: Queued checkpoint job }, '429': { description: Job registry exhausted } }
+  /streams/{stream_id}/records:batch:
+    post:
+      summary: Append a bounded durable Stream batch
+      description: Validates every complete Base64 body and optional Base64 key before invoking the native single-WAL-record batch append. All records share the optional explicit partition; omitted partition selects keyed partition selection when a key is present.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ records ], properties: { partition: { type: integer, minimum: 0 }, records: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/StreamRecord' } } } } } } }
+      responses: { '201': { description: Chosen partition and offset for every appended record }, '409': { $ref: '#/components/responses/Conflict' } }
+  /streams/{stream_id}:
+    get:
+      summary: Inspect one Stream without reading records
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses: { '200': { description: Stream partition and retention statistics }, '404': { $ref: '#/components/responses/NotFound' } }
+    patch:
+      summary: Conditionally replace a Stream's retention ceilings
+      description: Both retention values are required. The current Stream ETag is checked inside the durable native update; records newly beyond the ceiling are durably trimmed with the update.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"s-[0-9]+"$' } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ max_retained_bytes, max_retained_age_ms ], properties: { max_retained_bytes: { type: integer, minimum: 0 }, max_retained_age_ms: { type: integer, minimum: 0 } } } } } }
+      responses: { '200': { description: Durable retention update }, '404': { $ref: '#/components/responses/NotFound' }, '412': { description: Stream changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+    delete:
+      summary: Queue a conditional durable Stream deletion
+      description: Requires the current Stream ETag and exact opaque stream_id confirmation. The queued worker durably removes retained records and consumer-group offsets before reporting success.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"s-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact stream_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, maxProperties: 0 } } } }
+      responses: { '202': { description: Queued Stream deletion job }, '428': { $ref: '#/components/responses/PreconditionRequired' }, '429': { description: Job registry exhausted } }
+  /streams/{stream_id}/partitions:
+    get:
+      summary: Snapshot retained boundaries for every Stream partition
+      parameters: [ { $ref: '#/components/parameters/StreamId' } ]
+      responses: { '200': { description: Partition base offsets, next offsets, and retained bytes }, '404': { $ref: '#/components/responses/NotFound' } }
+  /streams/{stream_id}/partitions/{partition}/records:
+    get:
+      summary: Fetch complete bounded Stream records
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { name: partition, in: path, required: true, schema: { type: integer, minimum: 0 } }, { name: offset, in: query, required: true, schema: { type: integer, minimum: 0 } }, { name: max_records, in: query, required: true, schema: { type: integer, maximum: 500 } }, { name: max_bytes, in: query, required: true, schema: { type: integer, minimum: 16 } } ]
+      responses: { '200': { description: Complete records only }, '413': { description: First record exceeds bound } }
+  /streams/{stream_id}/partitions/{partition}/records:tail:
+    get:
+      summary: Stream one partition as bounded authenticated Server-Sent Events
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { name: partition, in: path, required: true, schema: { type: integer, minimum: 0 } }, { name: offset, in: query, required: true, schema: { type: integer, minimum: 0 } }, { name: Accept, in: header, required: true, schema: { type: string, const: text/event-stream } } ]
+      responses: { '200': { description: Bounded record events and heartbeat comments. Per-tail event throughput is advertised by capabilities.limits.tail_events_per_second., content: { text/event-stream: { schema: { type: string } } } }, '400': { $ref: '#/components/responses/BadRequest' }, '429': { description: Tail-worker capacity exhausted } }
+  /streams/{stream_id}/partitions/{partition}/records/{offset}:
+    get:
+      summary: Read one exact complete Stream record
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { name: partition, in: path, required: true, schema: { type: integer, minimum: 0 } }, { name: offset, in: path, required: true, schema: { type: integer, minimum: 0 } }, { name: max_bytes, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 131072 } } ]
+      responses: { '200': { description: Exact complete record }, '404': { $ref: '#/components/responses/NotFound' }, '413': { description: Record exceeds max_bytes } }
+  /streams/{stream_id}/partitions/{partition}:truncate:
+    post:
+      summary: Conditionally advance one Stream partition's retained base offset
+      description: Requires the current Stream ETag in the exact form `"s-<revision>"` and confirmation of the exact stream_id path value. Returns a bounded asynchronous job; the revision and retained range are checked atomically by its worker before durable truncation.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { name: partition, in: path, required: true, schema: { type: integer, minimum: 0 } }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"s-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact stream_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ base_offset ], properties: { base_offset: { type: integer, minimum: 0 } } } } } }
+      responses: { '202': { description: Queued truncation job }, '428': { $ref: '#/components/responses/PreconditionRequired' }, '429': { description: Job registry exhausted } }
+  /streams/{stream_id}/consumer-groups/{group_id}/offsets:
+    get:
+      summary: Inspect a consumer group’s offsets and lag without changing membership
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' } ]
+      responses: { '200': { description: Per-partition offsets and lag }, '404': { $ref: '#/components/responses/NotFound' } }
+  /streams/{stream_id}/consumer-groups/{group_id}:
+    get:
+      summary: Inspect Consumer Group generation, offsets, lag, and active membership without joining
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' } ]
+      responses: { '200': { description: Consumer Group snapshot with an ETag generation }, '404': { $ref: '#/components/responses/NotFound' } }
+  /streams/{stream_id}/consumer-groups/{group_id}/members:
+    get:
+      summary: List a Consumer Group's current members without native owner tokens
+      description: Member IDs are opaque and only stable within this one snapshot. Assignment counts and lease remaining time are safe diagnostic metadata.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { $ref: '#/components/parameters/Limit' } ]
+      responses: { '200': { description: Privacy-safe member snapshot }, '404': { $ref: '#/components/responses/NotFound' } }
+  /streams/{stream_id}/consumer-groups/{group_id}/offsets/{partition}:
+    put:
+      summary: Conditionally commit one retained Consumer Group partition offset
+      description: Requires the current group ETag in the exact form `"g-<generation>"`; the Stream, group, generation, partition, and retained offset range are checked atomically before the durable commit.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { name: partition, in: path, required: true, schema: { type: integer, minimum: 0 } }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"g-[0-9]+"$' } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ offset ], properties: { offset: { type: integer, minimum: 0 } } } } } }
+      responses: { '200': { description: Durable offset commit }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '412': { description: Group generation changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /streams/{stream_id}/consumer-groups/{group_id}/offsets:batch:
+    post:
+      summary: Conditionally commit 1–100 Consumer Group offsets as one durable batch
+      description: Requires the current group ETag. Every partition and retained range is validated before any commit WAL record is written; all entries share one fsync.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"g-[0-9]+"$' } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ offsets ], properties: { offsets: { type: array, minItems: 1, maxItems: 100, items: { type: object, required: [ partition, offset ], properties: { partition: { type: integer, minimum: 0 }, offset: { type: integer, minimum: 0 } } } } } } } } }
+      responses: { '200': { description: Durable batch offset commit }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '412': { description: Group generation changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /streams/{stream_id}/consumer-groups/{group_id}:reset-offsets:
+    post:
+      summary: Conditionally reset every Consumer Group partition offset
+      description: Supports earliest, latest, absolute, and relative targets. It validates every retained boundary before writing; active groups require force, exact group confirmation, and the current generation ETag.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"g-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact group_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ strategy ], properties: { strategy: { type: string, enum: [ earliest, latest, absolute, relative ] }, offset: { type: integer, minimum: 0 }, delta: { type: integer }, force: { type: boolean, default: false } } } } } }
+      responses: { '200': { description: Durable whole-group offset reset }, '404': { $ref: '#/components/responses/NotFound' }, '409': { description: Active group or out-of-range reset target }, '412': { description: Group generation changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /streams/{stream_id}/consumer-groups/{group_id}/sessions:
+    post:
+      summary: Explicitly join a Consumer Group through an opaque Management session
+      description: Requires exact group confirmation because joining may rebalance active members. The returned ID never exposes the native owner token and expires with its native lease.
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact group_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { lease_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 } } } } } }
+      responses: { '201': { description: Opaque session and current assignment }, '409': { $ref: '#/components/responses/Conflict' }, '429': { description: Bounded session registry exhausted }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /streams/{stream_id}/consumer-groups/{group_id}/sessions/{session_id}:
+    get:
+      summary: Inspect one opaque Management Consumer Group session
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { name: session_id, in: path, required: true, schema: { type: string, pattern: '^gs:[a-f0-9]{32}$' } } ]
+      responses: { '200': { description: Active session state }, '410': { description: Session expired or left } }
+  /streams/{stream_id}/consumer-groups/{group_id}/sessions/{session_id}:heartbeat:
+    post:
+      summary: Refresh a Management Consumer Group session lease
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { name: session_id, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Current generation and assignment }, '410': { description: Session expired } }
+  /streams/{stream_id}/consumer-groups/{group_id}/sessions/{session_id}:leave:
+    post:
+      summary: Leave a Management Consumer Group session and release assignments
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { name: session_id, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Leave result }, '410': { description: Session expired } }
+  /streams/{stream_id}/consumer-groups/{group_id}/sessions/{session_id}/records:
+    get:
+      summary: Fetch records only from a partition currently assigned to the session
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { name: session_id, in: path, required: true, schema: { type: string } }, { name: partition, in: query, required: true, schema: { type: integer, minimum: 0 } }, { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }, { name: max_records, in: query, required: true, schema: { type: integer, minimum: 1, maximum: 500 } }, { name: max_bytes, in: query, required: true, schema: { type: integer, minimum: 16 } } ]
+      responses: { '200': { description: Bounded assigned-partition record page }, '409': { description: Assignment lost }, '410': { description: Session expired } }
+  /streams/{stream_id}/consumer-groups/{group_id}/sessions/{session_id}/offsets:commit:
+    post:
+      summary: Commit an offset through an assigned Management Consumer Group session
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/GroupId' }, { name: session_id, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"g-[0-9]+"$' } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ partition, offset ], properties: { partition: { type: integer, minimum: 0 }, offset: { type: integer, minimum: 0 } } } } } }
+      responses: { '200': { description: Durable assigned-partition offset commit }, '409': { description: Assignment lost or offset outside retained range }, '410': { description: Session expired }, '412': { description: Group generation changed }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /streams/{stream_id}/consumer-groups:
+    get:
+      summary: List Consumer Groups for one Stream without changing membership
+      parameters: [ { $ref: '#/components/parameters/StreamId' }, { $ref: '#/components/parameters/Limit' } ]
+      responses: { '200': { description: Stream-scoped Consumer Group collection } }
+  /routing/routers:
+    get:
+      summary: List configured Routing routers without publishing or mutating topology
+      description: Router snapshots include process-lifetime publish-attempt and unroutable counters; durable topology and revisions are independent of those metrics.
+      parameters: [ { $ref: '#/components/parameters/Limit' } ]
+      responses: { '200': { description: Bounded router collection } }
+    post:
+      summary: Declare a Routing router
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RouterDeclare' } } } }
+      responses: { '201': { description: Router declaration } }
+  /routing/routers/{router_id}/routes:
+    get:
+      summary: List configured Queue routes for one router
+      parameters: [ { $ref: '#/components/parameters/RouterId' }, { $ref: '#/components/parameters/Limit' } ]
+      responses: { '200': { description: Bounded route collection }, '404': { $ref: '#/components/responses/NotFound' } }
+    post:
+      summary: Bind a Queue to a Routing router
+      parameters: [ { $ref: '#/components/parameters/RouterId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RouteDeclare' } } } }
+      responses: { '201': { description: Route declaration } }
+  /routing/routers/{router_id}/routes/{route_id}:
+    get:
+      summary: Inspect one stable Queue route resource
+      parameters: [ { $ref: '#/components/parameters/RouterId' }, { name: route_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } } ]
+      responses: { '200': { description: Exact route tuple }, '404': { $ref: '#/components/responses/NotFound' } }
+    delete:
+      summary: Remove one exact Queue route from a Routing router
+      description: route_id is a reversible stable encoding of the Queue and routing key. X-KuttiDB-Confirm must exactly equal the route_id path value.
+      parameters: [ { $ref: '#/components/parameters/RouterId' }, { name: route_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"r-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact route_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, maxProperties: 0 } } } }
+      responses: { '200': { description: Durable route removal }, '404': { $ref: '#/components/responses/NotFound' }, '412': { $ref: '#/components/responses/PreconditionFailed' }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /routing/routers/{router_id}:
+    get:
+      summary: Inspect one configured Routing router
+      parameters: [ { $ref: '#/components/parameters/RouterId' } ]
+      responses: { '200': { description: Router definition }, '404': { $ref: '#/components/responses/NotFound' } }
+    patch:
+      summary: Set a router's alternate router
+      parameters: [ { $ref: '#/components/parameters/RouterId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"r-[0-9]+"$' } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [alternate_router_id], properties: { alternate_router_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } } } } } }
+      responses: { '200': { description: Durable router update }, '404': { $ref: '#/components/responses/NotFound' }, '412': { $ref: '#/components/responses/PreconditionFailed' }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+    delete:
+      summary: Durably delete an empty Routing router
+      description: Routers with routes or alternate-router dependents are protected. X-KuttiDB-Confirm must exactly equal the router_id path value.
+      parameters: [ { $ref: '#/components/parameters/RouterId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"r-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, description: Exact router_id path value } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, maxProperties: 0 } } } }
+      responses: { '200': { description: Durable router deletion }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '412': { $ref: '#/components/responses/PreconditionFailed' }, '428': { $ref: '#/components/responses/PreconditionRequired' } }
+  /routing/routers/{router_id}/messages:
+    post:
+      summary: Publish one message through a Routing router
+      parameters: [ { $ref: '#/components/parameters/RouterId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RoutedBody' } } } }
+      responses: { '201': { description: Routing publish result } }
+  /routing/default/messages:
+    post:
+      summary: Publish directly to one Queue through native default Routing
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DefaultRoutedBody' } } } }
+      responses: { '201': { description: Direct Routing publish result } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: admin token }
+  parameters:
+    Limit: { name: limit, in: query, required: false, schema: { type: integer, default: 100, minimum: 1, maximum: 500 }, description: Bounded result count; no cursor is provided. }
+    EntryId: { name: entry_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
+    QueueId: { name: queue_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
+    StreamId: { name: stream_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
+    GroupId: { name: group_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
+    ConsumerId: { name: consumer_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
+    RouterId: { name: router_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
+    DeliveryId: { name: delivery_id, in: path, required: true, schema: { type: string, pattern: '^d:[a-f0-9]{32}$' } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
+  responses:
+    Unauthorized: { description: Missing or invalid bearer token, headers: { WWW-Authenticate: { schema: { type: string, example: Bearer } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    BadRequest: { description: Invalid request or limit, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unavailable: { description: A required persistence engine failed, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: Resource not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict: { description: Conflict or engine rejection, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    PreconditionRequired: { description: A required Idempotency-Key or revision precondition is absent, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    PreconditionFailed: { description: The supplied resource revision or generation is stale, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Error: { type: object, required: [error], properties: { error: { type: object, required: [code, message, request_id], properties: { code: { type: string, enum: [bad_request, unauthorized, forbidden_origin, not_found, method_not_allowed, request_too_large, unsupported_media_type, validation_failed, resource_exhausted, rate_limited, conflict, idempotency_conflict, precondition_required, precondition_failed, persistence_unavailable, engine_unavailable, audit_unavailable, delivery_expired, operation_in_doubt, internal_error] }, message: { type: string }, request_id: { type: string } } } } }
+    Collection: { type: object, required: [data, meta], properties: { data: { type: array, maxItems: 500 }, meta: { type: object, required: [count, limit, truncated], properties: { count: { type: integer }, limit: { type: integer }, truncated: { type: boolean } } } } }
+    Capabilities: { type: object, properties: { product: { const: KuttiDB }, management_api_contract: { const: '1.0' }, enabled_engines: { type: array, items: { type: string } }, tls: { type: object, required: [available], properties: { available: { type: boolean } } }, persistence: { type: object, required: [keyspaces, queues, streams], properties: { keyspaces: { type: boolean }, queues: { type: boolean }, streams: { type: boolean } } }, operations: { type: object }, limits: { type: object, properties: { tail_events_per_second: { type: integer, minimum: 1 } } } } }
+    Status: { type: object, description: No secrets, paths, keys, values, message bodies, or record bodies are returned. }
+    EncodedBody: { type: object, required: [body], properties: { body: { type: string, description: Canonical padded Base64 data }, ttl_ms: { type: integer, minimum: 0 }, partition: { type: integer, minimum: 0 } } }
+    StreamRecord: { type: object, required: [body], properties: { body: { type: string, description: Canonical padded Base64 data }, key: { type: string, description: Optional canonical padded Base64 binary partitioning key, retained and returned with the record. }, partition: { type: integer, minimum: 0 } } }
+    KeyspacePut: { type: object, required: [value], properties: { value: { type: string, description: Canonical padded Base64 data }, ttl_ms: { type: integer, minimum: 0 } } }
+    BatchGet: { type: object, required: [entry_ids], properties: { entry_ids: { type: array, minItems: 1, maxItems: 100, items: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } } } }
+    QueueDeclare: { type: object, required: [name], properties: { name: { type: string }, durable: { type: boolean }, max_depth: { type: integer, minimum: 0 } } }
+    QueueConsumerDeclare: { type: object, required: [name], properties: { name: { type: string, maxLength: 255 } } }
+    AtomicOperation:
+      type: object
+      required: [operation, key_id, target_id]
+      properties:
+        operation: { type: string, enum: [put-and-route, put-and-enqueue, delete-and-route, update-if-present-and-route] }
+        key_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }
+        target_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }
+        routing_key: { type: string, description: Canonical padded Base64 exact Routing key; required except for put-and-enqueue. }
+        value: { type: string, description: Canonical padded Base64 value and Queue message body; required except for delete-and-route. }
+        body: { type: string, description: Canonical padded Base64 Queue message body; required for delete-and-route. }
+        ttl_ms: { type: integer, minimum: 0 }
+    RouterDeclare: { type: object, required: [name, mode], properties: { name: { type: string, maxLength: 255 }, mode: { type: string, enum: [exact, broadcast, pattern] }, durable: { type: boolean } } }
+    RouteDeclare: { type: object, required: [queue_id, routing_key], properties: { queue_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, routing_key: { type: string, maxLength: 255 } } }
+    RoutedBody: { type: object, required: [routing_key, body], properties: { routing_key: { type: string, maxLength: 255 }, body: { type: string, description: Canonical padded Base64 data }, ttl_ms: { type: integer, minimum: 0 } } }
+    DefaultRoutedBody: { type: object, required: [queue_id, body], properties: { queue_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, body: { type: string, description: Canonical padded Base64 data }, ttl_ms: { type: integer, minimum: 0 } } }
+    StreamDeclare: { type: object, required: [name, partitions], properties: { name: { type: string }, partitions: { type: integer, minimum: 1, maximum: 256 }, max_retained_bytes: { type: integer, minimum: 0 }, max_retained_age_ms: { type: integer, minimum: 0 } } }
+    Nack: { type: object, properties: { requeue: { type: boolean, default: true }, delay_ms: { type: integer, minimum: 0, maximum: 60000 } } }

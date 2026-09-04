@@ -1,0 +1,900 @@
+<!doctype html>
+<!-- ============================================================================
+  KuttiDB — static landing page. Self-contained: no build step, no external
+  assets, no JavaScript frameworks. Serve it from anywhere (GitHub Pages,
+  Netlify, nginx, `python3 -m http.server`) and it just works.
+
+  One thing to do before publishing: replace every `OWNER/REPO` with your
+  real GitHub org/repo (search-and-replace "OWNER/REPO").
+============================================================================ -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KuttiDB — one binary. Cache, queues, streams. Crash-recoverable.</title>
+<meta name="description" content="KuttiDB is a lightweight, crash-recoverable event cache written in C — with durable queues, exchanges, streams, and atomic cache-plus-event commits in one binary. Apache-2.0." />
+<link rel="icon" href="logo.png" />
+<link rel="apple-touch-icon" href="logo.png" />
+<meta property="og:title" content="KuttiDB — the event cache that keeps its promises" />
+<meta property="og:description" content="Durable queues, exchanges, streams and an atomic cache in one C binary. No JVM, no Erlang, no dependencies. Apache-2.0." />
+<meta property="og:image" content="logo.png" />
+<meta name="theme-color" content="#120d09" />
+<style>
+  /* ---------------------------------------------------------------- tokens */
+  :root {
+    --bg:        #120d09;
+    --bg-soft:   #17110c;
+    --surface:   #1c1510;
+    --surface-2: #221a13;
+    --border:    rgba(244, 233, 213, .10);
+    --border-2:  rgba(244, 233, 213, .16);
+    --text:      #f4ecdc;
+    --muted:     #b4a58c;
+    --faint:     #7d6f5b;
+    --amber:     #f5a524;
+    --gold:      #f6c453;
+    --orange:    #e2703a;
+    --green:     #8fd18a;
+    --code-bg:   #0d0a07;
+    --radius:    16px;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --glow-a: radial-gradient(600px 320px at 18% 8%,  rgba(226,112,58,.16), transparent 70%);
+    --glow-b: radial-gradient(560px 300px at 84% 16%, rgba(246,196,83,.10), transparent 70%);
+    --glow-c: radial-gradient(700px 420px at 50% 108%, rgba(226,112,58,.09),  transparent 70%);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 16.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: rgba(245,165,36,.32); }
+
+  a { color: inherit; }
+  img { max-width: 100%; }
+  section { scroll-margin-top: 90px; }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+  .mono { font-family: var(--font-mono); }
+
+  /* --------------------------------------------------------------- buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 11px 20px; border-radius: 999px;
+    font-weight: 600; font-size: 15px; text-decoration: none;
+    border: 1px solid var(--border-2); color: var(--text);
+    transition: transform .15s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease;
+    white-space: nowrap;
+  }
+  .btn:hover { transform: translateY(-1px); border-color: rgba(246,196,83,.45); }
+  .btn-primary {
+    background: linear-gradient(135deg, #f0a13c, #e2703a);
+    border-color: transparent; color: #1a1006;
+    box-shadow: 0 6px 28px -8px rgba(226,112,58,.55);
+  }
+  .btn-primary:hover { box-shadow: 0 10px 34px -8px rgba(226,112,58,.7); }
+  .btn-ghost { background: rgba(244,233,213,.04); }
+  .btn svg { flex: none; }
+
+  /* ------------------------------------------------------------------ nav */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(14px);
+    background: rgba(18,13,9,.78);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav {
+    display: flex; align-items: center; gap: 28px;
+    height: 66px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 11px;
+    font-weight: 700; font-size: 18px; letter-spacing: -.01em;
+    text-decoration: none;
+  }
+  .brand img { width: 30px; height: 32px; }
+  .brand .beta {
+    font-size: 11px; font-weight: 600; color: var(--gold);
+    border: 1px solid rgba(246,196,83,.35); border-radius: 999px;
+    padding: 2px 8px; margin-left: 2px; letter-spacing: .04em;
+  }
+  .nav-links { display: flex; gap: 26px; margin-left: 12px; }
+  .nav-links a {
+    text-decoration: none; color: var(--muted); font-size: 14.5px; font-weight: 500;
+    transition: color .15s ease;
+  }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .license-chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; font-weight: 600; color: var(--gold);
+    border: 1px solid rgba(246,196,83,.3); border-radius: 999px; padding: 5px 12px;
+    text-decoration: none;
+  }
+  .menu-btn {
+    display: none; margin-left: auto;
+    background: none; border: 1px solid var(--border-2); border-radius: 10px;
+    color: var(--text); padding: 8px 10px; cursor: pointer;
+  }
+  @media (max-width: 920px) {
+    .nav-links, .license-chip { display: none; }
+    .menu-btn { display: block; }
+    .nav.open .nav-links {
+      display: flex; flex-direction: column; gap: 4px;
+      position: absolute; top: 66px; left: 0; right: 0; margin: 0;
+      background: rgba(18,13,9,.97); border-bottom: 1px solid var(--border);
+      padding: 14px 24px 18px;
+    }
+    .nav.open .nav-links a { padding: 9px 0; font-size: 16px; }
+  }
+
+  /* ------------------------------------------------------------------ hero */
+  .hero {
+    position: relative;
+    padding: 92px 0 72px;
+    background: var(--glow-a), var(--glow-b);
+    overflow: hidden;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(244,233,213,.055) 1px, transparent 1px);
+    background-size: 26px 26px;
+    mask-image: radial-gradient(720px 480px at 50% 0%, #000 30%, transparent 78%);
+  }
+  .hero-grid {
+    position: relative;
+    display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center;
+  }
+  @media (max-width: 960px) { .hero-grid { grid-template-columns: 1fr; gap: 44px; } }
+
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    border: 1px solid var(--border-2); border-radius: 999px;
+    padding: 7px 14px; margin-bottom: 26px;
+    background: rgba(244,233,213,.03);
+  }
+  .eyebrow .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 10px rgba(143,209,138,.9);
+  }
+  .eyebrow b { color: var(--gold); font-weight: 600; }
+
+  h1 {
+    font-size: clamp(38px, 5.4vw, 62px);
+    line-height: 1.06; letter-spacing: -.028em; font-weight: 800;
+    margin: 0 0 22px;
+  }
+  h1 .grad {
+    background: linear-gradient(92deg, var(--gold) 8%, var(--orange) 88%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p.lede {
+    font-size: 19px; color: var(--muted); max-width: 34em; margin: 0 0 14px;
+  }
+  .hero .subnote {
+    font-size: 14.5px; color: var(--faint); margin: 0 0 30px;
+  }
+  .hero .subnote b { color: var(--muted); font-weight: 600; }
+  .hero-ctas { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 34px; }
+
+  .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill {
+    font-family: var(--font-mono); font-size: 12.5px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px;
+    background: rgba(244,233,213,.025);
+  }
+  .pill b { color: var(--gold); font-weight: 600; }
+
+  /* ----------------------------------------------------------- code window */
+  .codewin {
+    background: var(--code-bg);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    box-shadow: 0 30px 80px -30px rgba(0,0,0,.75), 0 0 0 1px rgba(0,0,0,.4), 0 0 90px -30px rgba(226,112,58,.25);
+    overflow: hidden;
+    font-size: 13.5px;
+  }
+  .codewin-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 16px; border-bottom: 1px solid var(--border);
+    background: rgba(244,233,213,.03);
+  }
+  .codewin-bar .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .codewin-bar .r { background: #e5566d; } .codewin-bar .y { background: #e2b542; } .codewin-bar .g { background: #57c26b; }
+  .codewin-bar .title {
+    margin-left: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--faint);
+  }
+  .codewin pre {
+    margin: 0; padding: 18px 20px 20px;
+    overflow-x: auto; line-height: 1.62;
+    font-family: var(--font-mono); font-size: 13px; color: #d9cdb4;
+  }
+  .codewin .cm { color: #6f6350; }
+  .codewin .kw { color: #f6c453; }
+  .codewin .fn { color: #8fb8f0; }
+  .codewin .st { color: #a3d69a; }
+  .codewin .nb { color: #e2926b; }
+  .codewin .ok { color: var(--green); }
+
+  /* ------------------------------------------------------------ stats band */
+  .stats { border-block: 1px solid var(--border); background: var(--bg-soft); }
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border);
+  }
+  @media (max-width: 820px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+  .stat { background: var(--bg-soft); padding: 30px 26px; }
+  .stat .num {
+    font-size: clamp(26px, 3.4vw, 38px); font-weight: 800; letter-spacing: -.03em;
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(92deg, var(--gold), var(--orange));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .stat .lbl { font-size: 13.5px; color: var(--muted); margin-top: 5px; }
+  .stat .fine { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
+
+  /* -------------------------------------------------------------- sections */
+  .section { padding: 88px 0; }
+  .section.alt { background: var(--bg-soft); border-block: 1px solid var(--border); }
+  .kicker {
+    font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--orange);
+    margin: 0 0 14px;
+  }
+  h2 {
+    font-size: clamp(28px, 3.6vw, 42px); line-height: 1.12;
+    letter-spacing: -.024em; font-weight: 800; margin: 0 0 16px;
+  }
+  .section-lede { color: var(--muted); font-size: 17.5px; max-width: 44em; margin: 0 0 48px; }
+
+  /* -------------------------------------------------------------- features */
+  .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 960px) { .feature-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 620px) { .feature-grid { grid-template-columns: 1fr; } }
+  .card {
+    background: linear-gradient(180deg, var(--surface-2), var(--surface));
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 26px 24px;
+    transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+  }
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(246,196,83,.32);
+    box-shadow: 0 18px 44px -22px rgba(226,112,58,.35);
+  }
+  .card .icon {
+    width: 42px; height: 42px; border-radius: 12px;
+    display: grid; place-items: center;
+    background: rgba(245,165,36,.1);
+    border: 1px solid rgba(245,165,36,.22);
+    margin-bottom: 18px;
+  }
+  .card .icon svg { width: 21px; height: 21px; stroke: var(--gold); fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .card h3 { margin: 0 0 9px; font-size: 18.5px; font-weight: 700; letter-spacing: -.012em; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.62; }
+  .card p code, td code, .honest li code, .atomic-copy code {
+    font-family: var(--font-mono); font-size: .86em;
+    background: rgba(246,196,83,.09); color: var(--gold);
+    border-radius: 5px; padding: 1.5px 5px;
+  }
+
+  /* ---------------------------------------------------------------- atomic */
+  .atomic {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 52px; align-items: center;
+  }
+  @media (max-width: 960px) { .atomic { grid-template-columns: 1fr; gap: 36px; } }
+  .atomic-copy .ops { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+  .atomic-copy .ops .pill { font-size: 12px; }
+  .atomic-copy ul { margin: 20px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 15.5px; }
+  .atomic-copy ul li { padding-left: 26px; position: relative; margin-bottom: 10px; }
+  .atomic-copy ul li::before {
+    content: "✓"; position: absolute; left: 0; top: 0;
+    color: var(--green); font-weight: 700;
+  }
+  .commit-flow {
+    border: 1px dashed rgba(246,196,83,.35); border-radius: 12px;
+    padding: 13px 16px; margin-top: 26px;
+    font-family: var(--font-mono); font-size: 12.5px; color: var(--muted);
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .commit-flow b { color: var(--gold); }
+  .commit-flow .arrow { color: var(--orange); }
+
+  /* ------------------------------------------------------------ mental tbl */
+  .model-table { width: 100%; border-collapse: collapse; }
+  .model-table th {
+    text-align: left; font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--faint); font-weight: 600; padding: 0 18px 12px;
+  }
+  .model-table td {
+    border-top: 1px solid var(--border); padding: 16px 18px;
+    font-size: 15.5px; color: var(--muted);
+  }
+  .model-table tr:hover td { background: rgba(244,233,213,.02); }
+  .model-table td.use { color: var(--text); font-weight: 600; }
+  .model-table td.need { color: var(--text); }
+
+  /* ------------------------------------------------------------ benchmarks */
+  .bench-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 40px; align-items: start; }
+  @media (max-width: 960px) { .bench-grid { grid-template-columns: 1fr; } }
+  .bench-note { color: var(--faint); font-size: 13.5px; margin-top: 18px; }
+  .bench-note b { color: var(--muted); }
+  table.bench { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.bench th {
+    text-align: right; font-weight: 600; color: var(--faint); font-size: 12px;
+    letter-spacing: .08em; text-transform: uppercase; padding: 0 14px 10px;
+  }
+  table.bench th:first-child, table.bench td:first-child { text-align: left; padding-left: 16px; }
+  table.bench td {
+    padding: 11px 14px; border-top: 1px solid var(--border);
+    color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
+  }
+  table.bench td:first-child { color: var(--text); font-weight: 600; }
+  table.bench td.hl { color: var(--gold); font-weight: 700; }
+  table.bench tr:hover td { background: rgba(244,233,213,.02); }
+
+  /* --------------------------------------------------------------- clients */
+  .client-row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .client {
+    display: inline-flex; align-items: center; gap: 10px;
+    border: 1px solid var(--border-2); border-radius: 14px;
+    padding: 13px 20px; text-decoration: none;
+    background: var(--surface);
+    transition: border-color .15s ease, transform .15s ease;
+  }
+  .client:hover { border-color: rgba(246,196,83,.4); transform: translateY(-2px); }
+  .client .cname { font-weight: 700; font-size: 15px; }
+  .client .cnote { font-size: 12.5px; color: var(--faint); }
+
+  /* ---------------------------------------------------------------- honest */
+  .honest {
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius);
+    background:
+      linear-gradient(180deg, rgba(226,112,58,.05), transparent 55%),
+      var(--surface);
+    padding: 40px 42px;
+  }
+  .honest blockquote {
+    margin: 0 0 24px; font-size: 21px; font-weight: 600; letter-spacing: -.012em;
+    color: var(--text); border-left: 3px solid var(--orange); padding-left: 18px;
+  }
+  .honest ul { margin: 0; padding: 0; list-style: none; }
+  .honest li {
+    position: relative; padding-left: 30px; margin-bottom: 13px;
+    color: var(--muted); font-size: 15.5px;
+  }
+  .honest li::before { content: "→"; position: absolute; left: 0; color: var(--orange); font-weight: 700; }
+  .honest li b { color: var(--text); font-weight: 600; }
+
+  /* ------------------------------------------------------------------ docs */
+  .docs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 960px) { .docs-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .docs-grid { grid-template-columns: 1fr; } }
+  .doc-link {
+    display: flex; flex-direction: column; gap: 3px;
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 15px 17px; text-decoration: none; background: var(--surface);
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .doc-link:hover { border-color: rgba(246,196,83,.35); background: var(--surface-2); }
+  .doc-link b { font-size: 14.5px; font-weight: 650; }
+  .doc-link span { font-size: 12.5px; color: var(--faint); }
+  .doc-link .arr { margin-left: auto; color: var(--orange); font-weight: 700; }
+
+  /* ------------------------------------------------------------------- cta */
+  .cta {
+    text-align: center; padding: 104px 0;
+    background: var(--glow-c);
+    border-top: 1px solid var(--border);
+  }
+  .cta h2 { font-size: clamp(30px, 4.4vw, 50px); }
+  .cta p { color: var(--muted); font-size: 18px; max-width: 34em; margin: 0 auto 34px; }
+  .cta .ctas { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .cta .compose {
+    margin: 40px auto 0; max-width: 620px; text-align: left;
+  }
+  .cta .compose pre { margin: 0; }
+  .cta .compose .codewin { box-shadow: 0 20px 60px -30px rgba(0,0,0,.8); }
+
+  /* ---------------------------------------------------------------- footer */
+  footer { border-top: 1px solid var(--border); padding: 44px 0 52px; background: var(--bg-soft); }
+  .foot {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 24px; flex-wrap: wrap;
+  }
+  .foot-brand { display: flex; gap: 12px; align-items: center; }
+  .foot-brand img { width: 34px; height: 36px; }
+  .foot-brand .fb-name { font-weight: 700; }
+  .foot-brand .fb-sub { font-size: 13px; color: var(--faint); }
+  .foot-links { display: flex; gap: 22px; flex-wrap: wrap; }
+  .foot-links a { color: var(--muted); text-decoration: none; font-size: 14px; }
+  .foot-links a:hover { color: var(--gold); }
+  .foot-base {
+    margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    color: var(--faint); font-size: 13px;
+  }
+  .foot-base .oven { font-family: var(--font-mono); }
+
+  /* ---------------------------------------------------------------- reveal */
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { opacity: 0; transform: translateY(16px); transition: opacity .6s ease, transform .6s ease; }
+    .reveal.in { opacity: 1; transform: none; }
+  }
+
+  /* ----------------------------------------------------------- copy button */
+  .codeblock { position: relative; }
+  .copybtn {
+    position: absolute; top: 52px; right: 12px;
+    font: 600 11.5px var(--font-mono); letter-spacing: .04em;
+    color: var(--faint); background: rgba(244,233,213,.05);
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 5px 10px; cursor: pointer;
+    transition: color .15s ease, border-color .15s ease;
+  }
+  .copybtn:hover { color: var(--gold); border-color: rgba(246,196,83,.4); }
+  .copybtn.done { color: var(--green); border-color: rgba(143,209,138,.4); }
+</style>
+</head>
+<body>
+
+<!-- ===================================================================== NAV -->
+<header>
+  <div class="wrap nav" id="nav">
+    <a class="brand" href="#top">
+      <img src="logo.png" alt="KuttiDB logo" />
+      KuttiDB <span class="beta">v0.2.0</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#atomic">Atomic ops</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a href="#quickstart">Quick start</a>
+      <a href="#clients">Clients</a>
+      <a href="#docs">Docs</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="license-chip" href="#license" title="Apache License 2.0">Apache-2.0</a>
+      <a class="btn btn-ghost" href="https://github.com/OWNER/REPO" style="padding:9px 16px;">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        GitHub
+      </a>
+    </div>
+    <button class="menu-btn" id="menuBtn" aria-label="Toggle menu" onclick="document.getElementById('nav').classList.toggle('open')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ==================================================================== HERO -->
+<section class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow"><span class="dot"></span> Open source · <b>Apache-2.0</b> · written in C · macOS &amp; Linux</span>
+      <h1>The event cache that<br /><span class="grad">keeps its promises.</span></h1>
+      <p class="lede">
+        KuttiDB is a lightweight, crash-recoverable event cache with durable queues,
+        exchanges, streams, and atomic cache-plus-event commits — in <b style="color:var(--text)">one binary</b>.
+      </p>
+      <p class="subnote">
+        No JVM. No Erlang. No external dependencies for a plaintext build.
+        <b>Zero-copy between local processes, network-accessible across machines.</b>
+      </p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="#quickstart">
+          Get started
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/OWNER/REPO">Star on GitHub ★</a>
+      </div>
+      <div class="pill-row" style="display:flex; flex-wrap:wrap; gap:8px;">
+        <span class="pill"><b>1</b> executable</span>
+        <span class="pill"><b>1</b> config</span>
+        <span class="pill"><b>1</b> data directory</span>
+        <span class="pill"><b>~1.7 MiB</b> idle RSS</span>
+      </div>
+    </div>
+
+    <div class="codeblock">
+      <div class="codewin">
+        <div class="codewin-bar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="title">quickstart.py — python 3</span>
+        </div>
+<pre><span class="cm"># pip install kuttidb-client</span>
+<span class="kw">from</span> kuttidb_client <span class="kw">import</span> KuttiDBClient
+
+<span class="kw">with</span> <span class="fn">KuttiDBClient</span>(port=<span class="nb">7379</span>) <span class="kw">as</span> db:
+    db.<span class="fn">put</span>(<span class="st">"greeting"</span>, <span class="st">b"hello"</span>, ttl=<span class="nb">60</span>)
+    <span class="fn">print</span>(db.<span class="fn">get</span>(<span class="st">"greeting"</span>))              <span class="cm"># b'hello'</span>
+
+    db.<span class="fn">queue_declare</span>(<span class="st">"jobs"</span>, durable=<span class="kw">True</span>,
+                      max_depth=<span class="nb">10_000</span>,
+                      dead_letter_queue=<span class="st">"jobs.dead"</span>)
+    db.<span class="fn">queue_publish</span>(<span class="st">"jobs"</span>, <span class="st">b"resize:123"</span>)
+    delivery = db.<span class="fn">queue_consume</span>(<span class="st">"jobs"</span>, visibility=<span class="nb">30</span>)
+    <span class="kw">if</span> delivery:
+        <span class="fn">process</span>(delivery[<span class="st">"value"</span>])
+        db.<span class="fn">queue_ack</span>(<span class="st">"jobs"</span>, delivery[<span class="st">"id"</span>])
+
+<span class="ok">✓ cache put, queue publish, ACK — all crash-recoverable</span></pre>
+      </div>
+      <button class="copybtn" data-copy="1">COPY</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================== STATS -->
+<div class="stats">
+  <div class="wrap stats-grid">
+    <div class="stat reveal">
+      <div class="num">8.37M ops/s</div>
+      <div class="lbl">Cache throughput</div>
+      <div class="fine">8 clients, batched, Linux/epoll native</div>
+    </div>
+    <div class="stat reveal">
+      <div class="num">94 µs</div>
+      <div class="lbl">p50 batch latency</div>
+      <div class="fine">1 client × 256-item batches, 100 B values</div>
+    </div>
+    <div class="stat reveal">
+      <div class="num">~1.7 MiB</div>
+      <div class="lbl">Idle RSS</div>
+      <div class="fine">One process, WAL + snapshots included</div>
+    </div>
+    <div class="stat reveal">
+      <div class="num">6</div>
+      <div class="lbl">Client languages</div>
+      <div class="fine">Python · Node.js · Go · Java · Rust · C/C++</div>
+    </div>
+  </div>
+</div>
+
+<!-- =============================================================== FEATURES -->
+<section class="section" id="features">
+  <div class="wrap">
+    <p class="kicker reveal">One binary, four engines</p>
+    <h2 class="reveal">It started as a cache. Then it grew<br />the primitives you usually bolt on next to one.</h2>
+    <p class="section-lede reveal" style="margin-bottom:52px;">
+      Durable messaging, routing, and replay — recoverable after a crash, observable over a single
+      authenticated Management API. No sidecars, no brokers to babysit.
+    </p>
+
+    <div class="feature-grid">
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Z"/><path d="M4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></div>
+        <h3>Cache engine</h3>
+        <p>In-memory key/value store with TTL, batching, pipelining, and bounded memory with eviction.
+        CRC-checked WAL and snapshots, plus an optional shared-memory embedded mode with
+        ASLR-safe offset-based regions.</p>
+      </div>
+
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M3 6h13"/><path d="M3 12h10"/><path d="M3 18h13"/><path d="M19 5v4M19 17v2"/><circle cx="19" cy="12" r="2.2"/></svg></div>
+        <h3>Durable queues</h3>
+        <p>Publish confirms, manual ACK/NACK, requeue, visibility timeouts, prefetch, dead-letter queues,
+        retry delays, message expiry, bounded depth — and crash recovery.
+        At-least-once delivery, honestly labeled.</p>
+      </div>
+
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="5" r="2.2"/><circle cx="19" cy="12" r="2.2"/><circle cx="19" cy="19" r="2.2"/><path d="M7.2 12h9.6M7 11l9.8-5.4M7 13l9.8 5.4"/></svg></div>
+        <h3>Exchanges &amp; routing</h3>
+        <p>Direct, fanout, and topic routing in front of queues. An unnamed default exchange,
+        alternate-exchange routing, explicit unroutable reporting, and durable bindings.</p>
+      </div>
+
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5Z"/><path d="M3 13l9 5 9-5"/><path d="M3 17l9 5 9-5" opacity=".45"/></svg></div>
+        <h3>Streams</h3>
+        <p>Durable, partitioned append logs with keyed partition choice, replay, retention controls,
+        persisted consumer offsets, and leased consumer-group assignment.</p>
+      </div>
+
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M13 2 4.5 13.5H11L9.5 22 19 9.5h-6.5L13 2Z"/></svg></div>
+        <h3>Anti-cache-stampede</h3>
+        <p>Native single-flight with leased claims, bounded waits, and negative caching —
+        plus stale-while-revalidate and refresh-ahead. A hot key never melts your database.</p>
+      </div>
+
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 9l3 2.5L7 14M12.5 14H17"/></svg></div>
+        <h3>Management API &amp; web console</h3>
+        <p>An authenticated, audited, SSE-capable HTTP admin surface — disabled by default, refuses to start unsafely —
+        and a self-hosted React console for dashboards and day-two operations.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================= ATOMIC -->
+<section class="section alt" id="atomic">
+  <div class="wrap atomic">
+    <div class="atomic-copy reveal">
+      <p class="kicker">The hard part, solved</p>
+      <h2>Cache and messaging,<br />committed together.</h2>
+      <p style="color:var(--muted); font-size:17px; max-width:32em;">
+        <code>put_and_publish</code>, <code>put_and_enqueue</code>, <code>delete_and_publish</code>,
+        and conditional <code>update_and_emit</code> commit a cache mutation and a delivery under
+        <b style="color:var(--text)">one durable commit id</b>.
+      </p>
+      <ul>
+        <li>After recovery, <b style="color:var(--text)">both sides exist or neither does</b> — no phantom events, no lost updates.</li>
+        <li>One acknowledgement point, documented in <span class="mono" style="font-size:.9em;">DURABILITY.md</span>, not vibes.</li>
+        <li>Enforced by crash-recovery tests in the standard suite.</li>
+      </ul>
+      <div class="commit-flow">
+        <span>cache mutation</span><span class="arrow">→</span>
+        <span>delivery</span><span class="arrow">→</span>
+        <b>one durable commit id</b><span class="arrow">→</span>
+        <span>recover: all-or-nothing</span>
+      </div>
+    </div>
+    <div class="codeblock reveal">
+      <div class="codewin">
+        <div class="codewin-bar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="title">atomic.py — one durable commit</span>
+        </div>
+<pre><span class="cm"># cache mutation + delivery, atomically</span>
+commit_id = db.<span class="fn">put_and_publish</span>(
+    <span class="st">"order:42"</span>, <span class="st">b'{"status":"created"}'</span>,
+    channel=<span class="st">"orders.created"</span>,
+)
+
+<span class="cm"># crash here. reboot. recover.</span>
+
+db.<span class="fn">get</span>(<span class="st">"order:42"</span>)      <span class="ok">✓ exists</span>
+db.<span class="fn">queue_browse</span>(<span class="st">"orders.created"</span>)  <span class="ok">✓ exists</span>
+<span class="cm"># both sides exist — or neither does. ever.</span></pre>
+      </div>
+      <button class="copybtn" data-copy="1">COPY</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ MENTAL MODEL -->
+<section class="section">
+  <div class="wrap">
+    <p class="kicker reveal">The mental model fits in one table</p>
+    <h2 class="reveal">Three needs. Three answers.</h2>
+    <p class="section-lede reveal" style="margin-bottom:40px;">If you can describe what you want, you already know which primitive to reach for.</p>
+    <div class="wrap" style="padding:0;">
+      <table class="model-table reveal">
+        <thead><tr><th>Need</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td class="need">A value you can read by key</td><td class="use"><code>put</code> and <code>get</code></td></tr>
+          <tr><td class="need">Work that one worker should finish</td><td class="use">Queue + ACK/NACK</td></tr>
+          <tr><td class="need">An ordered history that readers can replay</td><td class="use">Stream + offset</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================== BENCHMARKS -->
+<section class="section alt" id="benchmarks">
+  <div class="wrap bench-grid">
+    <div>
+      <p class="kicker reveal">Numbers are evidence, not marketing</p>
+      <h2 class="reveal">Fast enough to be boring.</h2>
+      <p class="section-lede reveal" style="margin-bottom:26px;">
+        Every headline number is reproducible with a make target, gated in CI — a regression greater
+        than 10% is release-blocking. These are recorded runs, not guarantees on your hardware.
+      </p>
+      <ul style="margin:0; padding-left:20px; color:var(--muted); font-size:15.5px;">
+        <li style="margin-bottom:9px;">Durable publish/consume/ACK steady state measured as retained depth grows 5k → 20k.</li>
+        <li style="margin-bottom:9px;">Stream append measured as history grows 10k → 100k records across 8 partitions.</li>
+        <li style="margin-bottom:9px;">TSAN builds, fuzz suites, and crash-recovery tests keep the fast path honest.</li>
+      </ul>
+      <p class="bench-note reveal">Full methodology and environments: <b>BENCHMARKS.md</b> in the repository.</p>
+    </div>
+    <div class="reveal">
+      <div class="codewin" style="font-size:14px;">
+        <div class="codewin-bar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="title">make bench-quick — recorded samples</span>
+        </div>
+        <div style="padding:14px 6px 16px;">
+          <table class="bench">
+            <thead><tr><th>Workload</th><th>ops/s</th><th>p50</th><th>p99</th></tr></thead>
+            <tbody>
+              <tr><td>Linux · 1 client</td><td>2,374,817</td><td>94 µs</td><td>167 µs</td></tr>
+              <tr><td>Linux · 4 clients</td><td>7,218,664</td><td>129 µs</td><td>249 µs</td></tr>
+              <tr><td>Linux · 8 clients</td><td class="hl">8,371,456</td><td>182 µs</td><td>494 µs</td></tr>
+              <tr><td>macOS · 4 clients</td><td>3,462,964</td><td>232 µs</td><td>685 µs</td></tr>
+              <tr><td>Embedded single gets</td><td>892,427</td><td colspan="2" style="color:var(--faint)">shared-memory, zero-copy</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================== QUICKSTART -->
+<section class="section" id="quickstart">
+  <div class="wrap">
+    <p class="kicker reveal">Quick start</p>
+    <h2 class="reveal">From git clone to durable queue in three commands.</h2>
+    <p class="section-lede reveal" style="margin-bottom:46px;">
+      One executable, one configuration, one data directory. The WAL file is the local recovery log —
+      keep it and your durable queue and stream data survive the restart.
+    </p>
+    <div class="codeblock reveal" style="max-width:760px;">
+      <div class="codewin">
+        <div class="codewin-bar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="title">sh — build &amp; run</span>
+        </div>
+<pre><span class="cm"># build kuttidb, the bench tool, and the embedded library</span>
+$ make
+
+<span class="cm"># start listening on 127.0.0.1:7379 with a durable WAL</span>
+$ ./kuttidb 7379 kuttidb.wal
+<span class="ok">kuttidb: listening on 127.0.0.1:7379 — warm out of the oven 🥖</span>
+
+<span class="cm"># throwaway experiment instead? WAL to stdout:</span>
+$ ./kuttidb 7379 -</pre>
+      </div>
+      <button class="copybtn" data-copy="1">COPY</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================= CLIENTS -->
+<section class="section alt" id="clients">
+  <div class="wrap">
+    <p class="kicker reveal">Native clients, zero ceremony</p>
+    <h2 class="reveal">Talk to it from the language you already have.</h2>
+    <p class="section-lede reveal" style="margin-bottom:44px;">
+      First-class client libraries — TCP, shared-memory embed, and in-process transports where the platform allows.
+    </p>
+    <div class="client-row reveal">
+      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients"><span class="cname">Python</span><span class="cnote">TCP · shm embed · in-process</span></a>
+      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/nodejs"><span class="cname">Node.js</span><span class="cnote">zero dependencies</span></a>
+      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/go"><span class="cname">Go</span><span class="cnote">idiomatic, tested</span></a>
+      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/java"><span class="cname">Java</span><span class="cnote">no JVM needed server-side</span></a>
+      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/rust"><span class="cname">Rust</span><span class="cnote">safe wrapper</span></a>
+      <a class="client" href="https://github.com/OWNER/REPO"><span class="cname">C / C++</span><span class="cnote">libkuttidb_embed.dylib/.so</span></a>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================== HONEST -->
+<section class="section">
+  <div class="wrap">
+    <p class="kicker reveal">What KuttiDB is not</p>
+    <h2 class="reveal" style="margin-bottom:36px;">Honesty about limits is part of the design.</h2>
+    <div class="honest reveal">
+      <blockquote>“Numbers are evidence, not marketing — and no exactly-once claim anywhere.”</blockquote>
+      <ul>
+        <li><b>Not Redis, RabbitMQ, or Kafka</b> — and it speaks none of their wire protocols. The native protocol comes first; compatibility adapters are a later, separate milestone.</li>
+        <li><b>No “no data loss” guarantee.</b> Evictable cache entries may be lost by policy. Acknowledged durable queue messages survive crashes and clean restarts on a healthy single node — but one node can’t protect against disk or machine loss. Replication is on the roadmap, not in the binary.</li>
+        <li><b>Windows is in progress</b> — IOCP, named pipes, and mapping work are tracked on the roadmap.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ==================================================================== DOCS -->
+<section class="section alt" id="docs">
+  <div class="wrap">
+    <p class="kicker reveal">Documentation</p>
+    <h2 class="reveal">Written down, all of it.</h2>
+    <p class="section-lede reveal" style="margin-bottom:42px;">Every guarantee below is a document with a name — read before you trust.</p>
+    <div class="docs-grid reveal">
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/GETTING_STARTED.md"><span class="arr">↗</span><b>Getting started</b><span>Values, queues, streams — first run</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/ARCHITECTURE.md"><span class="arr">↗</span><b>Architecture</b><span>Engines, storage separation, durability</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/PROTOCOL.md"><span class="arr">↗</span><b>Protocol</b><span>Binary wire protocol, CLI flags, limits</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/QUEUES.md"><span class="arr">↗</span><b>Queues</b><span>Delivery and dead-letter rules</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/EXCHANGES.md"><span class="arr">↗</span><b>Exchanges</b><span>Exchange types and routing rules</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/STREAMS.md"><span class="arr">↗</span><b>Streams</b><span>Ordering, offsets, consumer groups</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/DURABILITY.md"><span class="arr">↗</span><b>Durability</b><span>Ack points, atomic ops, single-node limits</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/SECURITY.md"><span class="arr">↗</span><b>Security</b><span>Auth, TLS, permissions, threat model</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/MANAGEMENT_API.md"><span class="arr">↗</span><b>Management API</b><span>Admin surface &amp; security model</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/DEPLOYMENT.md"><span class="arr">↗</span><b>Deployment</b><span>Docker/K8s, metrics, probes, backup</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/BENCHMARKS.md"><span class="arr">↗</span><b>Benchmarks</b><span>Methodology and recorded results</span></a>
+      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/MIGRATION.md"><span class="arr">↗</span><b>Migration</b><span>When to use Redis/RabbitMQ/Kafka instead</span></a>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================== CTA -->
+<section class="cta" id="license">
+  <div class="wrap">
+    <p class="kicker reveal" style="text-align:center;">Apache-2.0 · free for commercial use</p>
+    <h2 class="reveal">One binary.<br />Warm out of the oven. 🥖</h2>
+    <p class="reveal">Clone it, embed it, ship it. Contributions and crash-tests welcome.</p>
+    <div class="ctas reveal">
+      <a class="btn btn-primary" href="https://github.com/OWNER/REPO">Clone from GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/OWNER/REPO/blob/main/LICENSE">Read the license</a>
+    </div>
+    <div class="compose codeblock reveal">
+      <div class="codewin">
+        <div class="codewin-bar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="title">sh — docker compose (multi-arch images in CI)</span>
+        </div>
+<pre>$ KUTTIDB_AUTH_TOKEN_FILE=./auth.token docker compose up --build
+<span class="cm"># non-root container · durable WALs · loopback-only ports · Prometheus metrics</span></pre>
+      </div>
+      <button class="copybtn" data-copy="1">COPY</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================== FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div class="foot-brand">
+        <img src="logo.png" alt="" />
+        <div>
+          <div class="fb-name">KuttiDB</div>
+          <div class="fb-sub">A lightweight, crash-recoverable event cache — in C.</div>
+        </div>
+      </div>
+      <nav class="foot-links">
+        <a href="#features">Features</a>
+        <a href="#quickstart">Quick start</a>
+        <a href="#benchmarks">Benchmarks</a>
+        <a href="#docs">Docs</a>
+        <a href="https://github.com/OWNER/REPO">GitHub</a>
+        <a href="https://github.com/OWNER/REPO/issues">Issues</a>
+      </nav>
+    </div>
+    <div class="foot-base">
+      <span>© 2026 KuttiDB contributors · Released under the <a href="https://www.apache.org/licenses/LICENSE-2.0" style="color:var(--muted);">Apache License 2.0</a></span>
+      <span class="oven">Built in C. One binary. Warm out of the oven. 🥖</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // copy buttons — progressive enhancement; page works fully without JS
+  document.querySelectorAll('.copybtn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var pre = btn.parentElement.querySelector('pre');
+      if (!pre || !navigator.clipboard) return;
+      var text = pre.innerText.split('\n')
+        .filter(function (l) { return !l.trim().startsWith('✓'); })
+        .map(function (l) { return l.replace(/^\$\s?/, ''); })
+        .join('\n').trim();
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = 'COPIED ✓'; btn.classList.add('done');
+        setTimeout(function () { btn.textContent = 'COPY'; btn.classList.remove('done'); }, 1600);
+      });
+    });
+  });
+
+  // scroll reveal
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12 });
+    document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+  } else {
+    document.querySelectorAll('.reveal').forEach(function (el) { el.classList.add('in'); });
+  }
+
+  // close mobile menu after navigating
+  document.querySelectorAll('.nav-links a').forEach(function (a) {
+    a.addEventListener('click', function () { document.getElementById('nav').classList.remove('open'); });
+  });
+</script>
+</body>
+</html>

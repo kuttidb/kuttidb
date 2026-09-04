@@ -1,0 +1,20 @@
+{
+  "name": "kuttidb",
+  "version": "0.0.1-beta",
+  "private": true,
+  "packageManager": "pnpm@10.27.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "ui:dev": "pnpm --filter @kuttidb/management-ui dev",
+    "ui:build": "pnpm --filter @kuttidb/management-ui build",
+    "ui:test": "pnpm --filter @kuttidb/management-ui test",
+    "generate:admin-client": "pnpm --filter @kuttidb/admin-client generate",
+    "check:generated": "pnpm --filter @kuttidb/admin-client check:generated",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "build": "pnpm generate:admin-client && pnpm -r build"
+  }
+}

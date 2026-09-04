@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""kuttidb-cli — command line client for the KuttiDB server.
+
+Usage:
+  kuttidb-cli put KEY VALUE [-]        store a record; '-' reads value from stdin
+  kuttidb-cli get KEY                  print value (raw bytes to stdout)
+  kuttidb-cli del KEY                  delete a record
+  kuttidb-cli mget KEY [KEY ...]       print one value per line (misses -> empty)
+  kuttidb-cli mput                     read "KEY<TAB>VALUE" lines from stdin
+  kuttidb-cli queues                   inventory of declared queues (depth, in-flight)
+  kuttidb-cli topics                   inventory of declared stream topics
+  kuttidb-cli groups                   inventory of stream consumer groups
+  kuttidb-cli stats                    show server stats
+  kuttidb-cli health                   return success only when storage is ready
+  kuttidb-cli capabilities             print negotiated protocol capabilities
+
+Options:
+  -H, --host HOST     server host (default 127.0.0.1, env KUTTIDB_HOST)
+  -p, --port PORT     server port (default 7379, env KUTTIDB_PORT)
+  --auth-file PATH    token file (env KUTTIDB_AUTH_FILE)
+  --tls               require TLS (env KUTTIDB_TLS=1)
+  --ca-file PATH      trusted certificate/CA file (env KUTTIDB_CA_FILE)
+  --server-name NAME  certificate name (defaults to host)
+
+Exit codes: 0 ok, 1 miss/not found, 2 connection or server error.
+"""
+
+import os
+import socket
+import ssl
+import struct
+import sys
+
+OP_PUT = 0x01
+OP_GET = 0x02
+OP_DELETE = 0x03
+OP_STATS = 0x04
+OP_PUT_TTL = 0x05
+OP_AUTH = 0x06
+OP_HEALTH = 0x09
+OP_CAPABILITIES = 0x0a
+OP_PUT_BATCH = 0x11
+OP_GET_BATCH = 0x12
+OP_PUT_BATCH_TTL = 0x13
+ST_OK = 0x00
+ST_MISS = 0x01
+MAX_KEY = (1 << 16) - 1
+MAX_VALUE = 64 << 20
+BATCH = 256
+
+
+class CLIError(Exception):
+    pass
+
+
+class Conn:
+    def __init__(self, host, port, auth_token=None, tls=False, ca_file=None,
+                 server_name=None):
+        raw_sock = socket.create_connection((host, port), timeout=10)
+        if tls:
+            context = ssl.create_default_context(cafile=ca_file)
+            try:
+                self.sock = context.wrap_socket(
+                    raw_sock, server_hostname=server_name or host)
+            except Exception:
+                raw_sock.close()
+                raise
+        else:
+            self.sock = raw_sock
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.buf = b""
+        if auth_token is not None:
+            if not auth_token or len(auth_token) > 1024:
+                raise CLIError("auth token must contain 1..1024 bytes")
+            self.send_req(single(OP_AUTH, auth_token))
+            status, _ = read_resp(self)
+            if status != ST_OK:
+                raise CLIError("authentication failed")
+
+    def recv_exact(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(1 << 16)
+            if not chunk:
+                raise CLIError("connection closed")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def send_req(self, data):
+        self.sock.sendall(data)
+
+
+def single(op, key, value=b"", ttl_ms=0):
+    kb = key.encode() if isinstance(key, str) else key
+    if len(kb) > MAX_KEY:
+        raise CLIError("key too large")
+    if len(value) > MAX_VALUE:
+        raise CLIError("value too large")
+    if ttl_ms:
+        return (bytes([op]) + struct.pack("<HII", len(kb), len(value), ttl_ms) + kb + value)
+    return bytes([op]) + struct.pack("<HI", len(kb), len(value)) + kb + value
+
+
+def parse_ttl(text):
+    """'90' | '5m' | '2h' -> seconds"""
+    mult = 1
+    t = text.strip().lower()
+    if t.endswith("ms"):
+        return max(0.001, float(t[:-2]) / 1000.0)
+    if t.endswith("s"):
+        t = t[:-1]
+    elif t.endswith("m"):
+        t, mult = t[:-1], 60
+    elif t.endswith("h"):
+        t, mult = t[:-1], 3600
+    elif t.endswith("d"):
+        t, mult = t[:-1], 86400
+    return float(t) * mult
+
+
+def read_resp(c):
+    status, vlen = struct.unpack("<BI", c.recv_exact(5))
+    if vlen > MAX_VALUE:
+        raise CLIError("invalid response length")
+    return status, c.recv_exact(vlen) if vlen else b""
+
+
+OP_QUEUE_LIST = 0x2c
+OP_STREAM_LIST = 0x69
+OP_STREAM_GROUP_LIST = 0x6a
+
+
+def _list_request(c, opcode):
+    c.send_req(single(opcode, b"", b""))
+    status, value = read_resp(c)
+    if status != ST_OK:
+        raise CLIError("inventory request failed")
+    return value
+
+
+def cmd_queues(c):
+    value = _list_request(c, OP_QUEUE_LIST)
+    (n,) = struct.unpack("<H", value[:2])
+    at, rows = 2, []
+    for _ in range(n):
+        (nlen,) = struct.unpack("<H", value[at:at + 2])
+        name = value[at + 2:at + 2 + nlen].decode()
+        depth, inflight = struct.unpack("<QQ", value[at + 2 + nlen:at + 18 + nlen])
+        rows.append((name, depth, inflight))
+        at += 18 + nlen
+    for name, depth, inflight in rows:
+        print(f"{name}\tdepth={depth}\tinflight={inflight}")
+
+
+def cmd_topics(c):
+    value = _list_request(c, OP_STREAM_LIST)
+    (n,) = struct.unpack("<H", value[:2])
+    at, rows = 2, []
+    for _ in range(n):
+        (tlen,) = struct.unpack("<H", value[at:at + 2])
+        topic = value[at + 2:at + 2 + tlen].decode()
+        partitions, records, bts = struct.unpack("<IQQ", value[at + 2 + tlen:at + 22 + tlen])
+        rows.append((topic, partitions, records, bts))
+        at += 22 + tlen
+    for topic, partitions, records, bts in rows:
+        print(f"{topic}\tpartitions={partitions}\trecords={records}\tbytes={bts}")
+
+
+def cmd_groups(c):
+    value = _list_request(c, OP_STREAM_GROUP_LIST)
+    (n,) = struct.unpack("<H", value[:2])
+    at, rows = 2, []
+    for _ in range(n):
+        (tlen,) = struct.unpack("<H", value[at:at + 2])
+        topic = value[at + 2:at + 2 + tlen].decode()
+        (glen,) = struct.unpack("<H", value[at + 2 + tlen:at + 4 + tlen])
+        group = value[at + 4 + tlen:at + 4 + tlen + glen].decode()
+        generation, members = struct.unpack(
+            "<QI", value[at + 4 + tlen + glen:at + 16 + tlen + glen])
+        rows.append((topic, group, generation, members))
+        at += 16 + tlen + glen
+    for topic, group, generation, members in rows:
+        print(f"{topic}/{group}\tgeneration={generation}\tmembers={members}")
+
+
+def cmd_put(c, key, value, ttl_s=None):
+    ttl_ms = max(1, int(ttl_s * 1000)) if ttl_s else 0
+    op = OP_PUT_TTL if ttl_ms else OP_PUT
+    c.send_req(single(op, key, value, ttl_ms))
+    status, _ = read_resp(c)
+    return status, None
+
+
+def cmd_get(c, key):
+    c.send_req(single(OP_GET, key))
+    return read_resp(c)
+
+
+def cmd_del(c, key):
+    c.send_req(single(OP_DELETE, key))
+    return read_resp(c)[0]
+
+
+def cmd_mget(c, keys):
+    result = {}
+    for start in range(0, len(keys), BATCH):
+        chunk = keys[start:start + BATCH]
+        enc = [k.encode() for k in chunk]
+        if any(len(kb) > MAX_KEY for kb in enc):
+            raise CLIError("key too large")
+        req = bytes([OP_GET_BATCH, 0, 0]) + struct.pack("<I", len(chunk))
+        req += b"".join(struct.pack("<H", len(kb)) + kb for kb in enc)
+        c.send_req(req)
+        count = struct.unpack("<I", c.recv_exact(4))[0]
+        for i in range(count):
+            status, vlen = struct.unpack("<BI", c.recv_exact(5))
+            if vlen > MAX_VALUE:
+                raise CLIError("invalid response length")
+            val = c.recv_exact(vlen) if vlen else b""
+            if status == ST_MISS:
+                result[chunk[i]] = None
+            else:
+                result[chunk[i]] = val
+    return result
+
+
+def cmd_mput(c, pairs, ttl_s=None):
+    ttl_ms = max(1, int(ttl_s * 1000)) if ttl_s else 0
+    op = OP_PUT_BATCH_TTL if ttl_ms else OP_PUT_BATCH
+    items = list(pairs)
+    for start in range(0, len(items), BATCH):
+        chunk = items[start:start + BATCH]
+        req = bytes([op, 0, 0]) + struct.pack("<I", len(chunk))
+        for k, v in chunk:
+            kb = k.encode()
+            if len(kb) > MAX_KEY:
+                raise CLIError("key too large")
+            if len(v) > MAX_VALUE:
+                raise CLIError("value too large")
+            item_size = (10 if ttl_ms else 6) + len(kb) + len(v)
+            if len(req) + item_size > MAX_VALUE:
+                raise CLIError("batch too large")
+            req += struct.pack("<HI", len(kb), len(v))
+            if ttl_ms:
+                req += struct.pack("<I", ttl_ms)
+            req += kb + v
+        c.send_req(req)
+        status = c.recv_exact(1)[0]
+        if status != ST_OK:
+            raise CLIError("server error in mput")
+
+
+def main(argv):
+    host = os.environ.get("KUTTIDB_HOST", "127.0.0.1")
+    port = int(os.environ.get("KUTTIDB_PORT", "7379"))
+    auth_file = os.environ.get("KUTTIDB_AUTH_FILE")
+    use_tls = os.environ.get("KUTTIDB_TLS", "").lower() in ("1", "true", "yes")
+    ca_file = os.environ.get("KUTTIDB_CA_FILE")
+    server_name = None
+    show_help = False
+    args = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-H", "--host"):
+            host = argv[i + 1]
+            i += 2
+        elif a in ("-p", "--port"):
+            port = int(argv[i + 1])
+            i += 2
+        elif a in ("-h", "--help"):
+            show_help = True
+            i += 1
+        elif a == "--auth-file":
+            auth_file = argv[i + 1]
+            i += 2
+        elif a == "--tls":
+            use_tls = True
+            i += 1
+        elif a == "--ca-file":
+            ca_file = argv[i + 1]
+            i += 2
+        elif a == "--server-name":
+            server_name = argv[i + 1]
+            i += 2
+        else:
+            args.append(a)
+            i += 1
+
+    if show_help:
+        print(__doc__)
+        return 0
+    if not args:
+        print(__doc__, file=sys.stderr)
+        return 2
+    cmd, rest = args[0], args[1:]
+
+    try:
+        auth_token = None
+        if auth_file:
+            with open(auth_file, "rb") as f:
+                auth_token = f.read(1025).rstrip(b"\r\n")
+            if not auth_token or len(auth_token) > 1024:
+                raise CLIError("auth token file must contain 1..1024 bytes")
+        c = Conn(host, port, auth_token, use_tls, ca_file, server_name)
+    except (OSError, CLIError) as e:
+        print(f"kuttidb-cli: cannot connect to {host}:{port} ({e})", file=sys.stderr)
+        return 2
+
+    try:
+        if cmd == "put":
+            ttl_s = None
+            clean = []
+            i = 0
+            while i < len(rest):
+                if rest[i] == "--ttl":
+                    ttl_s = parse_ttl(rest[i + 1])
+                    i += 2
+                else:
+                    clean.append(rest[i])
+                    i += 1
+            if len(clean) < 2:
+                print("usage: kuttidb-cli put KEY VALUE|- [--ttl 90|5m|2h]", file=sys.stderr)
+                return 2
+            key, valspec = clean[0], clean[1]
+            value = sys.stdin.buffer.read() if valspec == "-" else valspec.encode()
+            status, _ = (cmd_put(c, key, value, ttl_s))
+            if status != ST_OK:
+                raise CLIError("server rejected put")
+        elif cmd == "get":
+            if len(rest) != 1:
+                print("usage: kuttidb-cli get KEY", file=sys.stderr)
+                return 2
+            status, value = cmd_get(c, rest[0])
+            if status == ST_MISS:
+                return 1
+            if status != ST_OK:
+                raise CLIError("server error")
+            sys.stdout.buffer.write(value)
+            sys.stdout.buffer.flush()
+        elif cmd == "del":
+            if len(rest) != 1:
+                print("usage: kuttidb-cli del KEY", file=sys.stderr)
+                return 2
+            return 0 if cmd_del(c, rest[0]) == ST_OK else 1
+        elif cmd == "mget":
+            if not rest:
+                print("usage: kuttidb-cli mget KEY...", file=sys.stderr)
+                return 2
+            res = cmd_mget(c, rest)
+            for k in rest:
+                v = res.get(k)
+                sys.stdout.buffer.write(b"" if v is None else v)
+                sys.stdout.buffer.write(b"\n")
+        elif cmd == "mput":
+            ttl_s = None
+            clean = []
+            i = 0
+            while i < len(rest):
+                if rest[i] == "--ttl":
+                    ttl_s = parse_ttl(rest[i + 1])
+                    i += 2
+                else:
+                    clean.append(rest[i])
+                    i += 1
+            pairs = []
+            for line in sys.stdin.buffer.read().split(b"\n"):
+                if not line:
+                    continue
+                if b"\t" not in line:
+                    raise CLIError(f"mput line missing TAB separator: {line[:40]!r}")
+                k, v = line.split(b"\t", 1)
+                pairs.append((k.decode(), v))
+            cmd_mput(c, pairs, ttl_s)
+            print(f"stored {len(pairs)} records", file=sys.stderr)
+        elif cmd == "stats":
+            c.send_req(single(OP_STATS, b""))
+            status, value = read_resp(c)
+            if status != ST_OK:
+                raise CLIError("stats unavailable")
+            print(value.decode())
+        elif cmd == "health":
+            c.send_req(single(OP_HEALTH, b""))
+            status, _ = read_resp(c)
+            if status != ST_OK:
+                raise CLIError("server is not ready")
+        elif cmd == "capabilities":
+            c.send_req(single(OP_CAPABILITIES, b"", struct.pack("<HH", 1, 2)))
+            status, value = read_resp(c)
+            if status != ST_OK or len(value) != 12:
+                raise CLIError("capability negotiation failed")
+            major, minor, features = struct.unpack("<HHQ", value)
+            print(f"protocol={major}.{minor} features=0x{features:016x}")
+        elif cmd == "queues":
+            cmd_queues(c)
+        elif cmd == "topics":
+            cmd_topics(c)
+        elif cmd == "groups":
+            cmd_groups(c)
+        else:
+            print(f"unknown command: {cmd}", file=sys.stderr)
+            return 2
+    except CLIError as e:
+        print(f"kuttidb-cli: {e}", file=sys.stderr)
+        return 2
+    finally:
+        c.sock.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,41 @@
+# build artifacts
+*.o
+*.dSYM/
+kuttidb
+kuttidb-bench
+bench_stream
+bench_queue
+kuttidb_sanitize
+kuttidb_tsan
+libkuttidb_embed.dylib
+libkuttidb_embed.so
+core_test*
+platform_test
+queue_*test*
+exchange_test
+atomic_test
+stream_test*
+fuzz_test*
+embed_aslr_test
+queue_tsan_test
+build/
+clients/rust/target/
+clients/java/*.class
+__pycache__/
+*.pyc
+.DS_Store
+# JavaScript workspace artifacts
+node_modules/
+.pnpm-store/
+apps/management-ui/dist/
+packages/*/dist/
+# local runtime data
+*.wal
+*.wal.queues
+*.wal.streams
+*.wal.snap
+*.wal.compact.*
+*.wal.checkpoint.*
+run/
+managed_lifecycle_test
+managed_lock_test
