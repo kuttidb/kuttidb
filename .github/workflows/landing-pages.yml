@@ -1,7 +1,9 @@
 # Deploys the static landing page (landing/) to GitHub Pages.
 #
-# One-time setup in the repository settings (required, the workflow cannot do it):
-#   Settings → Pages → Build and deployment → Source: "GitHub Actions"
+# Self-configuring: the enablement parameter below turns on Pages with the
+# "GitHub Actions" build source on the first run, so no manual settings flip
+# is required. (If it ever complains about permissions, flip it once by hand:
+#   Settings → Pages → Build and deployment → Source: "GitHub Actions")
 #
 # Result: https://kuttidb.github.io/kuttidb/
 name: Deploy landing page to GitHub Pages
@@ -36,6 +38,10 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # Enable Pages on first run if the repo setting hasn't been flipped
+          # yet. No-op afterwards.
+          enablement: true
 
       # The site is prebuilt and self-contained — just publish the folder as-is.
       - name: Upload artifact
