@@ -179,6 +179,7 @@ Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architectur
 | [SECURITY.md](docs/SECURITY.md) | Auth, TLS, permissions, threat model |
 | [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
 | [DEPLOYMENT.md](docs/operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
+| [RELEASE.md](docs/operations/RELEASE.md) | Release cycle, official binaries, tagging process |
 | [BENCHMARKS.md](docs/operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [MIGRATION.md](docs/guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
 | [openapi/management-v1.yaml](openapi/management-v1.yaml) | Versioned Management API contract |

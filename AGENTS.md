@@ -25,7 +25,7 @@ instructions, notes — goes under `docs/` in the matching subfolder.
 | `docs/guides/` | First-run guides, how-tos, migration comparisons | `UPPER_SNAKE.md` |
 | `docs/design/` | Architecture, wire protocol, durability model | `UPPER_SNAKE.md` |
 | `docs/messaging/` | Queue, exchange, and stream semantics | `UPPER_SNAKE.md` |
-| `docs/operations/` | Deployment, Docker, Kubernetes, benchmarks | `UPPER_SNAKE.md` |
+| `docs/operations/` | Deployment, Docker, Kubernetes, benchmarks, releases | `UPPER_SNAKE.md` |
 | `docs/api/` | Management API reference material | `UPPER_SNAKE.md` |
 | `docs/plans/` | Roadmap plus implementation plans and instruction documents used for development (by humans or agents) | `UPPER_SNAKE.md`, suffix `_PLAN` or `_INSTRUCTION` |
 | `docs/adr/` | Architecture decision records | `NNNN-short-title.md`, sequential number |

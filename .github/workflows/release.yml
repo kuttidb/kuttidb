@@ -1,0 +1,181 @@
+# Builds and publishes the official KuttiDB binaries.
+#
+# Trigger: push a v* tag (v0.0.2, v0.1.0-beta.1, ...) to publish a release, or
+# run via workflow_dispatch for a dry run — the identical pipeline runs, but
+# artifacts are only attached to the workflow run and no GitHub Release is
+# created.
+#
+# Each platform job: CMake Release build, the full ctest suite as a release
+# gate, a check that TLS (OpenSSL) is really linked in, then a tarball. The
+# release job aggregates per-platform checksums into SHASUMS256.txt and
+# publishes the GitHub Release (marked prerelease when the tag contains a
+# hyphen, e.g. v0.0.2-beta).
+#
+# Process doc: docs/operations/RELEASE.md
+name: Release official binaries
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds pin the oldest supported runner image on purpose:
+          # binaries inherit that image's glibc, so building on 22.04 keeps
+          # the runtime floor at glibc 2.35 / OpenSSL 3 (Ubuntu 22.04+,
+          # Debian 12+, RHEL 9+).
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-22.04
+            embed: libkuttidb_embed.so
+          - os: linux
+            arch: arm64
+            runner: ubuntu-22.04-arm
+            embed: libkuttidb_embed.so
+          # macOS deployment target 12.0 keeps the binaries runnable on
+          # Monterey and newer (Intel) / Big Sur and newer (Apple silicon).
+          - os: macos
+            arch: x86_64
+            runner: macos-15-intel
+            embed: libkuttidb_embed.dylib
+          - os: macos
+            arch: arm64
+            runner: macos-15
+            embed: libkuttidb_embed.dylib
+    env:
+      EMBED_LIB: ${{ matrix.embed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install OpenSSL headers
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends libssl-dev
+          else
+            BREW_OPENSSL="$(brew --prefix openssl@3 2>/dev/null || true)"
+            if [ -z "$BREW_OPENSSL" ] || [ ! -d "$BREW_OPENSSL" ]; then
+              brew install openssl@3
+            fi
+            echo "OPENSSL_ROOT=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Derive release version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Building version: $VERSION"
+
+      - name: Configure and build (Release)
+        run: |
+          PLATFORM_ARGS=""
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Be explicit: FindOpenSSL must never silently miss Homebrew's
+            # keg-only openssl@3 — the TLS check below would catch it, but
+            # failing at configure time is a clearer error.
+            PLATFORM_ARGS="-DOPENSSL_ROOT_DIR=$OPENSSL_ROOT -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0"
+          fi
+          cmake -S . -B build-release \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DKUTTIDB_TLS=ON \
+            $PLATFORM_ARGS
+          cmake --build build-release -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Test gate (ctest)
+        run: ctest --test-dir build-release --output-on-failure
+
+      - name: Verify TLS is linked
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            ldd build-release/kuttidb | grep -q libssl
+          else
+            otool -L build-release/kuttidb | grep -q libssl
+          fi
+          echo "OpenSSL is linked into kuttidb (TLS available)"
+
+      - name: Package
+        run: |
+          PKG="kuttidb-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "dist/${PKG}"
+          cp -p build-release/kuttidb build-release/kuttidb-bench "dist/${PKG}/"
+          cp -p "build-release/${EMBED_LIB}" "dist/${PKG}/"
+          cp -p kuttidb-cli README.md LICENSE "dist/${PKG}/"
+          tar -czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${PKG}.tar.gz"
+          else
+            shasum -a 256 "dist/${PKG}.tar.gz"
+          fi
+          ls -la dist
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Collect built tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Aggregate checksums
+        run: |
+          cd dist
+          sha256sum -- *.tar.gz > SHASUMS256.txt
+          echo "--- SHASUMS256.txt ---"
+          cat SHASUMS256.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHASUMS256.txt
+          body: |
+            Official binaries for KuttiDB ${{ github.ref_name }}.
+
+            Verify a download: `sha256sum -c SHASUMS256.txt`
+
+            Platform notes: the Linux builds need glibc 2.35+ and OpenSSL 3
+            (Ubuntu 22.04+, Debian 12+, RHEL 9+); the macOS builds target
+            macOS 12+. Each tarball contains the `kuttidb` server,
+            `kuttidb-bench`, the embedded library (`libkuttidb_embed.so` /
+            `.dylib`), and the `kuttidb-cli` client.
+
+            Docs: [Getting started](https://github.com/kuttidb/kuttidb/blob/main/docs/guides/GETTING_STARTED.md)
+            · [Deployment](https://github.com/kuttidb/kuttidb/blob/main/docs/operations/DEPLOYMENT.md)
+            · [Release process](https://github.com/kuttidb/kuttidb/blob/main/docs/operations/RELEASE.md)
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
