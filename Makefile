@@ -143,7 +143,7 @@ test: all core_test platform_test managed_lifecycle_test managed_lock_test queue
 		--queue-wal $$tmp/queue.wal 2>/dev/null & server_pid=$$!; \
 	trap 'kill $$server_pid 2>/dev/null || true; rm -rf $$tmp' EXIT; sleep 0.7; \
 	cd clients/go && go vet ./... && go run ./cmd/smoketest; \
-	cd ../java && javac -encoding UTF-8 KuttiDBClient.java Smoke.java && java -cp . Smoke; \
+	cd ../java && javac -encoding UTF-8 *.java && java -cp . Smoke; \
 	cd ../rust && cargo build --quiet && ./target/debug/smoketest; \
 	if command -v node >/dev/null 2>&1; then cd ../nodejs && node smoke.js 7394; else echo "node not installed: skipping Node.js client smoke"; fi; \
 	kill $$server_pid; wait $$server_pid || true
@@ -157,7 +157,7 @@ managed-sdk-test: kuttidb $(EMBED_LIB)
 	KUTTIDB_SERVER="$$PWD/kuttidb" node clients/nodejs/managed_smoke.js "$$tmp/node"; \
 	KUTTIDB_SERVER="$$PWD/kuttidb" node clients/nodejs/managed_smoke.js "$$tmp/node-tcp" tcp; \
 	cd clients/go && KUTTIDB_MANAGED_INTEGRATION=1 KUTTIDB_SERVER="$$PWD/../../kuttidb" go test -run TestManagedLifecycleIntegration -count=1; \
-	cd ../java && javac -encoding UTF-8 KuttiDBClient.java ManagedSmoke.java && java -cp . ManagedSmoke "$$tmp/java" "$$PWD/../../kuttidb"; \
+	cd ../java && javac -encoding UTF-8 *.java && java -cp . ManagedSmoke "$$tmp/java" "$$PWD/../../kuttidb"; \
 	java -cp . ManagedSmoke "$$tmp/java-tcp" "$$PWD/../../kuttidb" tcp; \
 	cd ../rust && KUTTIDB_MANAGED_INTEGRATION=1 KUTTIDB_SERVER="$$PWD/../../kuttidb" cargo test managed_lifecycle_integration -- --nocapture
 
