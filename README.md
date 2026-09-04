@@ -154,6 +154,11 @@ Native client libraries live in [`clients/`](clients) and are covered by the `ma
 | Rust | [`clients/rust`](clients/rust) | Managed Unix and loopback TCP |
 | C/C++ | `libkuttidb_embed.dylib` / `.so` | Shared-memory embedded mode |
 
+Python, Node.js, and Rust clients are published to PyPI (`kuttidb`), npm
+(`@kuttidb/client`), and crates.io (`kuttidb`); the Go module is fetched
+directly from this repository. Release procedure:
+[CLIENT_PUBLISHING.md](docs/operations/CLIENT_PUBLISHING.md).
+
 ## Run it with Docker
 
 ```sh
@@ -182,6 +187,7 @@ Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architectur
 | [RELEASE.md](docs/operations/RELEASE.md) | Release cycle, official binaries, tagging process |
 | [BENCHMARKS.md](docs/operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [MIGRATION.md](docs/guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
+| [CLIENT_PUBLISHING.md](docs/operations/CLIENT_PUBLISHING.md) | Publishing the client SDKs to PyPI, npm, crates.io, and Go |
 | [openapi/management-v1.yaml](openapi/management-v1.yaml) | Versioned Management API contract |
 
 ## Testing and benchmarks

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kuttidb"
+dynamic = ["version"]
+description = "Python client for KuttiDB: TCP/TLS wire protocol, embedded shared-memory client, and managed local server lifecycle"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "KuttiDB contributors" }]
+keywords = ["database", "key-value", "queue", "stream", "embedded"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+]
+# The client is standard library only.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kuttidb/kuttidb"
+Repository = "https://github.com/kuttidb/kuttidb"
+Issues = "https://github.com/kuttidb/kuttidb/issues"
+
+# Version is single-sourced from kuttidb/__init__.py.
+[tool.hatch.version]
+path = "kuttidb/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kuttidb"]
+# Hatchling collects the repository-root .gitignore (walking up to the .git
+# boundary) and applies its patterns anchored at this project root, so root
+# patterns like /kuttidb prune the whole package directory. `ignore-vcs`
+# disables all VCS exclusion rules; __pycache__ is excluded explicitly to
+# keep builds deterministic regardless of local git state.
+ignore-vcs = true
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/kuttidb",
+    "/README.md",
+    "/LICENSE",
+]
+ignore-vcs = true
+exclude = ["**/__pycache__", "**/*.pyc"]

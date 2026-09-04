@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"kuttidb"
+	"github.com/kuttidb/kuttidb/clients/go"
 )
 
 func main() {

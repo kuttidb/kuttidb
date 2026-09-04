@@ -1,0 +1,38 @@
+{
+  "name": "@kuttidb/client",
+  "version": "0.0.1-beta",
+  "description": "KuttiDB Node.js client: binary wire protocol over TCP, TLS, and Unix sockets with queues, exchanges, streams, atomic operations, and managed local server lifecycle. Zero dependencies.",
+  "license": "Apache-2.0",
+  "main": "kuttidb_client.js",
+  "exports": {
+    ".": "./kuttidb_client.js"
+  },
+  "files": [
+    "kuttidb_client.js"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "database",
+    "key-value",
+    "queue",
+    "stream",
+    "kuttidb"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kuttidb/kuttidb.git",
+    "directory": "clients/nodejs"
+  },
+  "bugs": {
+    "url": "https://github.com/kuttidb/kuttidb/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "scripts": {
+    "test": "node --check kuttidb_client.js && node --check smoke.js && node --check managed_smoke.js"
+  }
+}

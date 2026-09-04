@@ -1,0 +1,43 @@
+# Publishes the Node.js client to npm when a node-v* tag is pushed.
+#
+# Auth: NPM_TOKEN (granular access token). After the first release, switch to
+# npm Trusted Publishing — the `id-token: write` permission is already in
+# place, so only the npm-side configuration changes.
+# See docs/operations/CLIENT_PUBLISHING.md.
+name: Release Node.js client (npm)
+
+on:
+  push:
+    tags: ['node-v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+# npm rejects re-publishing an existing version; one run at a time is enough.
+concurrency:
+  group: release-node
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/nodejs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Syntax gate
+        run: node --check kuttidb_client.js && node --check smoke.js && node --check managed_smoke.js
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

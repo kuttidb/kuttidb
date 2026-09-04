@@ -1,0 +1,45 @@
+# Go has no central registry: publishing is the git tag itself. Consumers
+# `go get github.com/kuttidb/kuttidb/clients/go` and v2+ tags move the module
+# path (see docs/operations/CLIENT_PUBLISHING.md).
+#
+# This workflow exists so a go-v* tag still gets the same gate as the other
+# clients: build the server, then vet/test/smoke the Go module against it.
+name: Release Go client (gate)
+
+on:
+  push:
+    tags: ['go-v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-go
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build server and embedded library
+        run: make kuttidb libkuttidb_embed.so
+
+      - name: Vet, test, and smoke the Go client
+        run: |
+          set -e
+          tmp=$(mktemp -d)
+          trap 'kill $server_pid 2>/dev/null || true; rm -rf $tmp' EXIT
+          ./kuttidb 7394 $tmp/kuttidb.wal 100 --queue-wal $tmp/queue.wal 2>/dev/null &
+          server_pid=$!
+          sleep 1
+          cd clients/go
+          go vet ./...
+          go test ./... -count=1
+          go run ./cmd/smoketest

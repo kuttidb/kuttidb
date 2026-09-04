@@ -32,6 +32,7 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | [api/MANAGEMENT_API.md](api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
 | [operations/DEPLOYMENT.md](operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
 | [operations/RELEASE.md](operations/RELEASE.md) | Release cycle, official binaries, tagging process |
+| [operations/CLIENT_PUBLISHING.md](operations/CLIENT_PUBLISHING.md) | Client SDK releases: PyPI, npm, crates.io, Go module |
 | [operations/DOCKER.md](operations/DOCKER.md) | Container image, compose setup, runtime flags |
 | [operations/KUBERNETES.md](operations/KUBERNETES.md) | Manifests, probes, and production notes |
 | [operations/BENCHMARKS.md](operations/BENCHMARKS.md) | Recorded benchmark methodology and results |

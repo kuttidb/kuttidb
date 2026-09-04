@@ -1,0 +1,38 @@
+# Publishes the Rust client to crates.io when a rust-v* tag is pushed.
+#
+# Auth: CRATES_IO_TOKEN secret (crates.io API token).
+# See docs/operations/CLIENT_PUBLISHING.md.
+name: Release Rust client (crates.io)
+
+on:
+  push:
+    tags: ['rust-v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-rust
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test gate
+        run: cargo test --quiet
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: Publish
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

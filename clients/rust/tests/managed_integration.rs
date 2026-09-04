@@ -4,6 +4,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kuttidb::{Client, ManagedOptions, ManagedTransport};
 
+/// macOS $TMPDIR (/var/folders/...) pushes "<dir>/kuttidb.sock" past the
+/// 104-byte sockaddr_un limit, so prefer /tmp when it exists. t.TempDir()
+/// equivalents on Linux CI stay short either way.
+fn short_temp_root() -> PathBuf {
+    if std::path::Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 #[test]
 fn managed_lifecycle_integration() {
     if std::env::var("KUTTIDB_MANAGED_INTEGRATION").ok().as_deref() != Some("1") {
@@ -11,7 +22,7 @@ fn managed_lifecycle_integration() {
     }
     let executable = PathBuf::from(std::env::var_os("KUTTIDB_SERVER").expect("KUTTIDB_SERVER required"));
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let data_dir = std::env::temp_dir().join(format!("kuttidb-managed-rust-{}-{nonce}", std::process::id()));
+    let data_dir = short_temp_root().join(format!("kuttidb-managed-rust-{}-{nonce}", std::process::id()));
     let mut client = Client::connect_managed(ManagedOptions {
         data_dir: data_dir.clone(),
         executable: Some(executable),
@@ -26,7 +37,7 @@ fn managed_lifecycle_integration() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let tcp_dir = std::env::temp_dir().join(format!("kuttidb-managed-rust-tcp-{}-{nonce}", std::process::id()));
+    let tcp_dir = short_temp_root().join(format!("kuttidb-managed-rust-tcp-{}-{nonce}", std::process::id()));
     let mut tcp = Client::connect_managed(ManagedOptions {
         data_dir: tcp_dir.clone(),
         executable: Some(PathBuf::from(std::env::var_os("KUTTIDB_SERVER").unwrap())),

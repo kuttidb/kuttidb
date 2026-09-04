@@ -1,0 +1,61 @@
+# Publishes the Python client to PyPI when a py-v* tag is pushed.
+#
+# Auth: PyPI Trusted Publishing (OIDC) — no tokens are stored. The pending
+# publishers registered on PyPI and TestPyPI name this exact workflow file
+# and the `pypi` environment; changing either breaks publishing.
+#
+# Manual runs (workflow_dispatch) publish to TestPyPI as a dry run.
+# See docs/operations/CLIENT_PUBLISHING.md.
+name: Release Python client (PyPI)
+
+on:
+  push:
+    tags: ['py-v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-python
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Stage package sources
+        run: python3 clients/python/prepare.py
+
+      - name: Build sdist and wheel
+        run: |
+          python3 -m pip install --upgrade build twine
+          cd clients/python
+          python3 -m build --outdir dist .
+          python3 -m twine check dist/*
+
+      - name: Import smoke test from the built wheel
+        run: |
+          python3 -m pip install --no-deps clients/python/dist/*.whl
+          python3 -c "import kuttidb; print('kuttidb', kuttidb.__version__, kuttidb.KuttiDBClient)"
+
+      - name: Publish to TestPyPI (manual dry runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: clients/python/dist
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI (tag runs)
+        if: github.event_name == 'push'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: clients/python/dist

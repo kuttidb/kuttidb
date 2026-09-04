@@ -161,6 +161,11 @@ managed-sdk-test: kuttidb $(EMBED_LIB)
 	java -cp . ManagedSmoke "$$tmp/java-tcp" "$$PWD/../../kuttidb" tcp; \
 	cd ../rust && KUTTIDB_MANAGED_INTEGRATION=1 KUTTIDB_SERVER="$$PWD/../../kuttidb" cargo test managed_lifecycle_integration -- --nocapture
 
+# Stage the Python client sources into the publishable kuttidb package
+# (clients/python/kuttidb/) for local wheel builds and release CI.
+package-python:
+	python3 clients/python/prepare.py
+
 bench: kuttidb kuttidb-bench
 	@set -e; ./kuttidb 7392 - 100 2>/dev/null & server_pid=$$!; \
 	trap 'kill $$server_pid 2>/dev/null || true' EXIT; sleep 0.7; ./kuttidb-bench 7392 8 100000; \

@@ -3,6 +3,10 @@ name = "kuttidb"
 version = "0.0.1-beta"
 edition = "2021"
 description = "Client for the kuttidb binary protocol (put/get/delete, TTL, batched ops, stats)"
+license = "Apache-2.0"
+repository = "https://github.com/kuttidb/kuttidb"
+homepage = "https://github.com/kuttidb/kuttidb"
+keywords = ["database", "key-value", "queue", "stream", "embedded"]
 
 [lib]
 name = "kuttidb"

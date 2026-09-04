@@ -4,6 +4,10 @@ How official KuttiDB binaries are built, tested, and published. The pipeline
 lives in [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
 and is fully tag-driven: a tag is the release.
 
+Client SDK packages (PyPI, npm, crates.io, the Go module) are released
+separately with their own language-prefixed tag scheme — see
+[CLIENT_PUBLISHING.md](CLIENT_PUBLISHING.md).
+
 ## Release cycle
 
 KuttiDB is pre-1.0 and uses `MAJOR.MINOR.PATCH` with optional pre-release

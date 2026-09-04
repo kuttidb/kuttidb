@@ -10,13 +10,19 @@ from __future__ import annotations
 import os
 import sys
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SRC = os.path.join(_ROOT, "src")
-if _SRC not in sys.path:
-    sys.path.insert(0, _SRC)
-
-from kuttidb_client import KuttiDBClient
-from kuttidb_embed import KuttiEmbed, KuttiEmbedError
+try:  # packaged layout: kuttidb.client / kuttidb.embed (clients/python staging)
+    from .client import KuttiDBClient
+    from .embed import KuttiEmbed, KuttiEmbedError
+except ImportError:  # repository layout: flat modules in src/ and clients/
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _SRC = os.path.join(_ROOT, "src")
+    if _SRC not in sys.path:
+        sys.path.insert(0, _SRC)
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    from kuttidb_client import KuttiDBClient
+    from kuttidb_embed import KuttiEmbed, KuttiEmbedError
 
 
 class LocalKuttiDB:

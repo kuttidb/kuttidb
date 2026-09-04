@@ -17,10 +17,7 @@ func TestManagedLifecycleIntegration(t *testing.T) {
 	if executable == "" {
 		t.Fatal("KUTTIDB_SERVER is required for managed integration")
 	}
-	dataDir := t.TempDir()
-	if err := os.Chmod(dataDir, 0700); err != nil {
-		t.Fatalf("secure temp directory: %v", err)
-	}
+	dataDir := managedDataDir(t)
 	client, err := NewManaged(ManagedOptions{
 		DataDir:        dataDir,
 		Executable:     executable,
@@ -44,10 +41,7 @@ func TestManagedLifecycleIntegration(t *testing.T) {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
-	tcpDir := t.TempDir()
-	if err := os.Chmod(tcpDir, 0700); err != nil {
-		t.Fatalf("secure TCP temp directory: %v", err)
-	}
+	tcpDir := managedDataDir(t)
 	tcpClient, err := NewManaged(ManagedOptions{
 		DataDir:        tcpDir,
 		Executable:     executable,
@@ -68,4 +62,25 @@ func TestManagedLifecycleIntegration(t *testing.T) {
 	if err != nil || string(got) != "value" {
 		t.Fatalf("TCP Get = %q, %v", got, err)
 	}
+}
+
+// managedDataDir returns a short-lived owner-only directory for the server's
+// unix socket. macOS $TMPDIR (/var/folders/...) pushes "<dir>/kuttidb.sock"
+// past the 104-byte sockaddr_un limit, so prefer /tmp when it is available;
+// t.TempDir() remains the fallback for platforms without it.
+func managedDataDir(t *testing.T) string {
+	t.Helper()
+	root := ""
+	if _, err := os.Stat("/tmp"); err == nil {
+		root = "/tmp"
+	}
+	dir, err := os.MkdirTemp(root, "kuttidb-go-")
+	if err != nil {
+		t.Fatalf("temp directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatalf("secure temp directory: %v", err)
+	}
+	return dir
 }
