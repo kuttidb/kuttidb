@@ -38,6 +38,11 @@ jobs:
         run: node --check kuttidb_client.js && node --check smoke.js && node --check managed_smoke.js
 
       - name: Publish
-        run: npm publish --access public --provenance
+        # Prerelease versions must not land on the `latest` dist-tag (npm
+        # rejects that), so derive it from the semver: 1.2.3 -> latest,
+        # 1.2.3-beta -> beta.
+        run: |
+          dist_tag=$(node -p "require('./package.json').version.includes('-') ? 'beta' : 'latest'")
+          npm publish --access public --provenance --tag "$dist_tag"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

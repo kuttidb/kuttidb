@@ -53,7 +53,10 @@ Per-language notes:
   `python3 -m build clients/python`.
 - **Node.js** — CommonJS, zero dependencies; `files` ships only
   `kuttidb_client.js`. Published with `npm publish --access public
-  --provenance`.
+  --provenance --tag <dist-tag>`; the workflow derives the dist-tag from the
+  semver (prereleases publish under `beta`, stable versions under `latest`),
+  so `npm install @kuttidb/client` never hands out a beta — beta testers use
+  `npm install @kuttidb/client@beta`.
 - **Rust** — `cargo test` gates, then `cargo publish` via
   `CARGO_REGISTRY_TOKEN`.
 - **Go** — publishing *is* the tag (see [Go modules](#go-modules)); the
@@ -144,6 +147,7 @@ Go has no registry — `go get` fetches directly from the repository, so:
 |---|---|
 | PyPI: "Invalid or non-existent authentication information" / OIDC rejected | Workflow filename or environment no longer matches the pending publisher on pypi.org |
 | PyPI: "File already exists" | That version was already uploaded — bump and re-tag (a new tag, not a re-push) |
+| npm: "You must specify a tag using --tag when publishing a prerelease version" | A prerelease cannot land on `latest` — `release-node.yml` derives the dist-tag automatically now; older runs need a version bump and a new tag |
 | npm: 403 Forbidden | `NPM_TOKEN` expired or lacks write scope for `@kuttidb/client` |
 | npm: provenance failure | `id-token: write` missing or the package's repository field does not point at this repo |
 | crates.io: "crate `kuttidb` already exists" | Version already published; bump `Cargo.toml` |
