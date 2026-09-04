@@ -1,6 +1,7 @@
 # build artifacts
 *.o
 *.dSYM/
+/*.plist
 kuttidb
 kuttidb-bench
 bench_stream
