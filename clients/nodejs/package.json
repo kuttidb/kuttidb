@@ -1,6 +1,6 @@
 {
   "name": "@kuttidb/client",
-  "version": "0.0.2-beta",
+  "version": "0.0.4-beta",
   "description": "KuttiDB Node.js client: binary wire protocol over TCP, TLS, and Unix sockets with queues, exchanges, streams, atomic operations, and managed local server lifecycle. Zero dependencies.",
   "license": "Apache-2.0",
   "main": "kuttidb_client.js",
