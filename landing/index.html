@@ -4,8 +4,7 @@
   assets, no JavaScript frameworks. Serve it from anywhere (GitHub Pages,
   Netlify, nginx, `python3 -m http.server`) and it just works.
 
-  One thing to do before publishing: replace every `OWNER/REPO` with your
-  real GitHub org/repo (search-and-replace "OWNER/REPO").
+  Repository: https://github.com/kuttidb/kuttidb
 ============================================================================ -->
 <html lang="en">
 <head>
@@ -453,7 +452,7 @@
   <div class="wrap nav" id="nav">
     <a class="brand" href="#top">
       <img src="logo.png" alt="KuttiDB logo" />
-      KuttiDB <span class="beta">v0.2.0</span>
+      KuttiDB <span class="beta">v0.0.1-beta</span>
     </a>
     <nav class="nav-links">
       <a href="#features">Features</a>
@@ -465,7 +464,7 @@
     </nav>
     <div class="nav-cta">
       <a class="license-chip" href="#license" title="Apache License 2.0">Apache-2.0</a>
-      <a class="btn btn-ghost" href="https://github.com/OWNER/REPO" style="padding:9px 16px;">
+      <a class="btn btn-ghost" href="https://github.com/kuttidb/kuttidb" style="padding:9px 16px;">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
         GitHub
       </a>
@@ -495,7 +494,7 @@
           Get started
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
         </a>
-        <a class="btn btn-ghost" href="https://github.com/OWNER/REPO">Star on GitHub ★</a>
+        <a class="btn btn-ghost" href="https://github.com/kuttidb/kuttidb">Star on GitHub ★</a>
       </div>
       <div class="pill-row" style="display:flex; flex-wrap:wrap; gap:8px;">
         <span class="pill"><b>1</b> executable</span>
@@ -762,12 +761,12 @@ $ ./kuttidb 7379 -</pre>
       First-class client libraries — TCP, shared-memory embed, and in-process transports where the platform allows.
     </p>
     <div class="client-row reveal">
-      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients"><span class="cname">Python</span><span class="cnote">TCP · shm embed · in-process</span></a>
-      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/nodejs"><span class="cname">Node.js</span><span class="cnote">zero dependencies</span></a>
-      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/go"><span class="cname">Go</span><span class="cnote">idiomatic, tested</span></a>
-      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/java"><span class="cname">Java</span><span class="cnote">no JVM needed server-side</span></a>
-      <a class="client" href="https://github.com/OWNER/REPO/tree/main/clients/rust"><span class="cname">Rust</span><span class="cnote">safe wrapper</span></a>
-      <a class="client" href="https://github.com/OWNER/REPO"><span class="cname">C / C++</span><span class="cnote">libkuttidb_embed.dylib/.so</span></a>
+      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients"><span class="cname">Python</span><span class="cnote">TCP · shm embed · in-process</span></a>
+      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/nodejs"><span class="cname">Node.js</span><span class="cnote">zero dependencies</span></a>
+      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/go"><span class="cname">Go</span><span class="cnote">idiomatic, tested</span></a>
+      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/java"><span class="cname">Java</span><span class="cnote">no JVM needed server-side</span></a>
+      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/rust"><span class="cname">Rust</span><span class="cnote">safe wrapper</span></a>
+      <a class="client" href="https://github.com/kuttidb/kuttidb"><span class="cname">C / C++</span><span class="cnote">libkuttidb_embed.dylib/.so</span></a>
     </div>
   </div>
 </section>
@@ -795,18 +794,18 @@ $ ./kuttidb 7379 -</pre>
     <h2 class="reveal">Written down, all of it.</h2>
     <p class="section-lede reveal" style="margin-bottom:42px;">Every guarantee below is a document with a name — read before you trust.</p>
     <div class="docs-grid reveal">
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/GETTING_STARTED.md"><span class="arr">↗</span><b>Getting started</b><span>Values, queues, streams — first run</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/ARCHITECTURE.md"><span class="arr">↗</span><b>Architecture</b><span>Engines, storage separation, durability</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/PROTOCOL.md"><span class="arr">↗</span><b>Protocol</b><span>Binary wire protocol, CLI flags, limits</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/QUEUES.md"><span class="arr">↗</span><b>Queues</b><span>Delivery and dead-letter rules</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/EXCHANGES.md"><span class="arr">↗</span><b>Exchanges</b><span>Exchange types and routing rules</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/STREAMS.md"><span class="arr">↗</span><b>Streams</b><span>Ordering, offsets, consumer groups</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/DURABILITY.md"><span class="arr">↗</span><b>Durability</b><span>Ack points, atomic ops, single-node limits</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/SECURITY.md"><span class="arr">↗</span><b>Security</b><span>Auth, TLS, permissions, threat model</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/MANAGEMENT_API.md"><span class="arr">↗</span><b>Management API</b><span>Admin surface &amp; security model</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/DEPLOYMENT.md"><span class="arr">↗</span><b>Deployment</b><span>Docker/K8s, metrics, probes, backup</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/BENCHMARKS.md"><span class="arr">↗</span><b>Benchmarks</b><span>Methodology and recorded results</span></a>
-      <a class="doc-link" href="https://github.com/OWNER/REPO/blob/main/MIGRATION.md"><span class="arr">↗</span><b>Migration</b><span>When to use Redis/RabbitMQ/Kafka instead</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/GETTING_STARTED.md"><span class="arr">↗</span><b>Getting started</b><span>Values, queues, streams — first run</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/ARCHITECTURE.md"><span class="arr">↗</span><b>Architecture</b><span>Engines, storage separation, durability</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/PROTOCOL.md"><span class="arr">↗</span><b>Protocol</b><span>Binary wire protocol, CLI flags, limits</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/QUEUES.md"><span class="arr">↗</span><b>Queues</b><span>Delivery and dead-letter rules</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/EXCHANGES.md"><span class="arr">↗</span><b>Exchanges</b><span>Exchange types and routing rules</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/STREAMS.md"><span class="arr">↗</span><b>Streams</b><span>Ordering, offsets, consumer groups</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/DURABILITY.md"><span class="arr">↗</span><b>Durability</b><span>Ack points, atomic ops, single-node limits</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/SECURITY.md"><span class="arr">↗</span><b>Security</b><span>Auth, TLS, permissions, threat model</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/MANAGEMENT_API.md"><span class="arr">↗</span><b>Management API</b><span>Admin surface &amp; security model</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/DEPLOYMENT.md"><span class="arr">↗</span><b>Deployment</b><span>Docker/K8s, metrics, probes, backup</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/BENCHMARKS.md"><span class="arr">↗</span><b>Benchmarks</b><span>Methodology and recorded results</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/MIGRATION.md"><span class="arr">↗</span><b>Migration</b><span>When to use Redis/RabbitMQ/Kafka instead</span></a>
     </div>
   </div>
 </section>
@@ -818,8 +817,8 @@ $ ./kuttidb 7379 -</pre>
     <h2 class="reveal">One binary.<br />Warm out of the oven. 🥖</h2>
     <p class="reveal">Clone it, embed it, ship it. Contributions and crash-tests welcome.</p>
     <div class="ctas reveal">
-      <a class="btn btn-primary" href="https://github.com/OWNER/REPO">Clone from GitHub</a>
-      <a class="btn btn-ghost" href="https://github.com/OWNER/REPO/blob/main/LICENSE">Read the license</a>
+      <a class="btn btn-primary" href="https://github.com/kuttidb/kuttidb">Clone from GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/kuttidb/kuttidb/blob/main/LICENSE">Read the license</a>
     </div>
     <div class="compose codeblock reveal">
       <div class="codewin">
@@ -851,8 +850,8 @@ $ ./kuttidb 7379 -</pre>
         <a href="#quickstart">Quick start</a>
         <a href="#benchmarks">Benchmarks</a>
         <a href="#docs">Docs</a>
-        <a href="https://github.com/OWNER/REPO">GitHub</a>
-        <a href="https://github.com/OWNER/REPO/issues">Issues</a>
+        <a href="https://github.com/kuttidb/kuttidb">GitHub</a>
+        <a href="https://github.com/kuttidb/kuttidb/issues">Issues</a>
       </nav>
     </div>
     <div class="foot-base">
