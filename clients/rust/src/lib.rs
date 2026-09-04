@@ -1,7 +1,6 @@
 //! Rust client for the KuttiDB binary protocol.
 //!
-//! Full feature support: put/get/delete, per-key TTL, batched operations
-//! (including per-item TTL), and stats. [`Client`] owns one connection and is
+//! Full KuttiDB v1.8 protocol support. [`Client`] owns one connection and is
 //! not thread-safe; use [`Pool`] for concurrent access from many threads.
 //!
 //! ```no_run
@@ -17,8 +16,11 @@ use std::net::{Ipv4Addr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+mod features;
+pub use features::*;
 
 pub const BATCH_SIZE: usize = 256;
 const MAX_KEY: usize = (1 << 16) - 1;
@@ -91,12 +93,14 @@ pub struct Client {
 enum Stream {
     Tcp(TcpStream),
     Unix(UnixStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 impl Read for Stream {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Tcp(s) => s.read(b),
             Self::Unix(s) => s.read(b),
+            Self::Tls(s) => s.read(b),
         }
     }
 }
@@ -105,25 +109,27 @@ impl Write for Stream {
         match self {
             Self::Tcp(s) => s.write(b),
             Self::Unix(s) => s.write(b),
+            Self::Tls(s) => s.write(b),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Tcp(s) => s.flush(),
             Self::Unix(s) => s.flush(),
+            Self::Tls(s) => s.flush(),
         }
     }
 }
 
 /// Typed settings for [`Client::connect_managed`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum ManagedTransport {
+    #[default]
     Unix,
-    Tcp { host: Ipv4Addr, port: u16 },
-}
-
-impl Default for ManagedTransport {
-    fn default() -> Self { Self::Unix }
+    Tcp {
+        host: Ipv4Addr,
+        port: u16,
+    },
 }
 
 #[derive(Clone)]
@@ -182,6 +188,65 @@ impl Client {
         Self::connect_inner(addr, Some(token))
     }
 
+    /// Connect with TLS using the platform-independent Mozilla root store and
+    /// verify the certificate against `server_name`.
+    pub fn connect_tls(addr: &str, server_name: &str) -> Result<Client, Error> {
+        Self::connect_tls_inner(addr, server_name, None, None)
+    }
+
+    /// Connect with verified TLS and authenticate with a pre-shared token.
+    pub fn connect_tls_authenticated(
+        addr: &str,
+        server_name: &str,
+        token: &[u8],
+    ) -> Result<Client, Error> {
+        if token.is_empty() || token.len() > 1024 {
+            return Err(Error::Authentication);
+        }
+        Self::connect_tls_inner(addr, server_name, None, Some(token))
+    }
+
+    /// Connect with a caller-supplied rustls configuration, for example to
+    /// trust a private CA or present a client certificate.
+    pub fn connect_tls_with_config(
+        addr: &str,
+        server_name: &str,
+        config: Arc<rustls::ClientConfig>,
+        token: Option<&[u8]>,
+    ) -> Result<Client, Error> {
+        Self::connect_tls_inner(addr, server_name, Some(config), token)
+    }
+
+    fn connect_tls_inner(
+        addr: &str,
+        server_name: &str,
+        config: Option<Arc<rustls::ClientConfig>>,
+        token: Option<&[u8]>,
+    ) -> Result<Client, Error> {
+        let config = config.unwrap_or_else(|| {
+            let roots =
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            )
+        });
+        let name = rustls::pki_types::ServerName::try_from(server_name.to_owned())
+            .map_err(|_| Error::Managed("invalid TLS server name".into()))?;
+        let tcp = TcpStream::connect(addr)?;
+        tcp.set_nodelay(true)?;
+        let connection = rustls::ClientConnection::new(config, name)
+            .map_err(|_| Error::Managed("invalid TLS configuration".into()))?;
+        let mut client = Client {
+            stream: Stream::Tls(Box::new(rustls::StreamOwned::new(connection, tcp))),
+        };
+        if let Some(token) = token {
+            client.authenticate(token)?;
+        }
+        Ok(client)
+    }
+
     fn connect_inner(addr: &str, token: Option<&[u8]>) -> Result<Client, Error> {
         let stream = TcpStream::connect(addr)?;
         stream.set_nodelay(true)?;
@@ -213,10 +278,15 @@ impl Client {
             return Err(Error::Managed("data_dir must be absolute".into()));
         }
         let (endpoint, transport) = match &options.transport {
-            ManagedTransport::Unix => (format!("unix:{}", data_dir.join("kuttidb.sock").display()), false),
+            ManagedTransport::Unix => (
+                format!("unix:{}", data_dir.join("kuttidb.sock").display()),
+                false,
+            ),
             ManagedTransport::Tcp { host, port } => {
                 if !host.is_loopback() || *port == 0 {
-                    return Err(Error::Managed("managed TCP requires a literal IPv4 loopback endpoint".into()));
+                    return Err(Error::Managed(
+                        "managed TCP requires a literal IPv4 loopback endpoint".into(),
+                    ));
                 }
                 (format!("tcp:{host}:{port}"), true)
             }
@@ -226,14 +296,27 @@ impl Client {
         let needs_start = if transport {
             let address = endpoint.strip_prefix("tcp:").unwrap();
             match TcpStream::connect(address) {
-                Ok(stream) => { drop(stream); false }
+                Ok(stream) => {
+                    drop(stream);
+                    false
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => true,
                 Err(error) => return Err(Error::Io(error)),
             }
         } else {
             match UnixStream::connect(&socket_path) {
-                Ok(stream) => { drop(stream); false }
-                Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => true,
+                Ok(stream) => {
+                    drop(stream);
+                    false
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    true
+                }
                 Err(error) => return Err(Error::Io(error)),
             }
         };
@@ -277,9 +360,7 @@ impl Client {
         } else {
             Stream::Unix(UnixStream::connect(&socket_path)?)
         };
-        let mut client = Client {
-            stream,
-        };
+        let mut client = Client { stream };
         if let Some(token) = options.auth_token.as_deref() {
             client.authenticate(token)?;
         }
@@ -350,6 +431,45 @@ impl Client {
         req.extend_from_slice(&vlen.to_le_bytes());
         req.extend_from_slice(key);
         req
+    }
+
+    fn request(&mut self, op: u8, key: &[u8], value: &[u8]) -> Result<(u8, Vec<u8>), Error> {
+        if key.len() > MAX_KEY {
+            return Err(Error::KeyTooLarge);
+        }
+        if value.len() > MAX_VALUE as usize {
+            return Err(Error::ValueTooLarge);
+        }
+        let mut req = Self::single_header(op, key, value.len() as u32);
+        req.extend_from_slice(value);
+        self.send_all(&req)?;
+        let (status, len) = self.read_head()?;
+        Ok((status, self.read_full(len as usize)?))
+    }
+
+    fn request_meta(
+        &mut self,
+        op: u8,
+        key: &[u8],
+        meta: &[u8],
+        value: &[u8],
+    ) -> Result<(u8, Vec<u8>), Error> {
+        if key.len() > MAX_KEY {
+            return Err(Error::KeyTooLarge);
+        }
+        if value.len() > MAX_VALUE as usize {
+            return Err(Error::ValueTooLarge);
+        }
+        let mut req = Vec::with_capacity(7 + meta.len() + key.len() + value.len());
+        req.push(op);
+        req.extend_from_slice(&(key.len() as u16).to_le_bytes());
+        req.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        req.extend_from_slice(meta);
+        req.extend_from_slice(key);
+        req.extend_from_slice(value);
+        self.send_all(&req)?;
+        let (status, len) = self.read_head()?;
+        Ok((status, self.read_full(len as usize)?))
     }
 
     pub fn put(&mut self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), Error> {
@@ -543,6 +663,8 @@ impl Client {
 pub struct Pool {
     addr: String,
     auth_token: Option<Vec<u8>>,
+    tls_config: Option<Arc<rustls::ClientConfig>>,
+    tls_server_name: Option<String>,
     managed_dir: Option<PathBuf>,
     managed_transport: Option<ManagedTransport>,
     idle: Mutex<Vec<Client>>,
@@ -561,6 +683,59 @@ impl Pool {
         Self::new_inner(addr, size, Some(token.to_vec()))
     }
 
+    /// Create a pool of certificate- and hostname-verified TLS connections.
+    pub fn new_tls(addr: &str, server_name: &str, size: usize) -> Result<Pool, Error> {
+        Self::new_tls_inner(addr, server_name, size, None)
+    }
+
+    /// Create an authenticated pool of verified TLS connections.
+    pub fn new_tls_authenticated(
+        addr: &str,
+        server_name: &str,
+        size: usize,
+        token: &[u8],
+    ) -> Result<Pool, Error> {
+        if token.is_empty() || token.len() > 1024 {
+            return Err(Error::Authentication);
+        }
+        Self::new_tls_inner(addr, server_name, size, Some(token.to_vec()))
+    }
+
+    fn new_tls_inner(
+        addr: &str,
+        server_name: &str,
+        size: usize,
+        auth_token: Option<Vec<u8>>,
+    ) -> Result<Pool, Error> {
+        let roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let count = size.max(1);
+        let mut idle = Vec::with_capacity(count);
+        for _ in 0..count {
+            idle.push(Client::connect_tls_with_config(
+                addr,
+                server_name,
+                config.clone(),
+                auth_token.as_deref(),
+            )?)
+        }
+        Ok(Pool {
+            addr: addr.to_owned(),
+            auth_token,
+            tls_config: Some(config),
+            tls_server_name: Some(server_name.to_owned()),
+            managed_dir: None,
+            managed_transport: None,
+            idle: Mutex::new(idle),
+            max: count,
+        })
+    }
+
     fn new_inner(addr: &str, size: usize, auth_token: Option<Vec<u8>>) -> Result<Pool, Error> {
         let mut idle = Vec::with_capacity(size);
         for _ in 0..size {
@@ -572,6 +747,8 @@ impl Pool {
         Ok(Pool {
             addr: addr.to_string(),
             auth_token,
+            tls_config: None,
+            tls_server_name: None,
             managed_dir: None,
             managed_transport: None,
             idle: Mutex::new(idle),
@@ -605,6 +782,8 @@ impl Pool {
         Ok(Pool {
             addr: data_dir.join("kuttidb.sock").display().to_string(),
             auth_token,
+            tls_config: None,
+            tls_server_name: None,
             managed_dir: Some(data_dir),
             managed_transport: Some(options.transport.clone()),
             idle: Mutex::new(idle),
@@ -625,6 +804,14 @@ impl Pool {
         let mut idle = self.idle.lock().unwrap();
         match idle.pop() {
             Some(c) => Ok(c),
+            None if self.tls_config.is_some() => Client::connect_tls_with_config(
+                &self.addr,
+                self.tls_server_name
+                    .as_deref()
+                    .ok_or(Error::AddressConflict)?,
+                self.tls_config.as_ref().unwrap().clone(),
+                self.auth_token.as_deref(),
+            ),
             None => match &self.auth_token {
                 Some(token) => match &self.managed_dir {
                     Some(dir) => Client::connect_managed(ManagedOptions {

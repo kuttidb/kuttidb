@@ -18,11 +18,20 @@ fn main() -> Result<(), Error> {
                         items.push(Item {
                             key,
                             value: b"x100bytes-padding-padding-padding-padding-pad",
-                            ttl: if i % 10 == 0 { Some(Duration::from_secs(60)) } else { None },
+                            ttl: if i % 10 == 0 {
+                                Some(Duration::from_secs(60))
+                            } else {
+                                None
+                            },
                         });
                         keys.push(key);
                     }
-                    client.put_many_ttl(&items.iter().map(|it| (it.key, it.value, it.ttl)).collect::<Vec<_>>())?;
+                    client.put_many_ttl(
+                        &items
+                            .iter()
+                            .map(|it| (it.key, it.value, it.ttl))
+                            .collect::<Vec<_>>(),
+                    )?;
                     let got = client.get_many(&keys)?;
                     if got.iter().any(|v| v.is_none()) {
                         return Err(Error::Server);

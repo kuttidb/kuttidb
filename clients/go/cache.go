@@ -54,6 +54,8 @@ type Client struct {
 	addr        string
 	network     string
 	mu          sync.Mutex
+	stateMu     sync.Mutex
+	stateConn   *conn
 	pool        chan *conn
 	closed      bool
 	dialTimeout time.Duration
@@ -714,14 +716,21 @@ func (c *Client) GetMany(keys []string) ([][]byte, error) {
 
 // Close terminates all pooled connections.
 func (c *Client) Close() {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return
 	}
 	c.closed = true
+	if c.stateConn != nil {
+		c.stateConn.c.Close()
+		c.stateConn = nil
+	}
 	close(c.pool)
 	for cn := range c.pool {
 		cn.c.Close()
 	}
+	c.mu.Unlock()
 }

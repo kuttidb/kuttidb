@@ -27,7 +27,9 @@ const OP = {
   QUEUE_ACK: 0x23, QUEUE_NACK: 0x24, QUEUE_PUBLISH_TTL: 0x25,
   QUEUE_STATS: 0x26, QUEUE_PREFETCH: 0x27, QUEUE_CANCEL: 0x28,
   QUEUE_CONSUMER_REGISTER: 0x29, QUEUE_CONSUMER_UNREGISTER: 0x2a,
-  QUEUE_CONSUME_AS: 0x2b,
+  QUEUE_CONSUME_AS: 0x2b, QUEUE_LIST: 0x2c,
+  QUEUE_PUBLISH_BATCH: 0x2d, QUEUE_CONSUME_BATCH: 0x2e,
+  QUEUE_ACK_BATCH: 0x2f,
   EXCHANGE_DECLARE: 0x30, EXCHANGE_BIND: 0x31, EXCHANGE_UNBIND: 0x32,
   EXCHANGE_PUBLISH: 0x33,
   ATOMIC_PUT_PUBLISH: 0x40, ATOMIC_PUT_ENQUEUE: 0x41,
@@ -37,6 +39,8 @@ const OP = {
   STREAM_DECLARE: 0x60, STREAM_APPEND: 0x61, STREAM_FETCH: 0x62,
   STREAM_COMMIT: 0x63, STREAM_GROUP_OFFSET: 0x64, STREAM_GROUP_JOIN: 0x65,
   STREAM_GROUP_LAG: 0x66, STREAM_APPEND_BATCH: 0x67, STREAM_GROUP_LEAVE: 0x68,
+  STREAM_LIST: 0x69, STREAM_GROUP_LIST: 0x6a,
+  STREAM_COMMIT_BATCH: 0x6b, STREAM_FETCH_KEYS: 0x6c,
 };
 
 const STATUS_OK = 0x00, STATUS_MISS = 0x01, STATUS_ERR = 0x02;
@@ -51,6 +55,8 @@ const CAP = {
   SINGLEFLIGHT: 1n << 4n, STREAMS: 1n << 5n, STREAM_BATCH: 1n << 6n,
   HEALTH: 1n << 7n, STREAM_GEN: 1n << 8n, QUEUE_CONSUMERS: 1n << 9n,
   ATOMIC_UPDATE: 1n << 10n, SWR: 1n << 11n,
+  QUEUE_BATCH: 1n << 12n, STREAM_COMMIT_BATCH: 1n << 13n,
+  STREAM_KEYS: 1n << 14n,
   SERVER_INFO: 1n << 15n,
 };
 
@@ -95,8 +101,10 @@ class Conn {
     this.buf = Buffer.alloc(0);
     this.closed = false;
     const opts = client.socketPath ? { path: client.socketPath } : { host: client.host, port: client.port };
+    const tlsOptions = client.tls && typeof client.tls === "object" ? client.tls : {};
     this.sock = client.tls
-      ? tls.connect({ ...opts, rejectUnauthorized: false })
+      ? tls.connect({ ...opts, ...tlsOptions,
+          servername: tlsOptions.servername || (client.socketPath ? undefined : client.host) })
       : net.connect(opts);
     if (!client.socketPath) this.sock.setNoDelay(true);
     this.sock.on("data", (d) => this._onData(d));
@@ -248,7 +256,9 @@ class Conn {
 
 class Client {
   /**
-   * options: { host, port, socketPath, poolSize, token, tls, }
+   * options: { host, port, socketPath, poolSize, token, tls }
+   * tls may be true (system trust and hostname verification) or an object of
+   * Node tls.connect options such as { ca, cert, key, servername }.
    */
   constructor(options = {}) {
     this.host = options.host || "127.0.0.1";
@@ -256,7 +266,7 @@ class Client {
     this.socketPath = options.socketPath || null;
     this.poolSize = Math.max(1, options.poolSize || 4);
     this.token = options.token ? Buffer.from(options.token) : null;
-    this.tls = !!options.tls;
+    this.tls = options.tls || false;
     this.idle = [];
     this.waiters = [];
     this.closed = false;
@@ -382,7 +392,7 @@ class Client {
   }
 
   _ok(r, what) {
-    if (r.status === STATUS_ERR) throw new KuttiDBError(`${what} failed`);
+    if (r.status !== STATUS_OK) throw new KuttiDBError(`${what} failed`);
     return r;
   }
 
@@ -397,10 +407,12 @@ class Client {
   // ---- capabilities --------------------------------------------------------
   async capabilities() {
     if (this._caps) return this._caps;
-    const r = this._ok(await this._req(OP.CAPABILITIES, Buffer.alloc(0),
-      Buffer.concat([u16(PROTOCOL_MAJOR), u16(PROTOCOL_MINOR)])), "capabilities");
+    const r = await this._req(OP.CAPABILITIES, Buffer.alloc(0),
+      Buffer.concat([u16(PROTOCOL_MAJOR), u16(PROTOCOL_MINOR)]));
     if (r.status === STATUS_MISS)
       throw new KuttiDBError("incompatible protocol major version");
+    this._ok(r, "capabilities");
+    if (r.payload.length !== 12) throw new KuttiDBError("invalid capabilities response");
     return (this._caps = {
       major: r.payload.readUInt16LE(0),
       minor: r.payload.readUInt16LE(2),
@@ -468,15 +480,19 @@ class Client {
   }
 
   async delete(key) {
-    return (await this._req(OP.DELETE, asBuf(key))).status === STATUS_OK;
+    const r = await this._req(OP.DELETE, asBuf(key));
+    if (r.status === STATUS_ERR) throw new KuttiDBError("delete failed");
+    return r.status === STATUS_OK;
   }
 
-  async stats() { return JSON.parse((await this._req(OP.STATS)).payload.toString()); }
+  async stats() { return JSON.parse(this._ok(await this._req(OP.STATS), "stats").payload.toString()); }
   async health() { return (await this._req(OP.HEALTH)).status === STATUS_OK; }
 
   async putMany(items) { // items: [key, value][]
     // Batch frames carry the item count in the header vlen field, then the
     // items themselves: [op][klen=0][count][count * [klen:2][vlen:4][key][value]]
+    if (!Array.isArray(items) || items.length > 65536)
+      throw new KuttiDBError("invalid putMany batch");
     const parts = [];
     for (const [k, v] of items) {
       const kb = asBuf(k), vb = asBuf(v);
@@ -488,6 +504,25 @@ class Client {
     hdr.writeUInt32LE(items.length, 3);
     const r = await this._reqRawByte(Buffer.concat([hdr, ...parts]));
     if (r !== STATUS_OK) throw new KuttiDBError("putMany failed");
+  }
+
+  async putManyTTL(items) { // items: [key, value, ttlSeconds][]
+    if (!Array.isArray(items) || items.length > 65536)
+      throw new KuttiDBError("invalid putManyTTL batch");
+    const parts = [];
+    for (const [k, v, ttl = null] of items) {
+      const kb = asBuf(k), vb = asBuf(v);
+      this._checkKey(kb); this._checkVal(vb);
+      const ttlMs = ttl == null ? 0 : Math.round(ttl * 1000);
+      if (!Number.isSafeInteger(ttlMs) || ttlMs < 0 || ttlMs > 0xffffffff)
+        throw new KuttiDBError("invalid TTL");
+      parts.push(Buffer.concat([u16(kb.length), u32(vb.length), u32(ttlMs)]), kb, vb);
+    }
+    const hdr = Buffer.alloc(7);
+    hdr[0] = OP.PUT_BATCH_TTL;
+    hdr.writeUInt32LE(items.length, 3);
+    const status = await this._reqRawByte(Buffer.concat([hdr, ...parts]));
+    if (status !== STATUS_OK) throw new KuttiDBError("putManyTTL failed");
   }
 
   async _reqRawByte(frame) {
@@ -544,6 +579,24 @@ class Client {
     this._ok(await this._req(OP.QUEUE_DECLARE, kb, value), "queueDeclare");
   }
 
+  async queueList() {
+    const r = this._ok(await this._req(OP.QUEUE_LIST), "queueList");
+    if (r.payload.length < 2) throw new KuttiDBError("invalid queueList response");
+    const count = r.payload.readUInt16LE(0), queues = [];
+    let at = 2;
+    for (let i = 0; i < count; i++) {
+      if (at + 2 > r.payload.length) throw new KuttiDBError("invalid queueList response");
+      const len = r.payload.readUInt16LE(at); at += 2;
+      if (at + len + 16 > r.payload.length) throw new KuttiDBError("invalid queueList response");
+      queues.push({ name: r.payload.subarray(at, at + len).toString(),
+        depth: r.payload.readBigUInt64LE(at + len),
+        inflight: r.payload.readBigUInt64LE(at + len + 8) });
+      at += len + 16;
+    }
+    if (at !== r.payload.length) throw new KuttiDBError("invalid queueList response");
+    return queues;
+  }
+
   async queuePublish(name, value, { ttl = null } = {}) {
     const kb = asBuf(name), vb = asBuf(value);
     this._checkKey(kb); this._checkVal(vb);
@@ -578,14 +631,17 @@ class Client {
   }
 
   async queueAck(name, deliveryTag) {
-    return (await this._req(OP.QUEUE_ACK, asBuf(name), u64(deliveryTag))).status === STATUS_OK;
+    const r = await this._req(OP.QUEUE_ACK, asBuf(name), u64(deliveryTag));
+    if (r.status === STATUS_ERR) throw new KuttiDBError("queueAck failed");
+    return r.status === STATUS_OK;
   }
 
   async queueNack(name, deliveryTag, { requeue = true, delay = 0 } = {}) {
     let p = Buffer.concat([u64(deliveryTag), Buffer.from([requeue ? 1 : 0])]);
     if (delay) p = Buffer.concat([p, u64(Math.round(delay * 1000))]);
-    this._ok(await this._req(OP.QUEUE_NACK, asBuf(name), p), "queueNack");
-    return true;
+    const r = await this._req(OP.QUEUE_NACK, asBuf(name), p);
+    if (r.status === STATUS_ERR) throw new KuttiDBError("queueNack failed");
+    return r.status === STATUS_OK;
   }
 
   async queueStats(name) {
@@ -612,6 +668,72 @@ class Client {
     this._ok(await this._req(OP.QUEUE_CONSUMER_UNREGISTER, asBuf(consumer)), "queueConsumerUnregister");
   }
 
+  queueConsumeAs(name, consumer, { visibility = 30.0 } = {}) {
+    return this.queueConsume(name, { visibility, consumer });
+  }
+
+  async queuePublishBatch(name, values) {
+    await this._require(CAP.QUEUE_BATCH, "queue batch operations");
+    if (!Array.isArray(values) || values.length < 1 || values.length > 256)
+      throw new KuttiDBError("queue batch size must be 1-256");
+    const parts = [u32(values.length)];
+    for (const value of values) {
+      const vb = asBuf(value); this._checkVal(vb);
+      parts.push(u32(vb.length), vb);
+    }
+    const r = this._ok(await this._req(OP.QUEUE_PUBLISH_BATCH, asBuf(name),
+      Buffer.concat(parts)), "queuePublishBatch");
+    if (r.payload.length < 4) throw new KuttiDBError("invalid queuePublishBatch response");
+    const count = r.payload.readUInt32LE(0);
+    if (count !== values.length || r.payload.length !== 4 + count * 8)
+      throw new KuttiDBError("invalid queuePublishBatch response");
+    return Array.from({ length: count }, (_, i) => r.payload.readBigUInt64LE(4 + i * 8));
+  }
+
+  async queueConsumeBatch(name, maxCount) {
+    await this._require(CAP.QUEUE_BATCH, "queue batch operations");
+    if (!Number.isInteger(maxCount) || maxCount < 1 || maxCount > 256)
+      throw new KuttiDBError("queue batch size must be 1-256");
+    const r = await this._req(OP.QUEUE_CONSUME_BATCH, asBuf(name), u32(maxCount));
+    if (r.status === STATUS_MISS) return [];
+    this._ok(r, "queueConsumeBatch");
+    if (r.payload.length < 4) throw new KuttiDBError("invalid queueConsumeBatch response");
+    const count = r.payload.readUInt32LE(0), messages = [];
+    let at = 4;
+    for (let i = 0; i < count; i++) {
+      if (at + 25 > r.payload.length) throw new KuttiDBError("invalid queueConsumeBatch response");
+      const len = r.payload.readUInt32LE(at + 21);
+      if (at + 25 + len > r.payload.length) throw new KuttiDBError("invalid queueConsumeBatch response");
+      messages.push({ id: r.payload.readBigUInt64LE(at),
+        messageId: r.payload.readBigUInt64LE(at + 8),
+        deliveryCount: r.payload.readUInt32LE(at + 16),
+        redelivered: r.payload[at + 20] !== 0,
+        value: r.payload.subarray(at + 25, at + 25 + len) });
+      at += 25 + len;
+    }
+    if (at !== r.payload.length) throw new KuttiDBError("invalid queueConsumeBatch response");
+    return messages;
+  }
+
+  async _queueDispositionBatch(name, deliveryTags, mode, what) {
+    await this._require(CAP.QUEUE_BATCH, "queue batch operations");
+    const tags = Array.from(deliveryTags);
+    if (tags.length < 1 || tags.length > 256)
+      throw new KuttiDBError("queue batch size must be 1-256");
+    const payload = Buffer.concat([Buffer.from([mode]), u32(tags.length), ...tags.map(u64)]);
+    const r = this._ok(await this._req(OP.QUEUE_ACK_BATCH, asBuf(name), payload), what);
+    if (r.payload.length !== 4) throw new KuttiDBError(`invalid ${what} response`);
+    return r.payload.readUInt32LE(0);
+  }
+
+  queueAckBatch(name, deliveryTags) {
+    return this._queueDispositionBatch(name, deliveryTags, 0, "queueAckBatch");
+  }
+
+  queueNackBatch(name, deliveryTags, { requeue = true } = {}) {
+    return this._queueDispositionBatch(name, deliveryTags, requeue ? 1 : 2, "queueNackBatch");
+  }
+
   // ---- exchanges --------------------------------------------------------------
   async exchangeDeclare(name, { type = "direct", durable = true,
                                 alternateExchange = null } = {}) {
@@ -621,7 +743,8 @@ class Client {
       throw new KuttiDBError("unknown exchange type");
     let value = Buffer.from([durable ? 1 : 0, EXCHANGE_TYPES[type]]);
     if (alternateExchange != null) {
-      const ext = Buffer.concat([Buffer.from([1]), asBuf(alternateExchange)]);
+      const alternate = asBuf(alternateExchange);
+      const ext = Buffer.concat([u16(alternate.length), alternate]);
       value = Buffer.concat([value, u16(ext.length), ext]);
     }
     this._ok(await this._req(OP.EXCHANGE_DECLARE, kb, value), "exchangeDeclare");
@@ -777,7 +900,88 @@ class Client {
     return loaded;
   }
 
+  async getOrLoadSwr(key, loader, { ttl = 60.0, staleFor = 300.0,
+                                    refreshAfter = null, lease = 5.0,
+                                    wait = 10.0 } = {}) {
+    let r = await this.getOrRefresh(key, { lease });
+    if (r.state === "value") return r.value;
+    if (r.state === "negative") return null;
+    if ((r.state === "stale" || r.state === "refresh") && !r.holder) return r.value;
+    if (r.state === "wait") {
+      for (let i = 0; i < 3; i++) {
+        const w = await this.waitFor(key, { timeout: wait });
+        if (w.state === "value") return w.value;
+        if (w.state === "negative" || w.state === "timeout") return null;
+        r = await this.getOrRefresh(key, { lease });
+        if (r.state === "value") return r.value;
+        if (r.state === "negative") return null;
+        if ((r.state === "stale" || r.state === "refresh") && !r.holder) return r.value;
+        if (["claimed", "stale", "refresh"].includes(r.state)) break;
+      }
+    } else if (!["claimed", "stale", "refresh"].includes(r.state)) {
+      r = await this.getOrRefresh(key, { lease });
+      if (r.state === "value") return r.value;
+      if (r.state === "negative") return null;
+      if ((r.state === "stale" || r.state === "refresh") && !r.holder) return r.value;
+    }
+    if (!["claimed", "stale", "refresh"].includes(r.state)) return null;
+    let loaded;
+    try {
+      loaded = await loader();
+    } catch (e) {
+      await this.releaseClaim(key);
+      throw e;
+    }
+    if (loaded == null) {
+      await this.putAndRelease(key, Buffer.alloc(0), { ttl, negative: true });
+      return null;
+    }
+    await this.putSwr(key, loaded, { ttl, staleFor, refreshAfter });
+    await this.releaseClaim(key);
+    return asBuf(loaded);
+  }
+
   // ---- streams --------------------------------------------------------------
+  async streamList() {
+    const r = this._ok(await this._req(OP.STREAM_LIST), "streamList");
+    if (r.payload.length < 2) throw new KuttiDBError("invalid streamList response");
+    const count = r.payload.readUInt16LE(0), streams = [];
+    let at = 2;
+    for (let i = 0; i < count; i++) {
+      if (at + 2 > r.payload.length) throw new KuttiDBError("invalid streamList response");
+      const len = r.payload.readUInt16LE(at); at += 2;
+      if (at + len + 20 > r.payload.length) throw new KuttiDBError("invalid streamList response");
+      streams.push({ topic: r.payload.subarray(at, at + len).toString(),
+        partitions: r.payload.readUInt32LE(at + len),
+        records: r.payload.readBigUInt64LE(at + len + 4),
+        bytes: r.payload.readBigUInt64LE(at + len + 12) });
+      at += len + 20;
+    }
+    if (at !== r.payload.length) throw new KuttiDBError("invalid streamList response");
+    return streams;
+  }
+
+  async streamGroupList() {
+    const r = this._ok(await this._req(OP.STREAM_GROUP_LIST), "streamGroupList");
+    if (r.payload.length < 2) throw new KuttiDBError("invalid streamGroupList response");
+    const count = r.payload.readUInt16LE(0), groups = [];
+    let at = 2;
+    for (let i = 0; i < count; i++) {
+      if (at + 2 > r.payload.length) throw new KuttiDBError("invalid streamGroupList response");
+      const topicLen = r.payload.readUInt16LE(at); at += 2;
+      if (at + topicLen + 2 > r.payload.length) throw new KuttiDBError("invalid streamGroupList response");
+      const topic = r.payload.subarray(at, at + topicLen).toString(); at += topicLen;
+      const groupLen = r.payload.readUInt16LE(at); at += 2;
+      if (at + groupLen + 12 > r.payload.length) throw new KuttiDBError("invalid streamGroupList response");
+      groups.push({ topic, group: r.payload.subarray(at, at + groupLen).toString(),
+        generation: r.payload.readBigUInt64LE(at + groupLen),
+        members: r.payload.readUInt32LE(at + groupLen + 8) });
+      at += groupLen + 12;
+    }
+    if (at !== r.payload.length) throw new KuttiDBError("invalid streamGroupList response");
+    return groups;
+  }
+
   async streamDeclare(topic, { partitions = 1, maxBytes = 0, maxAge = null } = {}) {
     const p = Buffer.concat([u32(partitions), u64(maxBytes),
       u64(maxAge == null ? 0 : Math.round(maxAge * 1000))]);
@@ -790,21 +994,64 @@ class Client {
     const hint = partition == null ? 0xffffffff : partition >>> 0;
     const r = this._ok(await this._req(OP.STREAM_APPEND, asBuf(topic),
       Buffer.concat([u32(hint), u16(kb.length), kb, vb])), "streamAppend");
+    if (r.payload.length !== 16) throw new KuttiDBError("invalid streamAppend response");
     return { partition: r.payload.readBigUInt64LE(0), offset: r.payload.readBigUInt64LE(8) };
   }
 
+  async streamAppendMany(topic, items, { partition = null } = {}) {
+    await this._require(CAP.STREAM_BATCH, "stream batch append");
+    const entries = Array.from(items);
+    if (entries.length < 1 || entries.length > 1024)
+      throw new KuttiDBError("stream batch size must be 1-1024");
+    const hint = partition == null ? 0xffffffff : partition;
+    if (!Number.isInteger(hint) || hint < 0 || hint > 0xffffffff)
+      throw new KuttiDBError("invalid stream partition");
+    const parts = [u32(hint), u32(entries.length)];
+    for (const item of entries) {
+      const pair = Array.isArray(item) && item.length === 2 ? item : [Buffer.alloc(0), item];
+      const key = asBuf(pair[0]), value = asBuf(pair[1]);
+      if (key.length > MAX_KEY) throw new KuttiDBError("stream key too large");
+      this._checkVal(value);
+      parts.push(u16(key.length), u32(value.length), key, value);
+    }
+    const r = this._ok(await this._req(OP.STREAM_APPEND_BATCH, asBuf(topic),
+      Buffer.concat(parts)), "streamAppendMany");
+    if (r.payload.length < 4) throw new KuttiDBError("invalid streamAppendMany response");
+    const count = r.payload.readUInt32LE(0);
+    if (count !== entries.length || r.payload.length !== 4 + count * 16)
+      throw new KuttiDBError("invalid streamAppendMany response");
+    return Array.from({ length: count }, (_, i) => ({
+      partition: r.payload.readBigUInt64LE(4 + i * 16),
+      offset: r.payload.readBigUInt64LE(12 + i * 16),
+    }));
+  }
+
   async streamFetch(topic, { partition = 0, offset = 0, maxRecords = 100 } = {}) {
+    const caps = await this.capabilities();
+    const keyed = Boolean(caps.features & CAP.STREAM_KEYS);
     const p = Buffer.concat([u32(partition), u64(offset), u32(maxRecords)]);
-    const r = this._ok(await this._req(OP.STREAM_FETCH, asBuf(topic), p), "streamFetch");
+    const r = await this._req(keyed ? OP.STREAM_FETCH_KEYS : OP.STREAM_FETCH, asBuf(topic), p);
+    if (r.status === STATUS_MISS) return [];
+    this._ok(r, "streamFetch");
+    if (r.payload.length < 4) throw new KuttiDBError("invalid streamFetch response");
     const count = r.payload.readUInt32LE(0);
     const records = [];
     let at = 4;
     for (let i = 0; i < count; i++) {
+      const header = keyed ? 14 : 12;
+      if (at + header > r.payload.length) throw new KuttiDBError("invalid streamFetch response");
       const recOffset = r.payload.readBigUInt64LE(at);
-      const len = r.payload.readUInt32LE(at + 8);
-      records.push({ offset: recOffset, value: r.payload.subarray(at + 12, at + 12 + len) });
-      at += 12 + len;
+      const keyLen = keyed ? r.payload.readUInt16LE(at + 8) : 0;
+      const len = r.payload.readUInt32LE(at + (keyed ? 10 : 8));
+      at += header;
+      if (at + keyLen + len > r.payload.length) throw new KuttiDBError("invalid streamFetch response");
+      const record = { offset: recOffset,
+        value: r.payload.subarray(at + keyLen, at + keyLen + len) };
+      if (keyed) record.key = r.payload.subarray(at, at + keyLen);
+      records.push(record);
+      at += keyLen + len;
     }
+    if (at !== r.payload.length) throw new KuttiDBError("invalid streamFetch response");
     return records;
   }
 
@@ -812,6 +1059,27 @@ class Client {
     const gb = asBuf(group);
     this._ok(await this._req(OP.STREAM_COMMIT, asBuf(topic),
       Buffer.concat([u16(gb.length), gb, u32(partition), u64(offset)])), "streamCommit");
+  }
+
+  async streamCommitBatch(topic, group, commits) {
+    await this._require(CAP.STREAM_COMMIT_BATCH, "stream batch offset commit");
+    const entries = Array.from(commits), gb = asBuf(group);
+    if (entries.length < 1 || entries.length > 256)
+      throw new KuttiDBError("stream commit batch size must be 1-256");
+    const parts = [u16(gb.length), gb, u32(entries.length)];
+    for (const [partition, offset] of entries) parts.push(u32(partition), u64(offset));
+    this._ok(await this._req(OP.STREAM_COMMIT_BATCH, asBuf(topic), Buffer.concat(parts)),
+      "streamCommitBatch");
+  }
+
+  async streamGroupOffset(topic, group, partition) {
+    const gb = asBuf(group);
+    const r = await this._req(OP.STREAM_GROUP_OFFSET, asBuf(topic),
+      Buffer.concat([u16(gb.length), gb, u32(partition)]));
+    if (r.status === STATUS_MISS) return null;
+    this._ok(r, "streamGroupOffset");
+    if (r.payload.length !== 8) throw new KuttiDBError("invalid streamGroupOffset response");
+    return r.payload.readBigUInt64LE(0);
   }
 
   async streamGroupJoin(topic, group, { lease = 30.0 } = {}) {

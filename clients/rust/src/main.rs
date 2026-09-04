@@ -1,4 +1,7 @@
-use kuttidb::{Client, Error, Item, Pool};
+use kuttidb::{
+    Client, Error, ExchangeOptions, ExchangeType, Item, Pool, QueueOptions, SingleFlightState,
+    StreamCommit, StreamOptions,
+};
 use std::time::Duration;
 
 fn leak_str(s: String) -> &'static str {
@@ -59,6 +62,118 @@ fn main() -> Result<(), Error> {
     c.put_many_ttl(&refs)?;
     assert_eq!(c.get("bt0")?, Some(b"y10".to_vec()));
     assert_eq!(c.get("bt1")?, Some(b"y10".to_vec()));
+
+    let caps = c.capabilities()?;
+    assert_eq!(caps.major, 1);
+    assert!(c.health()?);
+
+    c.queue_declare("rust-jobs", QueueOptions::default())?;
+    let id = c.queue_publish("rust-jobs", b"one", None)?;
+    assert!(id > 0);
+    let delivery = c
+        .queue_consume("rust-jobs", Duration::from_secs(5))?
+        .unwrap();
+    assert_eq!(delivery.value, b"one");
+    assert!(c.queue_ack("rust-jobs", delivery.delivery_tag)?);
+    let ids = c.queue_publish_batch("rust-jobs", &[b"two", b"three"])?;
+    assert_eq!(ids.len(), 2);
+    let deliveries = c.queue_consume_batch("rust-jobs", 2)?;
+    let tags: Vec<u64> = deliveries.iter().map(|d| d.delivery_tag).collect();
+    assert_eq!(c.queue_ack_batch("rust-jobs", &tags)?, 2);
+    c.queue_consumer_register("rust-worker")?;
+    c.queue_publish("rust-jobs", b"named", None)?;
+    let named = c
+        .queue_consume_as("rust-jobs", "rust-worker", Duration::from_secs(5))?
+        .unwrap();
+    assert!(c.queue_nack("rust-jobs", named.delivery_tag, false, Duration::ZERO)?);
+    c.queue_consumer_unregister("rust-worker")?;
+    assert!(!c.queue_list()?.is_empty());
+
+    c.exchange_declare(
+        "rust-events",
+        ExchangeOptions {
+            exchange_type: ExchangeType::Topic,
+            ..Default::default()
+        },
+    )?;
+    c.exchange_bind("rust-events", "rust-jobs", "order.*")?;
+    assert_eq!(
+        c.exchange_publish("rust-events", "order.new", b"event", None)?,
+        1
+    );
+    assert!(
+        c.put_and_enqueue("rust-a1", b"value", "rust-jobs", None)?
+            .transaction_id
+            > 0
+    );
+    assert_eq!(
+        c.put_and_publish("rust-a2", b"value", "rust-events", "order.x", None)?
+            .routed,
+        1
+    );
+    assert_eq!(
+        c.update_and_emit("rust-a2", b"updated", "rust-events", "order.x", None)?
+            .routed,
+        1
+    );
+    assert_eq!(
+        c.delete_and_publish("rust-a2", "rust-events", "order.x", b"deleted")?
+            .routed,
+        1
+    );
+
+    let loaded = c.get_or_load(
+        "rust-load",
+        || Ok(Some(b"loaded".to_vec())),
+        Some(Duration::from_secs(30)),
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+    )?;
+    assert_eq!(loaded.as_deref(), Some(b"loaded".as_slice()));
+    c.put_swr(
+        "rust-swr",
+        b"fresh",
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+        None,
+    )?;
+    let swr = c.get_or_refresh("rust-swr", Duration::from_secs(5))?;
+    assert_eq!(swr.state, SingleFlightState::Value);
+
+    c.stream_declare(
+        "rust-stream",
+        StreamOptions {
+            partitions: 2,
+            ..Default::default()
+        },
+    )?;
+    let pos = c.stream_append("rust-stream", b"record", b"key-1", None)?;
+    let partition = pos.partition as u32;
+    c.stream_append_batch("rust-stream", &[(b"key-2", b"record-2")], Some(partition))?;
+    let records = c.stream_fetch("rust-stream", partition, 0, 10)?;
+    assert!(records.len() >= 2);
+    assert_eq!(records[0].key.as_deref(), Some(b"key-1".as_slice()));
+    let assignment = c.stream_group_join("rust-stream", "rust-group", Duration::from_secs(30))?;
+    assert!(!assignment.partitions.is_empty());
+    c.stream_commit("rust-stream", "rust-group", partition, 1)?;
+    c.stream_commit_batch(
+        "rust-stream",
+        "rust-group",
+        &[StreamCommit {
+            partition,
+            offset: 2,
+        }],
+    )?;
+    assert_eq!(
+        c.stream_group_offset("rust-stream", "rust-group", partition)?,
+        Some(2)
+    );
+    assert!(c
+        .stream_group_lag("rust-stream", "rust-group", partition)?
+        .is_some());
+    assert!(!c.stream_list()?.is_empty());
+    assert!(!c.stream_group_list()?.is_empty());
+    c.stream_group_leave("rust-stream", "rust-group")?;
 
     let stats = c.stats()?;
     println!("rust single-client ok — stats: {stats}");

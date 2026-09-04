@@ -149,9 +149,9 @@ Native client libraries live in [`clients/`](clients) and are covered by the `ma
 |---|---|---|
 | Python | [`clients/`](clients) (`src/kuttidb_client.py`) | TCP, shared-memory embed, in-process, and managed local transports |
 | Node.js | [`clients/nodejs`](clients/nodejs) | Zero dependencies; managed Unix and loopback TCP |
-| Go | [`clients/go`](clients/go) | Managed Unix and loopback TCP |
-| Java | [`clients/java`](clients/java) | Managed Unix and loopback TCP |
-| Rust | [`clients/rust`](clients/rust) | Managed Unix and loopback TCP |
+| Go | [`clients/go`](clients/go) | Full native v1.8 protocol, pooled TCP/TLS, managed Unix and loopback TCP, and cgo embed |
+| Java | [`clients/java`](clients/java) | Full native v1.8 protocol, pooled TCP/TLS/Unix, managed Unix and loopback TCP |
+| Rust | [`clients/rust`](clients/rust) | Full native v1.8 protocol, verified TLS, pooling, and managed Unix/loopback TCP |
 | C/C++ | `libkuttidb_embed.dylib` / `.so` | Shared-memory embedded mode |
 
 Python, Node.js, and Rust clients are published to PyPI (`kuttidb`), npm

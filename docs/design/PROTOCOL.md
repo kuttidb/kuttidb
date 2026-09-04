@@ -237,16 +237,21 @@ compatibility.
 
 ## Client support matrix
 
-| Feature | Python | Go | Java | Rust | CLI |
-|---|---|---|---|---|---|
-| put / get / delete | yes | yes | yes | yes | yes |
-| PUT with TTL (0x05) | yes | yes | yes | yes | yes |
-| STATS | yes | yes | yes | yes | yes |
-| PUT_BATCH (0x11) | `put_many` | `PutMany` | `putMany` | `put_many` | `mput` |
-| GET_BATCH (0x12) | `get_many` | `GetMany` | `getMany` | `get_many` | `mget` |
-| PUT_BATCH_TTL (0x13) | `put_many` w/ per-item ttl | `PutManyTTL` | `putManyTTL` | `put_many_ttl` | `mput --ttl` |
-| Pool / concurrency | thread per conn | built-in pool | one conn per instance | `Pool` | n/a |
-| Shared-memory embed | ctypes (`kuttidb_embed.py`) | via cgo (future) | via JNI (future) | via FFI (future) | n/a |
+| Feature | Python | Node.js | Go | Java | Rust | CLI |
+|---|---|---|---|---|---|---|
+| put / get / delete / TTL / STATS | yes | yes | yes | yes | yes | yes |
+| KV batches (`0x11`–`0x13`) | yes | yes | yes | yes | yes | yes |
+| Health and capability discovery | yes | yes | yes | yes | yes | yes |
+| Queues and durable consumers | yes | yes | yes | yes | yes | yes |
+| Queue inventory and batches | yes | yes | yes | yes | yes | yes |
+| Exchanges and routing | yes | yes | yes | yes | yes | yes |
+| Atomic cache plus messaging | yes | yes | yes | yes | yes | yes |
+| Single-flight and SWR | yes | yes | yes | yes | yes | no |
+| Streams and consumer groups | yes | yes | yes | yes | yes | yes |
+| Stream inventory, keyed fetch, and batches | yes | yes | yes | yes | yes | yes |
+| Managed local lifecycle | yes | yes | yes | yes | yes | n/a |
+| Pool / concurrency | thread per conn | built-in pool | built-in pool | built-in pool | `Pool` | n/a |
+| Shared-memory embed | ctypes | no | cgo | no | no | n/a |
 
 ## Server CLI
 

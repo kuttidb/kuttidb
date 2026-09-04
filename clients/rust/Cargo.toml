@@ -2,7 +2,7 @@
 name = "kuttidb"
 version = "0.0.1-beta"
 edition = "2021"
-description = "Client for the kuttidb binary protocol (put/get/delete, TTL, batched ops, stats)"
+description = "Full KuttiDB v1.8 binary protocol client with cache, queues, exchanges, atomic operations, single-flight, SWR, streams, and managed lifecycle"
 license = "Apache-2.0"
 repository = "https://github.com/kuttidb/kuttidb"
 homepage = "https://github.com/kuttidb/kuttidb"
@@ -19,3 +19,7 @@ path = "src/main.rs"
 [[bin]]
 name = "bench"
 path = "src/bench.rs"
+
+[dependencies]
+rustls = "0.23"
+webpki-roots = "1"
