@@ -1,0 +1,48 @@
+# Deploys the static landing page (landing/) to GitHub Pages.
+#
+# One-time setup in the repository settings (required, the workflow cannot do it):
+#   Settings → Pages → Build and deployment → Source: "GitHub Actions"
+#
+# Result: https://kuttidb.github.io/kuttidb/
+name: Deploy landing page to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'landing/**'
+      - '.github/workflows/landing-pages.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deploy at a time; do not cancel an in-flight deployment.
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # The site is prebuilt and self-contained — just publish the folder as-is.
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: landing
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
