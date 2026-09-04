@@ -111,6 +111,20 @@ target_compile_features(kuttidb-bench PRIVATE c_std_11)
 target_compile_options(kuttidb-bench PRIVATE -Wall -Wextra)
 target_link_libraries(kuttidb-bench PRIVATE Threads::Threads)
 
+# Release builds add -DNDEBUG, which would compile the assert()-based test
+# bodies — including setup calls with side effects — out of existence: e.g.
+# test_managed_lock.c mints its instance identity inside an assert, and a
+# NDEBUG build then feeds uninitialized stack memory to dprintf("%s").
+# -UNDEBUG is appended after the per-config flags, so asserts stay live in
+# every configuration for every test executable. Production targets are
+# unaffected (no assert() in non-test sources).
+foreach(kuttidb_test_target
+        core_test platform_test managed_lifecycle_test managed_lock_test
+        queue_test queue_failure_test queue_crash_test exchange_test
+        atomic_test stream_test fuzz_test embed_aslr_test)
+    target_compile_options(${kuttidb_test_target} PRIVATE -UNDEBUG)
+endforeach()
+
 enable_testing()
 add_test(NAME core_kuttidb COMMAND core_test)
 add_test(NAME platform_events COMMAND platform_test)
