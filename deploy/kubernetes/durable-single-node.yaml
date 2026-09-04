@@ -1,4 +1,4 @@
-# Create the referenced token first; see DEPLOYMENT.md. This is a single-node
+# Create the referenced token first; see docs/operations/DEPLOYMENT.md. This is a single-node
 # durable deployment, not a replicated no-node-loss configuration.
 apiVersion: v1
 kind: Service
@@ -91,7 +91,7 @@ spec:
               mountPath: /run/kuttidb
           readinessProbe:
             # /ready reports 503 while any persistence engine is degraded.
-            # The bearer token must equal the metrics token; see DEPLOYMENT.md.
+            # The bearer token must equal the metrics token; see docs/operations/DEPLOYMENT.md.
             httpGet:
               path: /ready
               port: metrics

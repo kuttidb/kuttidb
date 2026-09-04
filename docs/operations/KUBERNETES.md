@@ -1,13 +1,13 @@
 # Kubernetes deployment
 
 KuttiDB deploys on Kubernetes through plain manifests in
-[`deploy/kubernetes/`](deploy/kubernetes/) — no Helm chart is required for
+[`deploy/kubernetes/`](../../deploy/kubernetes/) — no Helm chart is required for
 the supported topologies. Two shapes exist:
 
 | Manifest | Shape | Persistence | Use |
 |---|---|---|---|
-| [`ephemeral-cache.yaml`](deploy/kubernetes/ephemeral-cache.yaml) | Deployment | none (`-` WAL) | cache-only, pods are disposable |
-| [`durable-single-node.yaml`](deploy/kubernetes/durable-single-node.yaml) | StatefulSet (1 replica) | PVC + `--durability always` | durable queues, streams, atomic operations |
+| [`ephemeral-cache.yaml`](../../deploy/kubernetes/ephemeral-cache.yaml) | Deployment | none (`-` WAL) | cache-only, pods are disposable |
+| [`durable-single-node.yaml`](../../deploy/kubernetes/durable-single-node.yaml) | StatefulSet (1 replica) | PVC + `--durability always` | durable queues, streams, atomic operations |
 
 KuttiDB is a **single-node durable store**: a StatefulSet with one replica
 and a `ReadWriteOnce` volume survives pod restarts and rescheduling onto a
@@ -15,7 +15,7 @@ healthy node, but it is **not** replicated — node or disk destruction loses
 acknowledged durable data. There is no "replicated no-node-loss"
 configuration; do not increase `replicas` on the durable manifest, because
 two writers on separate volumes are independent databases, not a cluster.
-See [DURABILITY.md](DURABILITY.md) for the exact guarantees.
+See [DURABILITY.md](../design/DURABILITY.md) for the exact guarantees.
 
 ## Ephemeral cache mode
 

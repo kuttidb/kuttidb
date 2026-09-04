@@ -1,8 +1,8 @@
 /* Queue engine depth-scaling benchmark.
  *
  * Drives the QueueStore API directly (no server, no protocol) so results
- * isolate engine cost. Records the evidence BENCHMARKS.md needs for the
- * queue engine:
+ * isolate engine cost. Records the evidence docs/operations/BENCHMARKS.md
+ * needs for the queue engine:
  *
  *   PUBLISH  - durable publish ops/s as retained depth grows 10k -> 20k
  *   CONSUME  - consume ops/s behind a wall of in-flight deliveries (the

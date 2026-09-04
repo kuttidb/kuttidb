@@ -6,7 +6,7 @@ separate queue service to begin.
 
 This guide uses Python because the included client makes the examples short.
 The same server also works with the Go, Java, Rust, and Node.js clients in
-[`clients/`](clients/).
+[`clients/`](../../clients/).
 
 ## 1. Build and run it
 
@@ -124,10 +124,10 @@ guaranteed within a partition, not across several partitions.
 
 ## Where to go next
 
-- [README.md](README.md) for the project overview and all supported clients.
-- [QUEUES.md](QUEUES.md) for retry, dead-letter, and delivery details.
-- [STREAMS.md](STREAMS.md) for partitions, retention, and Consumer Groups.
-- [MANAGEMENT_API.md](MANAGEMENT_API.md) when you need an authenticated admin
+- [README.md](../../README.md) for the project overview and all supported clients.
+- [QUEUES.md](../messaging/QUEUES.md) for retry, dead-letter, and delivery details.
+- [STREAMS.md](../messaging/STREAMS.md) for partitions, retention, and Consumer Groups.
+- [MANAGEMENT_API.md](../api/MANAGEMENT_API.md) when you need an authenticated admin
   API for dashboards or automation.
 # Managed local mode
 

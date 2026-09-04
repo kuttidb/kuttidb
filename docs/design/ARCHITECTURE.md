@@ -201,7 +201,7 @@ rejected, expired, and limit-exhausted messages are routed there with durable
 routing-before-removal ordering, and a full dead-letter queue fails closed
 instead of dropping the message. Prefetch and persistent consumer
 registration remain separate pending work. Exactly-once is not a goal
-for the initial protocol. See [QUEUES.md](QUEUES.md).
+for the initial protocol. See [QUEUES.md](../messaging/QUEUES.md).
 
 ### Exchange semantics (native routing)
 
@@ -213,7 +213,7 @@ and fsyncs the queue WAL once before confirming. Unroutable publishes are
 reported (routed = 0) and counted, with optional single-hop alternate-exchange
 routing. A per-exchange binding cap bounds fanout. Exchange and binding
 declarations are durable in the queue WAL; routing is at-least-once and never
-silently lossy. See [EXCHANGES.md](EXCHANGES.md).
+silently lossy. See [EXCHANGES.md](../messaging/EXCHANGES.md).
 
 ### Stream semantics (native vertical slice)
 
@@ -227,7 +227,7 @@ Groups have lease-based membership and deterministic round-robin assignment;
 clients rejoin to heartbeat and refresh assignments, and disconnects remove
 members immediately. Cooperative rebalance notifications/draining, batch wire
 operations, segment log compaction, consumer lag metrics, and atomic
-cache-plus-stream commits remain future work. See [STREAMS.md](STREAMS.md)
+cache-plus-stream commits remain future work. See [STREAMS.md](../messaging/STREAMS.md)
 for the exact current contract.
 
 ### Cross-platform local transport

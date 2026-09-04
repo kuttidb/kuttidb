@@ -1,8 +1,8 @@
 /* Stream engine retained-history benchmark.
  *
  * Drives the StreamStore API directly (no server, no protocol) so results
- * isolate engine cost. It records the evidence BENCHMARKS.md needs for the
- * stream engine:
+ * isolate engine cost. It records the evidence docs/operations/BENCHMARKS.md
+ * needs for the stream engine:
  *
  *   APPEND   - durable append ops/s and p50/p95/p99 as retained history grows
  *              (a linear per-op history cost shows up as falling ops/s)

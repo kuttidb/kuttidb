@@ -630,7 +630,7 @@
       </p>
       <ul>
         <li>After recovery, <b style="color:var(--text)">both sides exist or neither does</b> — no phantom events, no lost updates.</li>
-        <li>One acknowledgement point, documented in <span class="mono" style="font-size:.9em;">DURABILITY.md</span>, not vibes.</li>
+        <li>One acknowledgement point, documented in <span class="mono" style="font-size:.9em;">docs/design/DURABILITY.md</span>, not vibes.</li>
         <li>Enforced by crash-recovery tests in the standard suite.</li>
       </ul>
       <div class="commit-flow">
@@ -697,7 +697,7 @@ db.<span class="fn">queue_browse</span>(<span class="st">"orders.created"</span>
         <li style="margin-bottom:9px;">Stream append measured as history grows 10k → 100k records across 8 partitions.</li>
         <li style="margin-bottom:9px;">TSAN builds, fuzz suites, and crash-recovery tests keep the fast path honest.</li>
       </ul>
-      <p class="bench-note reveal">Full methodology and environments: <b>BENCHMARKS.md</b> in the repository.</p>
+      <p class="bench-note reveal">Full methodology and environments: <b>docs/operations/BENCHMARKS.md</b> in the repository.</p>
     </div>
     <div class="reveal">
       <div class="codewin" style="font-size:14px;">
@@ -794,18 +794,18 @@ $ ./kuttidb 7379 -</pre>
     <h2 class="reveal">Written down, all of it.</h2>
     <p class="section-lede reveal" style="margin-bottom:42px;">Every guarantee below is a document with a name — read before you trust.</p>
     <div class="docs-grid reveal">
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/GETTING_STARTED.md"><span class="arr">↗</span><b>Getting started</b><span>Values, queues, streams — first run</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/ARCHITECTURE.md"><span class="arr">↗</span><b>Architecture</b><span>Engines, storage separation, durability</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/PROTOCOL.md"><span class="arr">↗</span><b>Protocol</b><span>Binary wire protocol, CLI flags, limits</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/QUEUES.md"><span class="arr">↗</span><b>Queues</b><span>Delivery and dead-letter rules</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/EXCHANGES.md"><span class="arr">↗</span><b>Exchanges</b><span>Exchange types and routing rules</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/STREAMS.md"><span class="arr">↗</span><b>Streams</b><span>Ordering, offsets, consumer groups</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/DURABILITY.md"><span class="arr">↗</span><b>Durability</b><span>Ack points, atomic ops, single-node limits</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/SECURITY.md"><span class="arr">↗</span><b>Security</b><span>Auth, TLS, permissions, threat model</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/MANAGEMENT_API.md"><span class="arr">↗</span><b>Management API</b><span>Admin surface &amp; security model</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/DEPLOYMENT.md"><span class="arr">↗</span><b>Deployment</b><span>Docker/K8s, metrics, probes, backup</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/BENCHMARKS.md"><span class="arr">↗</span><b>Benchmarks</b><span>Methodology and recorded results</span></a>
-      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/MIGRATION.md"><span class="arr">↗</span><b>Migration</b><span>When to use Redis/RabbitMQ/Kafka instead</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/guides/GETTING_STARTED.md"><span class="arr">↗</span><b>Getting started</b><span>Values, queues, streams — first run</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/design/ARCHITECTURE.md"><span class="arr">↗</span><b>Architecture</b><span>Engines, storage separation, durability</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/design/PROTOCOL.md"><span class="arr">↗</span><b>Protocol</b><span>Binary wire protocol, CLI flags, limits</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/messaging/QUEUES.md"><span class="arr">↗</span><b>Queues</b><span>Delivery and dead-letter rules</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/messaging/EXCHANGES.md"><span class="arr">↗</span><b>Exchanges</b><span>Exchange types and routing rules</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/messaging/STREAMS.md"><span class="arr">↗</span><b>Streams</b><span>Ordering, offsets, consumer groups</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/design/DURABILITY.md"><span class="arr">↗</span><b>Durability</b><span>Ack points, atomic ops, single-node limits</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/SECURITY.md"><span class="arr">↗</span><b>Security</b><span>Auth, TLS, permissions, threat model</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/api/MANAGEMENT_API.md"><span class="arr">↗</span><b>Management API</b><span>Admin surface &amp; security model</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/operations/DEPLOYMENT.md"><span class="arr">↗</span><b>Deployment</b><span>Docker/K8s, metrics, probes, backup</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/operations/BENCHMARKS.md"><span class="arr">↗</span><b>Benchmarks</b><span>Methodology and recorded results</span></a>
+      <a class="doc-link" href="https://github.com/kuttidb/kuttidb/blob/main/docs/guides/MIGRATION.md"><span class="arr">↗</span><b>Migration</b><span>When to use Redis/RabbitMQ/Kafka instead</span></a>
     </div>
   </div>
 </section>

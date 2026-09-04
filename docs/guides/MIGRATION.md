@@ -58,7 +58,7 @@ something else" list matters more than a feature checklist:
 
 ## Upgrade policy
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the full procedure. The essentials:
+See [DEPLOYMENT.md](../operations/DEPLOYMENT.md) for the full procedure. The essentials:
 
 - Protocol `major.minor` with a capability bitset; majors are refused,
   higher minors are additive. Check feature bits before using new commands.
@@ -71,6 +71,6 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for the full procedure. The essentials:
 
 ## Backup and restore
 
-Covered in [DEPLOYMENT.md](DEPLOYMENT.md): cold backup of the single data
+Covered in [DEPLOYMENT.md](../operations/DEPLOYMENT.md): cold backup of the single data
 directory, idempotent restore through tested WAL recovery, and why live
 copies are not supported.

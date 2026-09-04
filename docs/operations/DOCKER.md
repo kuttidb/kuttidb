@@ -28,7 +28,7 @@ docker run --rm -p 127.0.0.1:7379:7379 kuttidb:local 7379 /var/lib/kuttidb/kutti
 ```
 
 The entrypoint passes arguments straight to the server; see
-[PROTOCOL.md](PROTOCOL.md) for the full flag list. A durable container
+[PROTOCOL.md](../design/PROTOCOL.md) for the full flag list. A durable container
 typically uses:
 
 ```sh
@@ -62,7 +62,7 @@ variant. Publishing to a registry is release work, not part of CI.
 
 ## Compose example
 
-[`compose.yaml`](compose.yaml) runs one durable instance with a named
+[`compose.yaml`](../../compose.yaml) runs one durable instance with a named
 volume, an auth token from a file (`KUTTIDB_AUTH_TOKEN_FILE` must point at a
 1–1024-byte token file), loopback-only client and metrics ports, and
 `--durability always`:
@@ -78,7 +78,7 @@ pass `--metrics-token-file` as the Kubernetes manifest does.
 
 The Compose file deliberately runs **one instance**: KuttiDB is a single-node
 durable store. There is no replication yet, so a volume does not protect
-against node loss — see [DURABILITY.md](DURABILITY.md).
+against node loss — see [DURABILITY.md](../design/DURABILITY.md).
 
 ## Verifying recovery
 

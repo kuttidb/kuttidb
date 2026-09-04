@@ -138,7 +138,7 @@ ALLOW_LOOPBACK_HTTP=true pnpm ui:dev     # http://localhost:5173
 ```
 
 Connect the console to `http://127.0.0.1:7380` with the token from `admin.token`.
-See [MANAGEMENT_API.md](MANAGEMENT_API.md) for the security model and
+See [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) for the security model and
 [apps/management-ui](apps/management-ui) for the console.
 
 ## Clients
@@ -162,25 +162,25 @@ KUTTIDB_AUTH_TOKEN_FILE=./auth.token docker compose up --build
 
 The compose file starts a non-root container with durable WALs, loopback-only ports, and a
 Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architecture
-(linux/amd64 + linux/arm64) images are built in CI. See [DOCKER.md](DOCKER.md) and
-[KUBERNETES.md](KUBERNETES.md) for manifests and probes.
+(linux/amd64 + linux/arm64) images are built in CI. See [DOCKER.md](docs/operations/DOCKER.md) and
+[KUBERNETES.md](docs/operations/KUBERNETES.md) for manifests and probes.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [GETTING_STARTED.md](GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Engines, storage separation, durability model |
-| [PROTOCOL.md](PROTOCOL.md) | Binary wire protocol, CLI flags, limits |
-| [QUEUES.md](QUEUES.md) | Queue semantics, delivery and dead-letter rules |
-| [EXCHANGES.md](EXCHANGES.md) | Exchange types, routing rules, binding limits |
-| [STREAMS.md](STREAMS.md) | Partition ordering, offsets, retention, consumer groups |
-| [DURABILITY.md](DURABILITY.md) | Acknowledgement points, atomic operations, single-node limits |
-| [SECURITY.md](SECURITY.md) | Auth, TLS, permissions, threat model |
-| [MANAGEMENT_API.md](MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
-| [BENCHMARKS.md](BENCHMARKS.md) | Recorded benchmark methodology and results |
-| [MIGRATION.md](MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
+| [GETTING_STARTED.md](docs/guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
+| [ARCHITECTURE.md](docs/design/ARCHITECTURE.md) | Engines, storage separation, durability model |
+| [PROTOCOL.md](docs/design/PROTOCOL.md) | Binary wire protocol, CLI flags, limits |
+| [QUEUES.md](docs/messaging/QUEUES.md) | Queue semantics, delivery and dead-letter rules |
+| [EXCHANGES.md](docs/messaging/EXCHANGES.md) | Exchange types, routing rules, binding limits |
+| [STREAMS.md](docs/messaging/STREAMS.md) | Partition ordering, offsets, retention, consumer groups |
+| [DURABILITY.md](docs/design/DURABILITY.md) | Acknowledgement points, atomic operations, single-node limits |
+| [SECURITY.md](docs/SECURITY.md) | Auth, TLS, permissions, threat model |
+| [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
+| [DEPLOYMENT.md](docs/operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
+| [BENCHMARKS.md](docs/operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
+| [MIGRATION.md](docs/guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
 | [openapi/management-v1.yaml](openapi/management-v1.yaml) | Versioned Management API contract |
 
 ## Testing and benchmarks
@@ -193,7 +193,7 @@ make bench-exchange
 
 The suite includes crash-recovery tests (`queue_crash_test`, `queue_failure_test`), concurrency
 and TSAN builds (`make sanitize-tsan-server`, `sanitize-tsan-queue`), and ASLR-safe embedded-region
-tests. Recorded numbers live in [BENCHMARKS.md](BENCHMARKS.md) and [ROADMAP.md](ROADMAP.md).
+tests. Recorded numbers live in [BENCHMARKS.md](docs/operations/BENCHMARKS.md) and [ROADMAP.md](docs/plans/ROADMAP.md).
 
 ## What KuttiDB is not
 

@@ -93,4 +93,4 @@ on loopback. It never accepts credentials in
 URLs. Plain HTTP is restricted to loopback; remote administration requires
 native TLS. Exact CORS origins may be configured, but wildcard origins are not
 accepted and CORS never bypasses bearer authentication. See
-[MANAGEMENT_API.md](MANAGEMENT_API.md).
+[MANAGEMENT_API.md](api/MANAGEMENT_API.md).

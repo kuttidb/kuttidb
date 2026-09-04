@@ -232,7 +232,7 @@ an administrative commit and never joins or changes Group membership.
 
 Errors have the stable form `{"error":{"code":"...","message":"..."}}`.
 The detailed public schema, examples, limits, and security policy are in
-[`openapi/management-v1.yaml`](openapi/management-v1.yaml).
+[`openapi/management-v1.yaml`](../../openapi/management-v1.yaml).
 
 ## Security and stability
 

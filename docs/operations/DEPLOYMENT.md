@@ -173,4 +173,4 @@ start it with `--admin-bind 127.0.0.1:7380 --admin-token-file admin.token
 --admin-audit-log admin-audit.jsonl`.
 For any remote bind, add `--admin-tls-cert` and `--admin-tls-key`; plaintext
 remote administration is refused. Keep this token separate from data-listener
-and metrics tokens. Details: [MANAGEMENT_API.md](MANAGEMENT_API.md).
+and metrics tokens. Details: [MANAGEMENT_API.md](../api/MANAGEMENT_API.md).

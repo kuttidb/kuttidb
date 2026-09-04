@@ -66,7 +66,7 @@ Status: **complete**.
 - Inspected protocol, security model, Makefile, cache/server/embed sources,
   current tests, benchmarks, and Python, Go, Java, and Rust clients.
 - Captured the build/test and quick benchmark baseline above.
-- Added [ARCHITECTURE.md](ARCHITECTURE.md) and this roadmap because no
+- Added [ARCHITECTURE.md](../design/ARCHITECTURE.md) and this roadmap because no
   equivalent documents existed.
 - Documented current cache durability and the required single-node limitation.
 
@@ -225,7 +225,7 @@ Status: **complete**.
 - Native protocol opcodes `0x30`–`0x33`, `STATS` counters (`exchanges`,
   `exchange_bindings`, `exchange_unroutable`), and Python client methods
   (`exchange_declare`, `exchange_bind`, `exchange_unbind`, `exchange_publish`)
-  are documented in [EXCHANGES.md](EXCHANGES.md).
+  are documented in [EXCHANGES.md](../messaging/EXCHANGES.md).
 
 Exit gate: routing rules and error paths are covered by integration tests and
 cannot create unbounded fanout or response buffering. Result: passed on
@@ -547,7 +547,7 @@ Exit gate: order holds within a partition, records and offsets recover after a
 process crash, and consumption is documented and tested as at-least-once.
 Status: the correctness exit gate passes; the remaining item, segment-file
 storage, is a documented scalability optimization rather than a correctness
-gap (see [STREAMS.md](STREAMS.md)): the in-memory retained set plus a single
+gap (see [STREAMS.md](../messaging/STREAMS.md)): the in-memory retained set plus a single
 crash-safe WAL with interruption-safe checkpoint compaction already provides
 the tested recovery contract, with `max_bytes` bounding retained memory and
 capacity planning required for compaction.
@@ -621,7 +621,7 @@ Status: **in progress**.
   size and socket timeouts are bounded and one request is served per
   connection. Covered by the security suite (policy refusal, 401/404 paths,
   header parsing, oversized-request drop, metric families) and documented in
-  [DEPLOYMENT.md](DEPLOYMENT.md).
+  [DEPLOYMENT.md](../operations/DEPLOYMENT.md).
 - Wired authenticated probes into deployment: the durable StatefulSet copies a
   private metrics token from its secret, binds metrics on `0.0.0.0:9099`, and
   uses HTTP `/ready` and `/live` probes carrying the bearer header; the Compose
@@ -641,7 +641,7 @@ Status: **in progress**.
   Prometheus metrics and authenticated probes are now shipped; remaining
   observability work is per-queue/per-topic labeled metrics.
 - Windows remains the one documented platform blocker, with its exact scope
-  recorded in [ARCHITECTURE.md](ARCHITECTURE.md): no Windows server build
+  recorded in [ARCHITECTURE.md](../design/ARCHITECTURE.md): no Windows server build
   (IOCP event backend), no Windows shared-memory mapping or named pipes, and
   no DLL/C# client until the remaining POSIX-specific file locks, clocks, and
   process-liveness boundaries are abstracted.
@@ -686,19 +686,19 @@ Status: **in progress**.
   `make sanitize-tsan-server` (queue, single-flight, and stream protocol
   suites against a TSan server): no race reports.
 - Added backup/restore and upgrade/compatibility guidance to
-  [DEPLOYMENT.md](DEPLOYMENT.md): cold backup of the one data directory,
+  [DEPLOYMENT.md](../operations/DEPLOYMENT.md): cold backup of the one data directory,
   idempotent restore through tested WAL recovery, explicit live-copy and
   snapshot caveats, and the protocol/format versioning upgrade policy.
 - Compatibility-adapter evaluation recorded in
-  [ARCHITECTURE.md](ARCHITECTURE.md): Redis RESP and AMQP gateways are
+  [ARCHITECTURE.md](../design/ARCHITECTURE.md): Redis RESP and AMQP gateways are
   deferred with written rationale (semantic subsets breed broken
   integrations; the native API already works in five client languages), and
   Kafka wire compatibility is ruled out for the core binary in favor of
   native streams plus documented bridges. The documented claim stays
   "native protocol v1.3, no Redis/AMQP/Kafka wire compatibility."
-- Added [BENCHMARKS.md](BENCHMARKS.md) (methodology, recorded results, and
+- Added [BENCHMARKS.md](../operations/BENCHMARKS.md) (methodology, recorded results, and
   the honest gaps: no isolated PUT/GET/DELETE latency series yet, no
-  Linux/Windows-native performance tables) and [MIGRATION.md](MIGRATION.md)
+  Linux/Windows-native performance tables) and [MIGRATION.md](../guides/MIGRATION.md)
   (when to use Redis/RabbitMQ/Kafka/SQLite instead, workload migration maps,
   and the upgrade policy), both linked from the README.
 - CI now runs a dedicated safety job: ASan/UBSan core, stream, WAL-fuzz, and
@@ -712,11 +712,11 @@ Status: **in progress**.
   image. CI now runs it as the `container-recovery` job. The test also
   re-confirmed the deployment pattern: both the client listener and the
   metrics listener require their token files on a non-loopback bind.
-- Closed the isolated-latency gap in [BENCHMARKS.md](BENCHMARKS.md):
+- Closed the isolated-latency gap in [BENCHMARKS.md](../operations/BENCHMARKS.md):
   `kuttidb-bench` gained a `single` mode (`make bench-single`) that measures PUT,
   GET, and DELETE as separate one-round-trip series with p50/p95/p99 —
   recorded at ~12 us p50 per op for one client and ~16–17 us for four.
-- Added a Linux-native performance table to [BENCHMARKS.md](BENCHMARKS.md)
+- Added a Linux-native performance table to [BENCHMARKS.md](../operations/BENCHMARKS.md)
   (Alpine/musl/epoll in a container on the same ARM64 host, caveats
   documented): 7.2M ops/s at 4 clients, 8.4M ops/s at 8 clients, with the
   epoll backend avoiding the 8-client p99 cliff the kqueue sample shows.

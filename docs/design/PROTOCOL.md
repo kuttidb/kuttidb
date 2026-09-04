@@ -109,7 +109,7 @@ Misses report status `0x01` with vlen `0`. Max count: 65536.
 Native durable queue commands use opcodes `0x20`–`0x2F`. Their binary layouts,
 durability point, ACK/NACK, visibility, redelivery, dead-letter, retry
 semantics, and the batch operations (`0x2D`–`0x2F`, capability bit 12) are
-specified in [QUEUES.md](QUEUES.md). They are native KuttiDB
+specified in [QUEUES.md](../messaging/QUEUES.md). They are native KuttiDB
 commands, not AMQP.
 
 ## Exchanges and routing
@@ -117,7 +117,7 @@ commands, not AMQP.
 Native exchange commands use opcodes `0x30`–`0x33` and share the request
 framing. Direct, fanout, and topic matching, the unnamed default exchange,
 alternate-exchange routing, unroutable reporting, binding limits, and the
-routing durability point are specified in [EXCHANGES.md](EXCHANGES.md).
+routing durability point are specified in [EXCHANGES.md](../messaging/EXCHANGES.md).
 Publish responses report the number of routed copies; an unroutable publish
 answers MISS, and a failed publish (full target queue, persistence failure)
 answers ERROR without confirming anything.
@@ -232,7 +232,7 @@ key-preserving fetch (`0x6C`, capability bit 14). Since v1.3 the
 group-join response carries a membership generation after the assignment, and
 `0x68` performs a graceful group leave. Layouts and current at-least-once
 semantics are in
-[STREAMS.md](STREAMS.md). They are native KuttiDB commands, not Kafka wire
+[STREAMS.md](../messaging/STREAMS.md). They are native KuttiDB commands, not Kafka wire
 compatibility.
 
 ## Client support matrix
@@ -366,5 +366,5 @@ reordered mutations.
 KuttiDB's binary protocol remains the data protocol. The optional metrics
 listener and the optional, versioned Management API are separate
 operational HTTP surfaces; the latter is documented in
-[MANAGEMENT_API.md](MANAGEMENT_API.md) and does not alter binary protocol
+[MANAGEMENT_API.md](../api/MANAGEMENT_API.md) and does not alter binary protocol
 compatibility.

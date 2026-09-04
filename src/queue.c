@@ -171,7 +171,7 @@ struct QueueTx {
     struct QueueTx *next; /* pending list during recovery */
 };
 
-/* Lock architecture (documented in ARCHITECTURE.md):
+/* Lock architecture (documented in docs/design/ARCHITECTURE.md):
  *   metadata (store->lock): queue/exchange/consumer declarations and name
  *   lookups, transaction list. Queues and exchanges are never freed while
  *   the store lives, so pointers stay valid after the metadata lock is
