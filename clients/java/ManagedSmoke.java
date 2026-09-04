@@ -1,3 +1,4 @@
+import io.github.kuttidb.client.KuttiDBClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.net.ServerSocket;

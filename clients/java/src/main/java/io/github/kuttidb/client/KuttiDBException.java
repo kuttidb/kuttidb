@@ -1,3 +1,5 @@
+package io.github.kuttidb.client;
+
 import java.io.IOException;
 
 /**

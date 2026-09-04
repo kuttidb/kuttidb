@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  KuttiDB Java client build. Publishing is tag-driven: pushing a java-v*
+  tag runs .github/workflows/release-java.yml, which gates on the native
+  protocol smokes and then deploys to Maven Central through the
+  central-publishing-maven-plugin. Credentials are never stored in this
+  file: the workflow writes a runner-local settings.xml that maps the
+  `central` server id to the MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD
+  secrets, and the `gpg.passphrase` server id to GPG_PASSPHRASE.
+  See docs/operations/CLIENT_PUBLISHING.md.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.kuttidb</groupId>
+  <artifactId>kuttidb-client</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <name>KuttiDB Java Client</name>
+  <description>Java client for the KuttiDB native binary protocol (v1.8): pooled connections, cache with TTL and batches, durable queues, exchanges, atomic cache-plus-message operations, single-flight loading, stale-while-revalidate, and partitioned streams.</description>
+  <url>https://github.com/kuttidb/kuttidb</url>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <name>kuttidb</name>
+      <organizationUrl>https://github.com/kuttidb</organizationUrl>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/kuttidb/kuttidb.git</connection>
+    <developerConnection>scm:git:git@github.com:kuttidb/kuttidb.git</developerConnection>
+    <url>https://github.com/kuttidb/kuttidb</url>
+  </scm>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <build>
+    <sourceDirectory>${project.basedir}/src/main/java</sourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+
+      <!-- Central requires the sources jar. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.3.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar-no-fork</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Central requires the javadoc jar. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.6.3</version>
+        <configuration>
+          <doclint>none</doclint>
+        </configuration>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Sign every artifact; the key arrives via GPG_PRIVATE_KEY. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <version>3.2.4</version>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>verify</phase>
+            <goals><goal>sign</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <gpgArguments>
+            <arg>--pinentry-mode</arg>
+            <arg>loopback</arg>
+          </gpgArguments>
+        </configuration>
+      </plugin>
+
+      <!-- Uploads the validated bundle to the Central Portal and auto-publishes. -->
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.6.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <autoPublish>true</autoPublish>
+          <waitUntil>validated</waitUntil>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

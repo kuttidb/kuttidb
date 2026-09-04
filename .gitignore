@@ -21,6 +21,7 @@
 /queue_tsan_test
 /build/
 clients/rust/target/
+clients/java/target/
 clients/java/*.class
 __pycache__/
 *.pyc

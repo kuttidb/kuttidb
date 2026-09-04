@@ -104,7 +104,7 @@ src/managed_launcher.o: src/managed_launcher.c src/managed_launcher.h src/instan
 
 clean:
 	rm -f kuttidb kuttidb_sanitize kuttidb-bench core_test core_test_sanitize platform_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test stream_test stream_test_sanitize fuzz_test fuzz_test_sanitize embed_aslr_test \
-		libkuttidb_embed.dylib libkuttidb_embed.so managed_lifecycle_test managed_lock_test src/*.o clients/java/*.class
+		libkuttidb_embed.dylib libkuttidb_embed.so managed_lifecycle_test managed_lock_test src/*.o clients/java/target
 
 install: all
 	install -m 0755 kuttidb /usr/local/bin/kuttidb
@@ -143,7 +143,7 @@ test: all core_test platform_test managed_lifecycle_test managed_lock_test queue
 		--queue-wal $$tmp/queue.wal 2>/dev/null & server_pid=$$!; \
 	trap 'kill $$server_pid 2>/dev/null || true; rm -rf $$tmp' EXIT; sleep 0.7; \
 	cd clients/go && go vet ./... && go run ./cmd/smoketest; \
-	cd ../java && javac -encoding UTF-8 *.java && java -cp . Smoke; \
+	cd ../java && mkdir -p target/classes target/test-classes && javac -encoding UTF-8 -d target/classes $$(find src/main/java -name '*.java') && javac -encoding UTF-8 -cp target/classes -d target/test-classes Smoke.java && java -cp target/classes:target/test-classes Smoke; \
 	cd ../rust && cargo build --quiet && ./target/debug/smoketest; \
 	if command -v node >/dev/null 2>&1; then cd ../nodejs && node smoke.js 7394; else echo "node not installed: skipping Node.js client smoke"; fi; \
 	kill $$server_pid; wait $$server_pid || true
@@ -157,8 +157,8 @@ managed-sdk-test: kuttidb $(EMBED_LIB)
 	KUTTIDB_SERVER="$$PWD/kuttidb" node clients/nodejs/managed_smoke.js "$$tmp/node"; \
 	KUTTIDB_SERVER="$$PWD/kuttidb" node clients/nodejs/managed_smoke.js "$$tmp/node-tcp" tcp; \
 	cd clients/go && KUTTIDB_MANAGED_INTEGRATION=1 KUTTIDB_SERVER="$$PWD/../../kuttidb" go test -run TestManagedLifecycleIntegration -count=1; \
-	cd ../java && javac -encoding UTF-8 *.java && java -cp . ManagedSmoke "$$tmp/java" "$$PWD/../../kuttidb"; \
-	java -cp . ManagedSmoke "$$tmp/java-tcp" "$$PWD/../../kuttidb" tcp; \
+	cd ../java && mkdir -p target/classes target/test-classes && javac -encoding UTF-8 -d target/classes $$(find src/main/java -name '*.java') && javac -encoding UTF-8 -cp target/classes -d target/test-classes ManagedSmoke.java && java -cp target/classes:target/test-classes ManagedSmoke "$$tmp/java" "$$PWD/../../kuttidb"; \
+	java -cp target/classes:target/test-classes ManagedSmoke "$$tmp/java-tcp" "$$PWD/../../kuttidb" tcp; \
 	cd ../rust && KUTTIDB_MANAGED_INTEGRATION=1 KUTTIDB_SERVER="$$PWD/../../kuttidb" cargo test managed_lifecycle_integration -- --nocapture
 
 # Stage the Python client sources into the publishable kuttidb package

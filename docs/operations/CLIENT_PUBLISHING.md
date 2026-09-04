@@ -15,7 +15,7 @@ protocol, not on the server version number.
 | Node.js | [npm](https://www.npmjs.com/package/@kuttidb/client) | `@kuttidb/client` | `node-vX.Y.Z` | `clients/nodejs/package.json` | `release-node.yml` |
 | Rust | [crates.io](https://crates.io/crates/kuttidb) | `kuttidb` | `rust-vX.Y.Z` | `clients/rust/Cargo.toml` | `release-rust.yml` |
 | Go | git only (no registry) | `github.com/kuttidb/kuttidb/clients/go` | `go-vX.Y.Z` | — | `release-go.yml` (gate) |
-| Java | Maven Central | *pending — see below* | `java-vX.Y.Z` | `clients/java` | *not yet written* |
+| Java | Maven Central | `io.github.kuttidb:kuttidb-client` | `java-vX.Y.Z` | `clients/java/pom.xml` | `release-java.yml` |
 
 Tag names use the manifest version string, e.g. `node-v0.0.1-beta`,
 `rust-v0.0.1-beta`, `py-v0.0.1b0` (PEP 440 spelling of the same version).
@@ -27,6 +27,9 @@ pip install kuttidb            # import kuttidb
 npm install @kuttidb/client    # require("@kuttidb/client")
 cargo add kuttidb
 go get github.com/kuttidb/kuttidb/clients/go
+# Maven Central (io.github.kuttidb.client package):
+#   <dependency><groupId>io.github.kuttidb</groupId>
+#              <artifactId>kuttidb-client</artifactId></dependency>
 ```
 
 ## Cutting a release
@@ -99,22 +102,26 @@ Publisher**: owner `kuttidb`, repository `kuttidb`, workflow filename
 repo secrets. No workflow change is needed — `id-token: write` and
 `--provenance` are already in place.
 
-## Maven Central (deferred)
+## Maven Central
 
-The Java client publishes through the Sonatype **Central Portal** (the
-legacy OSSRH staging flow is retired). Blocked on namespace verification;
-the remaining steps once `io.github.kuttidb` is verified:
+The Java client publishes to the Sonatype **Central Portal** (the legacy
+OSSRH staging flow is retired). The `io.github.kuttidb` namespace is
+verified, `clients/java/pom.xml` and `release-java.yml` are in place, and a
+`java-v*` tag deploys `io.github.kuttidb:kuttidb-client` after the protocol
+gate passes. Secrets required (repo settings only — never committed):
 
-1. Generate a Portal user token → secrets `MAVEN_CENTRAL_USERNAME` /
-   `MAVEN_CENTRAL_PASSWORD`.
-2. Create a GPG signing key, publish the public key to
-   `keyserver.ubuntu.com`, store `GPG_PRIVATE_KEY` / `GPG_PASSPHRASE`
-   secrets.
-3. Add `clients/java/pom.xml` (groupId `io.github.kuttidb`, artifactId
-   `kuttidb-client`, sources + javadoc + GPG signing via the
-   `central-publishing-maven-plugin`).
-4. Write `release-java.yml` (tag `java-v*`) and add the row to the table
-   above.
+- `MAVEN_CENTRAL_USERNAME` / `MAVEN_CENTRAL_PASSWORD` — Central Portal user
+  token, mapped to the `central` server id of a runner-local settings.xml.
+- `GPG_PRIVATE_KEY` (armored secret key) / `GPG_PASSPHRASE` — artifact
+  signing key, mapped to the `gpg.passphrase` server id that
+  maven-gpg-plugin reads. The public key must be published to
+  `keyserver.ubuntu.com` before the first deploy or Central rejects the
+  signatures.
+
+The client sources live under `src/main/java/io/github/kuttidb/client/`;
+`Smoke.java` and `ManagedSmoke.java` stay at the `clients/java` root as
+default-package test entry points so the Makefile smokes keep running
+without a Maven toolchain.
 
 ## Go modules
 
