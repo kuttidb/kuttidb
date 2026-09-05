@@ -73,6 +73,12 @@ jobs:
             </servers>
           </settings>
           EOF
+          # maven-gpg-plugin routes the gpg.passphrase server through Maven's
+          # security dispatcher, which insists on a master-password file even
+          # when the server value is plain text. Generate a throwaway one.
+          MASTER=$(mvn --encrypt-master-password "kuttidb-runner-$(date +%s)" | grep -o '{[^}]*}')
+          printf '<settingsSecurity>\n  <master>%s</master>\n</settingsSecurity>\n' "$MASTER" \
+            > ~/.m2/settings-security.xml
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
