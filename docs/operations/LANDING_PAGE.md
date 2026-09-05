@@ -68,3 +68,14 @@ Product descriptions follow the [project README](../../README.md),
 [stream semantics](../messaging/STREAMS.md). Browser playback reads the real
 recording; it does not simulate a running database. Performance links point to
 the recorded [benchmark methodology](BENCHMARKS.md).
+
+## Console media
+
+The “operate it from your browser” section reuses screenshots and an animated
+tour of the real web console, stored in `landing/media/`. They are captured
+from a local fixture server with
+`apps/management-ui/scripts/capture-media.mjs` (playwright-core plus ffmpeg;
+the token input is never rendered in media). Refresh them after meaningful
+console changes so the page keeps showing the real interface. The section’s
+run instructions mirror the README’s “Run the console” steps; keep the two in
+sync when startup changes.

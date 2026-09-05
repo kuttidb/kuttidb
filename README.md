@@ -237,13 +237,16 @@ The optional Management API (`/api/admin/v1`) and self-hosted console cover
 keyspace entries, queues, routing, stream tails, consumer groups, atomic
 operations, and maintenance jobs.
 
-The API is disabled by default. It requires a bearer-token file with `0600`
-permissions, audits mutations before dispatch, and permits plaintext
-administration only on loopback. The console gateway keeps administrator tokens
-in bounded process memory; browser storage contains profile metadata only.
+[![Recorded console tour: overview, queues, retained messages](landing/media/console-tour.gif)](docs/api/MANAGEMENT_API.md)
 
-<details>
-<summary><strong>Start the API and console</strong></summary>
+| Overview — real facts, no invented charts | Queue messages — browsing never consumes |
+|---|---|
+| ![Console overview with engine summaries, recent jobs, and persistence facts](landing/media/console-overview.png) | ![Queue detail listing retained messages with state, size, and delivery counts](landing/media/console-queue-messages.png) |
+| ![Console overview in dark mode with olive surfaces](landing/media/console-overview-dark.png) | ![Keyspace entry inspector with encoding tabs](landing/media/console-keyspace-inspector.png) |
+
+### Run the console
+
+**1. Start KuttiDB with the Management API enabled:**
 
 ```sh
 umask 077
@@ -254,17 +257,22 @@ printf '%s\n' 'replace-with-a-long-random-token' > admin.token
   --admin-audit-log admin-audit.jsonl
 ```
 
-In another terminal, from the repository root:
+**2. In a second terminal, run the console from the repository root
+(Node 24+ and pnpm):**
 
 ```sh
 pnpm install
 ALLOW_LOOPBACK_HTTP=true pnpm ui:dev
 ```
 
-Open `http://localhost:5173` and connect to `http://127.0.0.1:7380` with the token
-from `admin.token`.
+**3. Open `http://localhost:5173`**, connect to `http://127.0.0.1:7380`, and use
+the token from `admin.token`. The token is held in the console gateway's memory
+for this browser session and is never saved with a profile.
 
-</details>
+The API is disabled by default. It requires a bearer-token file with `0600`
+permissions, audits mutations before dispatch, and permits plaintext
+administration only on loopback. The console gateway keeps administrator tokens
+in bounded process memory; browser storage contains profile metadata only.
 
 [Management API and security model](docs/api/MANAGEMENT_API.md) ·
 [Console source](apps/management-ui)
@@ -297,6 +305,7 @@ ports, and a Prometheus metrics listener. Multi-architecture images cover
 | [DURABILITY.md](docs/design/DURABILITY.md) | Acknowledgement points, atomic operations, single-node limits |
 | [SECURITY.md](docs/SECURITY.md) | Auth, TLS, permissions, threat model |
 | [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
+| [MANAGEMENT_UI_DESIGN_SYSTEM.md](docs/design/MANAGEMENT_UI_DESIGN_SYSTEM.md) | Brand-based console design: tokens, components, layouts, and interaction states |
 | [DEPLOYMENT.md](docs/operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
 | [LANDING_PAGE.md](docs/operations/LANDING_PAGE.md) | Preview the landing page, maintain client examples, and serve it with GitHub Pages |
 | [RELEASE.md](docs/operations/RELEASE.md) | Release cycle, official binaries, tagging process |

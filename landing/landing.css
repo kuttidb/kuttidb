@@ -18,3 +18,21 @@
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation:none!important}}
 @media(max-width:1050px){.install{grid-template-columns:.85fr 1.15fr;gap:3vw}}
 @media(max-width:760px){.install{grid-template-columns:1fr;gap:2.5rem}.install-option-head{grid-template-columns:1.7rem 1fr}.install-option-head>span:last-child{grid-column:2}.install .install-command pre{padding:1.2rem .8rem}}
+.console{border-bottom:1px solid var(--line)}
+.console-gif{display:block;max-width:860px;margin:0 auto 2.4rem;border:1px solid var(--ink);background:var(--paper);box-shadow:8px 8px 0 #27271f14;text-decoration:none;color:inherit}
+.console-gif-bar{display:flex;justify-content:space-between;gap:1rem;padding:.8rem 1.2rem;border-bottom:1px solid var(--ink);font-family:var(--mono);font-size:.75rem;letter-spacing:.03em;color:var(--muted)}
+.console-gif-bar span:first-child{display:flex;align-items:center;gap:.6rem;color:var(--ink)}
+.console-gif img{display:block;width:100%;height:auto}
+.console-shots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.6rem;margin:0 0 2rem}
+.console-shots figure{margin:0;min-width:0;border:1px solid var(--line);background:var(--paper)}
+.console-shots img{display:block;width:100%;height:auto;border-bottom:1px solid var(--line)}
+.console-shots figcaption{font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;padding:.7rem .9rem;color:var(--muted)}
+.console-links{display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:1.6rem}
+.console-run{max-width:860px;margin:0 auto 1.4rem}
+.console-run pre{padding:1.4rem 1.2rem}
+.console-note{font-size:.8125rem;color:var(--muted);max-width:60rem;margin:0 auto 1.6rem}
+.console-note a{color:inherit}
+.console-caveat{font-size:.8125rem;color:var(--muted);max-width:60rem;border-top:1px solid var(--line);padding-top:1.4rem;margin-bottom:0}
+.console-caveat code{color:var(--ink)}
+@media(max-width:1050px){.console-shots{gap:1rem}}
+@media(max-width:760px){.console-gif{margin-bottom:1.8rem}.console-gif-bar{flex-wrap:wrap;gap:.4rem}.console-shots{grid-template-columns:1fr;gap:1.4rem;margin-bottom:1.6rem}}

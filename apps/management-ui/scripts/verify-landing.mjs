@@ -3,7 +3,7 @@ import { chromium } from "playwright-core";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-const outDir = resolve(import.meta.dirname, "../../docs/plans/assets/management-ui-redesign");
+const outDir = resolve(import.meta.dirname, "../../../docs/plans/assets/management-ui-redesign");
 mkdirSync(outDir, { recursive: true });
 
 const browser = await chromium.launch({ headless: true, executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" });

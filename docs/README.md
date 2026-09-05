@@ -31,6 +31,7 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | [design/DURABILITY.md](design/DURABILITY.md) | Acknowledgement points, atomic operations, single-node limits |
 | [SECURITY.md](SECURITY.md) | Auth, TLS, permissions, threat model |
 | [api/MANAGEMENT_API.md](api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
+| [design/MANAGEMENT_UI_DESIGN_SYSTEM.md](design/MANAGEMENT_UI_DESIGN_SYSTEM.md) | Brand-based console design: tokens, components, layouts, and interaction states |
 | [operations/DEPLOYMENT.md](operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
 | [operations/LANDING_PAGE.md](operations/LANDING_PAGE.md) | Preview the landing page, maintain client examples, and serve it with GitHub Pages |
 | [operations/RELEASE.md](operations/RELEASE.md) | Release cycle, official binaries, tagging process |
