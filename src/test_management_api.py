@@ -7,6 +7,7 @@ import ssl
 import stat
 import subprocess
 import tempfile
+import urllib.parse
 import time
 import sys
 
@@ -269,6 +270,15 @@ with tempfile.TemporaryDirectory(prefix="kuttidb-admin-") as tmp:
         assert key_cursor and key_cursor.startswith("ke:"), key_page_one
         key_page_two = json.loads(request("GET", f"/api/admin/v1/keyspaces/default/entries?cursor={key_cursor}", auth)[1])
         assert any(item["id"] != key_page_one["data"][0]["id"] for item in key_page_two["data"]), key_page_two
+        # Standard HTTP clients percent-encode the colon in opaque tokens; the
+        # server must decode query values before the strict token grammar.
+        key_prefix_encoded = urllib.parse.quote(key_prefix, safe="")
+        key_prefix_page = json.loads(request("GET", f"/api/admin/v1/keyspaces/default/entries?limit=10&prefix={key_prefix_encoded}", auth)[1])
+        assert key_prefix_page["data"] and all(item["key"].startswith("admin-") for item in key_prefix_page["data"]), key_prefix_page
+        key_cursor_encoded = urllib.parse.quote(key_cursor, safe="")
+        key_page_two_encoded = json.loads(request("GET", f"/api/admin/v1/keyspaces/default/entries?cursor={key_cursor_encoded}", auth)[1])
+        assert any(item["id"] != key_page_one["data"][0]["id"] for item in key_page_two_encoded["data"]), key_page_two_encoded
+        assert request("GET", "/api/admin/v1/keyspaces/default/entries?prefix=%zz", auth)[0].startswith(b"HTTP/1.1 400")
         assert request("GET", f"/api/admin/v1/keyspaces/default/entries?prefix={entry_id}&cursor={key_cursor}", auth)[0].startswith(b"HTTP/1.1 400")
         expiring_entries = json.loads(request("GET", "/api/admin/v1/keyspaces/default/entries?expires=present", auth)[1])
         expiring_entry = next(item for item in expiring_entries["data"] if item["id"] == entry_id)
@@ -455,6 +465,10 @@ with tempfile.TemporaryDirectory(prefix="kuttidb-admin-") as tmp:
         assert second_page[0].startswith(b"HTTP/1.1 200"), second_page
         second_page_data = json.loads(second_page[1])
         assert second_page_data["data"][0]["message_id"] > first_page_data["data"][0]["message_id"], second_page_data
+        # The same cursor must also resolve in percent-encoded form.
+        second_page_encoded = request("GET", f"/api/admin/v1/queues/{queue_id}/messages?limit=1&state=ready&cursor={urllib.parse.quote(next_cursor, safe='')}", auth)
+        assert second_page_encoded[0].startswith(b"HTTP/1.1 200"), second_page_encoded
+        assert json.loads(second_page_encoded[1])["data"][0]["message_id"] == second_page_data["data"][0]["message_id"]
         assert request("GET", f"/api/admin/v1/queues/{queue_id}/messages?cursor=0", auth)[0].startswith(b"HTTP/1.1 400")
         assert request("GET", f"/api/admin/v1/queues/{queue_id}/messages?state=delayed&cursor={next_cursor}", auth)[0].startswith(b"HTTP/1.1 400")
         # Browse is a snapshot, not a consume/requeue shortcut: it exposes the

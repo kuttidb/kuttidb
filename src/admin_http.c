@@ -777,9 +777,44 @@ static int query_u64(const char *path, size_t path_len, const char *field, uint6
     return 0;
 }
 
-/* Queue browsing deliberately accepts a small, closed query grammar.  It
- * avoids URL decoding because every accepted value is ASCII and prevents a
- * silently ignored filter from showing an operator the wrong messages. */
+/* Percent-decode one query-parameter value (RFC 3986) into out. Standard
+ * clients percent-encode opaque tokens such as `b64u:`, `ke:`, and `mc:`, so
+ * the colon must be decoded before the strict token grammar runs. Unencoded
+ * input is unchanged. `+` stays literal, malformed escapes are rejected, and
+ * overlong values are rejected so a filter can never be silently ignored.
+ * Returns the decoded length, or -1. */
+static int query_value_decode(const char *value, size_t len, char *out, size_t cap) {
+    size_t r = 0, w = 0;
+    if (len >= cap) return -1;
+    while (r < len) {
+        char c = value[r];
+        if (c == '%') {
+            if (len - r < 3) return -1;
+            unsigned hex = 0;
+            for (size_t i = 1; i <= 2; i++) {
+                char d = value[r + i];
+                unsigned nib;
+                if (d >= '0' && d <= '9') nib = (unsigned)(d - '0');
+                else if (d >= 'a' && d <= 'f') nib = (unsigned)(d - 'a') + 10u;
+                else if (d >= 'A' && d <= 'F') nib = (unsigned)(d - 'A') + 10u;
+                else return -1;
+                hex = (hex << 4) | nib;
+            }
+            out[w++] = (char)hex;
+            r += 3;
+        } else {
+            out[w++] = c;
+            r++;
+        }
+    }
+    out[w] = 0;
+    return (int)w;
+}
+
+/* Queue browsing deliberately accepts a small, closed query grammar.  Values
+ * are percent-decoded first so raw and standard-encoded clients resolve
+ * identically, then validated strictly — an unknown filter value still fails
+ * the request instead of showing an operator the wrong messages. */
 static int queue_browse_params(const char *path, size_t path_len, unsigned *limit,
                                unsigned *states, int *include_bodies,
                                int *state_supplied, int *include_supplied,
@@ -815,10 +850,14 @@ static int queue_browse_params(const char *path, size_t path_len, unsigned *limi
             *include_bodies = 1;
             *include_supplied = 1;
         } else if (key_len == 6 && !memcmp(p, "cursor", 6) && !seen_cursor++) {
-            if (value_len != ADMIN_REQUEST_ID_LEN + 3 || memcmp(value, "mc:", 3)) return -1;
-            for (size_t i = 3; i < value_len; i++)
-                if (!isxdigit((unsigned char)value[i])) return -1;
-            memcpy(cursor, value, value_len); cursor[value_len] = 0;
+            char decoded[ADMIN_REQUEST_ID_LEN + 8];
+            int decoded_len = query_value_decode(value, value_len, decoded, sizeof decoded);
+            if (decoded_len < 0) return -1;
+            size_t dlen = (size_t)decoded_len;
+            if (dlen != ADMIN_REQUEST_ID_LEN + 3 || memcmp(decoded, "mc:", 3)) return -1;
+            for (size_t i = 3; i < dlen; i++)
+                if (!isxdigit((unsigned char)decoded[i])) return -1;
+            memcpy(cursor, decoded, dlen); cursor[dlen] = 0;
             *cursor_supplied = 1;
         } else return -1;
         p = amp ? amp + 1 : end;
@@ -870,11 +909,18 @@ static int keyspace_browse_params(const char *path, size_t path_len,
         if(key_len==5&&!memcmp(p,"limit",5)&&!seen_limit++){
             char number[12],*number_end;if(value_len>=sizeof number)return -1;memcpy(number,value,value_len);number[value_len]=0;errno=0;unsigned long parsed=strtoul(number,&number_end,10);if(errno||*number_end||!parsed||parsed>ADMIN_LIST_MAX)return -1;*limit=(unsigned)parsed;
         }else if(key_len==6&&!memcmp(p,"cursor",6)&&!seen_cursor++){
-            if(value_len!=ADMIN_REQUEST_ID_LEN+3||memcmp(value,"ke:",3))return -1;
-            for(size_t i=3;i<value_len;i++)if(!isxdigit((unsigned char)value[i]))return -1;
-            memcpy(cursor,value,value_len);cursor[value_len]=0;*cursor_supplied=1;
+            char decoded[ADMIN_REQUEST_ID_LEN + 8];
+            int decoded_len = query_value_decode(value, value_len, decoded, sizeof decoded);
+            if (decoded_len < 0) return -1;
+            size_t dlen = (size_t)decoded_len;
+            if (dlen != ADMIN_REQUEST_ID_LEN + 3 || memcmp(decoded, "ke:", 3)) return -1;
+            for (size_t i = 3; i < dlen; i++) if (!isxdigit((unsigned char)decoded[i])) return -1;
+            memcpy(cursor, decoded, dlen); cursor[dlen] = 0; *cursor_supplied = 1;
         }else if(key_len==6&&!memcmp(p,"prefix",6)&&!seen_prefix++){
-            if(decode_id(value,value_len,prefix))return -1;*prefix_supplied=1;
+            char decoded[2 * ADMIN_NAME_MAX + 8];
+            int decoded_len = query_value_decode(value, value_len, decoded, sizeof decoded);
+            if (decoded_len < 0 || decode_id(decoded, (size_t)decoded_len, prefix)) return -1;
+            *prefix_supplied = 1;
         }else if(key_len==7&&!memcmp(p,"expires",7)&&!seen_expiry++){
             if(value_len==7&&!memcmp(value,"present",7))*expiry_filter=1;
             else if(value_len==4&&!memcmp(value,"none",4))*expiry_filter=2;
