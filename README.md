@@ -1,149 +1,249 @@
 <div align="center">
 
-<img src="docs/logo.png" alt="KuttiDB logo" width="170" />
+<img src="docs/logo.png" alt="KuttiDB’s smiling toast mascot" width="96" />
 
-# KuttiDB
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark-dark.svg" />
+    <img src="docs/assets/wordmark-light.svg" alt="KuttiDB." width="350" />
+  </picture>
+</h1>
 
-**Cache, background jobs, and replayable events. One small binary for your SaaS.**
+### One binary. A lot off your plate.
 
-Zero-copy between local processes · network-accessible across machines · no JVM, no Erlang, no external dependencies for a plaintext build.
+Cache, background jobs, and replayable events.<br />
+One small C server for your SaaS.
 
-![Language](https://img.shields.io/badge/language-C-38251D?logo=c&logoColor=white)
-![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-D97A24)
-![Version](https://img.shields.io/badge/version-0.0.1--beta-74645B)
+<p>
+  <a href="https://github.com/kuttidb/kuttidb/releases"><img src="https://img.shields.io/github/v/release/kuttidb/kuttidb?include_prereleases&amp;filter=v%2A&amp;label=release&amp;color=ed742f&amp;labelColor=27271f&amp;style=flat-square" alt="Latest server release, including prereleases" /></a>
+  <a href="https://github.com/kuttidb/kuttidb/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/kuttidb/kuttidb/release.yml?label=release%20build&amp;labelColor=27271f&amp;style=flat-square" alt="Official binary release build status" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/kuttidb/kuttidb?color=c8daac&amp;labelColor=27271f&amp;style=flat-square" alt="Apache-2.0 license" /></a>
+  <a href="docs/operations/RELEASE.md"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-e6e8df?labelColor=27271f&amp;style=flat-square" alt="Platforms: macOS and Linux" /></a>
+</p>
+
+**[Website](https://kuttidb.com)** ·
+**[Getting started](docs/guides/GETTING_STARTED.md)** ·
+**[Releases](https://github.com/kuttidb/kuttidb/releases)** ·
+**[Documentation](docs/README.md)**
+
+<sub>Open source · Self-hosted · Currently in beta</sub>
 
 </div>
 
 ---
 
-KuttiDB gives your application fast cache access, durable work queues, and replayable event
-streams in one executable, with one configuration and one data directory. Built for small and
-midsize SaaS teams running on a single server, with an authenticated Management API for operations.
+KuttiDB brings a cache, durable work queues, and replayable event streams into
+one executable, with one configuration and one data directory. It is built for
+small and midsize SaaS teams running on a single server.
+
+Local processes can share memory; clients on other machines use the native
+network protocol. The plaintext build has no external dependencies. An optional
+Management API and self-hosted console handle day-to-day operations.
+
+[Try the demo](#try-all-three-in-60-seconds) · [Install](#install-and-run) ·
+[Clients](#clients) · [What survives a restart](#what-kuttidb-is-not)
+
+## Highlights
+
+### Three everyday needs. One place to put them.
+
+| Cache · keep it handy | Queues · get it done | Streams · play it back |
+|---|---|---|
+| Read a value by key. Give it a TTL. | Hand work to a worker. ACK when finished. | Append an event. Read it again by offset. |
+| Batching, pipelining, bounded memory, and eviction. | Durable publish confirms, retry delays, visibility timeouts, and dead-letter queues. | Partitioned logs, retention controls, saved offsets, and leased consumer groups. |
+| [Values & first steps →](docs/guides/GETTING_STARTED.md) | [Delivery & recovery →](docs/messaging/QUEUES.md) | [Partitions & replay →](docs/messaging/STREAMS.md) |
+
+**The value and the job. One durable commit.** Atomic operations such as
+`put_and_enqueue` and `put_and_publish` commit a cache mutation and message
+delivery together: after recovery, both sides exist or neither does. They require
+cache persistence and durable target queues.
+[Read the commit contract →](docs/design/DURABILITY.md#atomic-cache-plus-message-operations)
+
+Also included:
+
+- **Exchanges and routing:** direct, fanout, and topic exchanges, durable bindings,
+  alternate routing, and explicit unroutable results.
+- **Cache-stampede protection:** leased single-flight claims, bounded waits,
+  negative caching, stale-while-revalidate, and refresh-ahead.
+- **Local shared memory:** optional offset-based, ASLR-safe embedded regions.
+- **Operations:** an authenticated, audited Management API and web console.
 
 ## Try all three in 60 seconds
 
-Generate a report, cache its status, acknowledge the background job, and replay its completion
-event. Then watch the demo **kill and restart its own server** and verify recovery.
+Generate a report, cache its status, finish a background job, and append its
+completion event. Then watch the demo **kill and restart its own server** and
+verify recovery.
 
 ```sh
 curl -fsSL https://kuttidb.com/demo.sh | bash
 ```
 
-Requires **macOS or Linux, Python 3.10+, and curl**. Reuses an installed KuttiDB binary or downloads
-a checksum-verified release into a temporary folder. No pip install or account needed. Download
-time varies; the demo itself takes seconds. It uses a private local socket and removes its own
-server and temporary data when finished.
+**You need:** macOS or Linux, Python 3.10+, and curl. No account or pip install.
+The script uses an installed binary or downloads a checksum-verified release,
+runs on a private local socket, and removes its own server and temporary data
+when finished. Download time varies; the demo itself takes seconds.
 
 [![Recorded demo: cache, report worker, durable queue, event replay, and crash recovery](landing/demo.gif)](https://kuttidb.com/#demo)
 
-This is a real recorded run; the memory value is that server's sampled RSS, not a benchmark or
-peak-memory guarantee. Cache writes use `--durability always`. The restart checks process-crash
-recovery on the same disk, not protection from disk or machine loss.
+<details>
+<summary><strong>What this recording proves</strong></summary>
+
+This is a real recorded run. Cache writes use `--durability always`. Restarting
+checks process-crash recovery on the same healthy disk, not protection from disk
+or machine loss. The memory value is sampled server RSS, not a benchmark or
+peak-memory guarantee.
 
 Already cloned the repository? Run `make && python3 examples/saas_demo.py`.
-[Read the demo](examples/saas_demo.py), [follow the walkthrough](docs/guides/SAAS_DEMO.md),
-or [replay the recording](https://kuttidb.com/#demo).
 
-## Highlights
+</details>
 
-- **Cache** — in-memory key/value store with TTL, batching, pipelining, bounded memory with eviction,
-  CRC-checked WAL and snapshots, and an optional shared-memory embedded mode with offset-based
-  (ASLR-safe) regions.
-- **Durable queues** — durable declarations, publish confirms, manual ACK/NACK, requeue, visibility
-  timeouts, redelivery flags, prefetch, dead-letter queues, retry delays, message expiry, bounded
-  depth, and crash recovery. At-least-once delivery.
-- **Exchanges & routing** — direct, fanout, and topic routing in front of queues, an unnamed default
-  exchange, alternate-exchange routing, explicit unroutable reporting, and durable bindings.
-- **Atomic cache-plus-messaging** — `put_and_publish`, `put_and_enqueue`, `delete_and_publish`, and
-  conditional `update_and_emit` commit a cache mutation and a delivery under one durable commit id:
-  after recovery, both sides exist or neither does.
-- **Anti-cache-stampede** — native single-flight with leased claims, bounded waits, and negative
-  caching, plus stale-while-revalidate and refresh-ahead.
-- **Streams** — durable, partitioned append logs with keyed partition choice, replay, retention
-  controls, persisted consumer offsets, and leased consumer-group assignment.
-- **Management API & Web console** — an authenticated HTTP/1.1 admin surface (audited, bounded,
-  SSE-capable) and a self-hosted React console for dashboards and day-two operations.
+[Read the demo](examples/saas_demo.py) ·
+[Follow the walkthrough](docs/guides/SAAS_DEMO.md) ·
+[Replay the recording](https://kuttidb.com/#demo)
+
+## Install and run
+
+Prebuilt binaries are available for **macOS and Linux**, on **arm64 and x86_64**:
+
+```sh
+curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
+kuttidb 7379 kuttidb.wal
+```
+
+Or build from a cloned repository:
+
+```sh
+make
+./kuttidb 7379 kuttidb.wal
+```
+
+The server listens on `127.0.0.1:7379`. Keep its WAL files for recovery: the cache,
+queues, and streams use their own logs. `make` also builds the benchmark tool and
+embedded library.
+
+[Release downloads](https://github.com/kuttidb/kuttidb/releases) ·
+[Platform requirements](docs/operations/RELEASE.md) ·
+[Full setup guide](docs/guides/GETTING_STARTED.md)
+
+## Clients
+
+Install the client for your language, then connect to your server:
+
+| Language | Install | Source |
+|---|---|---|
+| **Python** | `python3 -m pip install --pre kuttidb` | [Python client](clients/python) |
+| **Node.js** | `npm install @kuttidb/client@beta` | [Node.js client](clients/nodejs) |
+| **Go** | `go get github.com/kuttidb/kuttidb/clients/go` | [Go module](clients/go) |
+| **Rust** | `cargo add kuttidb@0.0.6-beta` | [Rust crate](clients/rust) |
+| **Java** | Maven: `io.github.kuttidb:kuttidb-client:0.0.8-beta` | [Java client](clients/java) |
+| **C / C++** | `make` builds `libkuttidb_embed.dylib` / `.so` | [Embedded API](src/embed.h) |
+
+<details>
+<summary><strong>Java: Maven and Gradle configuration</strong></summary>
+
+Maven (`pom.xml`, Java 17+):
+
+```xml
+<dependency>
+  <groupId>io.github.kuttidb</groupId>
+  <artifactId>kuttidb-client</artifactId>
+  <version>0.0.8-beta</version>
+</dependency>
+```
+
+Gradle (Kotlin DSL):
+
+```kotlin
+implementation("io.github.kuttidb:kuttidb-client:0.0.8-beta")
+```
+
+</details>
+
+Python, Node.js, Go, Java, and Rust cover the native cache, queue, exchange,
+atomic-operation, and stream APIs, including managed local servers. The C/C++
+embedded API provides shared-memory cache access; use the socket clients for
+messaging. Each SDK versions independently.
+
+[Browse usage examples](https://kuttidb.com/#workbench-title) ·
+[Package publishing and releases](docs/operations/CLIENT_PUBLISHING.md)
 
 ## Connect from your application
 
-For a small single-host application, Python can manage one local KuttiDB
-instance directly. The opt-in factory derives an owner-only Unix socket and
-data files from one directory, verifies the instance identity after connecting,
-and requests graceful shutdown only after all native client connections are
-closed for the idle grace period:
+With the Python package installed and the server running:
 
 ```python
-from kuttidb_client import KuttiDBClient
+from kuttidb import KuttiDBClient
+
+with KuttiDBClient(port=7379) as db:
+    # Keep a value close.
+    db.put("report:42", b"ready", ttl=60)
+    print(db.get("report:42"))
+
+    # Hand off a job; acknowledge after processing.
+    db.queue_declare("reports", durable=True)
+    db.queue_publish("reports", b"report:42")
+    job = db.queue_consume("reports", visibility=30)
+    if job:
+        print(job["value"])
+        db.queue_ack("reports", job["id"])
+
+    # Keep an event for replay.
+    db.stream_declare("events", partitions=1)
+    db.stream_append("events", b"report.ready")
+    for event in db.stream_fetch("events", partition=0, offset=0):
+        print(event["value"])
+```
+
+For application work, acknowledge only after the work succeeds. Use NACK and
+requeue for retryable failures; delivery is at-least-once.
+[Queue patterns and dead-letter handling →](docs/messaging/QUEUES.md)
+
+<details>
+<summary><strong>Let Python manage a local server</strong></summary>
+
+For a small single-host application, the opt-in factory manages one local
+KuttiDB instance from a data directory:
+
+```python
+from kuttidb import KuttiDBClient
 
 with KuttiDBClient.managed(data_dir="./data/kuttidb", idle_timeout=60) as db:
     db.put("greeting", b"hello")
 ```
 
-Ordinary `KuttiDBClient(...)` construction is unchanged: it only connects and
-never starts or stops a server. Keep using standalone mode for remote clients,
-containers, service managers, or any multi-machine deployment.
+It derives an owner-only Unix socket and data files, verifies the instance
+identity after connecting, and requests graceful shutdown only after all native
+client connections have closed for the idle grace period. The KuttiDB binary
+must be installed locally.
 
-The default is Unix-only. Advanced local integrations may explicitly select a
-literal loopback TCP endpoint with `transport="tcp"`, `host="127.0.0.1"`, and
-`port=...`; DNS names and non-loopback addresses are rejected for managed mode.
-`ServerParams` is the typed advanced surface for durability and fsync policy,
-memory/value/batch/client/thread limits, an owner-only auth-token file, TCP TLS
-certificate paths, explicit queue/stream WAL paths, and optional metrics or
-admin listeners. These settings are allowlisted by `kuttidb ensure`; they are
-not a shell-command escape hatch, and token values are never passed to the
-launcher.
+Ordinary `KuttiDBClient(...)` construction only connects; it never starts or stops
+a server. Use standalone mode for remote clients, containers, service managers,
+and multi-machine deployments.
 
-Build and run:
+The default transport is Unix-only. Advanced integrations can explicitly choose
+literal loopback TCP with `transport="tcp"`, `host="127.0.0.1"`, and `port=...`.
+DNS names and non-loopback addresses are rejected for managed mode.
 
-```sh
-# option A: prebuilt binary (macOS arm64/x86_64, Linux x86_64/arm64)
-curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
-kuttidb 7379 kuttidb.wal
+`ServerParams` provides typed settings for durability, fsync, memory/value/batch/
+client/thread limits, an owner-only auth-token file, TCP TLS certificates,
+queue/stream WAL paths, and optional metrics or admin listeners. Settings are
+allowlisted by `kuttidb ensure`; token values are never passed to the launcher.
 
-# option B: build from source
-make            # builds kuttidb, kuttidb-bench, and the embedded library
-./kuttidb 7379 kuttidb.wal
-```
-
-KuttiDB now listens on `127.0.0.1:7379`. The WAL file is its local recovery log — keep it if you
-want durable queue and stream data to survive a restart. For a throwaway experiment, use
-`./kuttidb 7379 -` instead.
-
-Talk to it with the Python client (or Go, Java, Rust, Node.js — see [Clients](#clients)):
-
-```python
-from kuttidb_client import KuttiDBClient
-
-with KuttiDBClient(port=7379) as db:
-    db.put("greeting", b"hello", ttl=60)
-    print(db.get("greeting"))                     # b'hello'
-
-    db.queue_declare("jobs", durable=True, max_depth=10_000,
-                     dead_letter_queue="jobs.dead", max_deliveries=5)
-    db.queue_publish("jobs", b"resize:123")
-    delivery = db.queue_consume("jobs", visibility=30)
-    if delivery:
-        try:
-            process(delivery["value"])
-            db.queue_ack("jobs", delivery["id"])
-        except Exception:
-            db.queue_nack("jobs", delivery["id"], requeue=True)
-```
-
-The mental model fits in one table:
-
-| Need | Use |
-|---|---|
-| A value you can read by key | `put` and `get` |
-| Work that one worker should finish | Queue + ACK/NACK |
-| An ordered history that readers can replay | Stream + offset |
+</details>
 
 ## Management API & Web console
 
-KuttiDB ships an optional, bearer-token-authenticated Management API (`/api/admin/v1`) for
-operational dashboards and automation. It is disabled by default and refuses to start unsafely:
-the token file must be `0600`, mutations are audited before dispatch, and plaintext
-administration is loopback-only.
+The optional Management API (`/api/admin/v1`) and self-hosted console cover
+keyspace entries, queues, routing, stream tails, consumer groups, atomic
+operations, and maintenance jobs.
+
+The API is disabled by default. It requires a bearer-token file with `0600`
+permissions, audits mutations before dispatch, and permits plaintext
+administration only on loopback. The console gateway keeps administrator tokens
+in bounded process memory; browser storage contains profile metadata only.
+
+<details>
+<summary><strong>Start the API and console</strong></summary>
 
 ```sh
 umask 077
@@ -154,38 +254,20 @@ printf '%s\n' 'replace-with-a-long-random-token' > admin.token
   --admin-audit-log admin-audit.jsonl
 ```
 
-The **KuttiDB Console** is a self-hosted web UI (React + Tailwind + shadcn/ui behind a
-same-origin Fastify gateway) that covers the full API: overview dashboards, keyspace entries,
-queues with browse/publish/deliveries, streams with a live tail, consumer groups, routing,
-atomic operations, and maintenance jobs. The gateway deliberately retains administrator tokens
-only in bounded process memory — browser storage keeps profile metadata only.
+In another terminal, from the repository root:
 
 ```sh
 pnpm install
-ALLOW_LOOPBACK_HTTP=true pnpm ui:dev     # http://localhost:5173
+ALLOW_LOOPBACK_HTTP=true pnpm ui:dev
 ```
 
-Connect the console to `http://127.0.0.1:7380` with the token from `admin.token`.
-See [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) for the security model and
-[apps/management-ui](apps/management-ui) for the console.
+Open `http://localhost:5173` and connect to `http://127.0.0.1:7380` with the token
+from `admin.token`.
 
-## Clients
+</details>
 
-Native client libraries live in [`clients/`](clients) and are covered by the `make test` smoke run:
-
-| Language | Path | Notes |
-|---|---|---|
-| Python | [`clients/`](clients) (`src/kuttidb_client.py`) | TCP, shared-memory embed, in-process, and managed local transports |
-| Node.js | [`clients/nodejs`](clients/nodejs) | Zero dependencies; managed Unix and loopback TCP |
-| Go | [`clients/go`](clients/go) | Full native v1.8 protocol, pooled TCP/TLS, managed Unix and loopback TCP, and cgo embed |
-| Java | [`clients/java`](clients/java) | Full native v1.8 protocol, pooled TCP/TLS/Unix, managed Unix and loopback TCP |
-| Rust | [`clients/rust`](clients/rust) | Full native v1.8 protocol, verified TLS, pooling, and managed Unix/loopback TCP |
-| C/C++ | `libkuttidb_embed.dylib` / `.so` | Shared-memory embedded mode |
-
-Python, Node.js, and Rust clients are published to PyPI (`kuttidb`), npm
-(`@kuttidb/client`), and crates.io (`kuttidb`); the Go module is fetched
-directly from this repository. Release procedure:
-[CLIENT_PUBLISHING.md](docs/operations/CLIENT_PUBLISHING.md).
+[Management API and security model](docs/api/MANAGEMENT_API.md) ·
+[Console source](apps/management-ui)
 
 ## Run it with Docker
 
@@ -193,10 +275,13 @@ directly from this repository. Release procedure:
 KUTTIDB_AUTH_TOKEN_FILE=./auth.token docker compose up --build
 ```
 
-The compose file starts a non-root container with durable WALs, loopback-only ports, and a
-Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architecture
-(linux/amd64 + linux/arm64) images are built in CI. See [DOCKER.md](docs/operations/DOCKER.md) and
-[KUBERNETES.md](docs/operations/KUBERNETES.md) for manifests and probes.
+The compose file starts a non-root container with durable WALs, loopback-only
+ports, and a Prometheus metrics listener. Multi-architecture images cover
+`linux/amd64` and `linux/arm64`.
+
+[Docker setup](docs/operations/DOCKER.md) ·
+[Kubernetes manifests](docs/operations/KUBERNETES.md) ·
+[Deployment and backups](docs/operations/DEPLOYMENT.md)
 
 ## Documentation
 
@@ -213,6 +298,7 @@ Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architectur
 | [SECURITY.md](docs/SECURITY.md) | Auth, TLS, permissions, threat model |
 | [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
 | [DEPLOYMENT.md](docs/operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
+| [LANDING_PAGE.md](docs/operations/LANDING_PAGE.md) | Preview the landing page, maintain client examples, and serve it with GitHub Pages |
 | [RELEASE.md](docs/operations/RELEASE.md) | Release cycle, official binaries, tagging process |
 | [BENCHMARKS.md](docs/operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [MIGRATION.md](docs/guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
@@ -223,39 +309,54 @@ Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architectur
 ## Testing and benchmarks
 
 ```sh
-make test          # core, platform, queues, exchanges, atomicity, streams, fuzz, embed
+make test          # core, platform, messaging, recovery, clients, and embed
 make bench-quick   # cache performance gates
 make bench-exchange
 ```
 
-The suite includes crash-recovery tests (`queue_crash_test`, `queue_failure_test`), concurrency
-and TSAN builds (`make sanitize-tsan-server`, `sanitize-tsan-queue`), and ASLR-safe embedded-region
-tests. Recorded numbers live in [BENCHMARKS.md](docs/operations/BENCHMARKS.md) and [ROADMAP.md](docs/plans/ROADMAP.md).
+The suite covers crash recovery, concurrency, protocol fuzzing, client smoke
+runs, and ASLR-safe embedded regions. Changes to acknowledgement or recovery
+behavior require a matching crash-test. Console changes also require
+`pnpm lint && pnpm test` from `apps/management-ui`.
+
+[Recorded benchmarks and methodology](docs/operations/BENCHMARKS.md) ·
+[Roadmap](docs/plans/ROADMAP.md)
 
 ## What KuttiDB is not
 
-Honesty about limits is part of the design:
+A single server, on purpose. The limits are part of the contract:
 
-- It is **not** Redis, RabbitMQ, or Kafka, and speaks none of their wire protocols. The native
-  protocol comes first; compatibility adapters are a later, separate milestone.
-- It does **not** guarantee "no data loss". Evictable cache entries may be lost by policy.
-  Acknowledged durable queue messages survive process crashes and clean restarts on a healthy
-  single node — but a single node does not protect against disk or machine loss. Replication is
-  not yet implemented.
-- There is **no exactly-once delivery claim** anywhere.
-- Windows requires remaining IOCP/named-pipe/mapping work (tracked in the roadmap).
+| Boundary | What to expect |
+|---|---|
+| **Single-node durability** | Durable modes protect process crashes and clean restarts on a healthy node. They do not protect disk or machine loss. Replication is not implemented. |
+| **At-least-once delivery** | Unfinished work can be redelivered. There is no exactly-once processing guarantee. |
+| **Evictable cache** | Entries may be lost by policy. Cache durability depends on the selected mode. |
+| **Native protocol** | KuttiDB is not a drop-in Redis, RabbitMQ, or Kafka replacement and does not speak their wire protocols. |
+| **Platform support** | macOS and Linux. Windows still requires IOCP, named-pipe, and mapping work. |
+
+[Durability guarantees](docs/design/DURABILITY.md) ·
+[When another tool is a better fit](docs/guides/MIGRATION.md)
 
 ## Contributing
 
-Issues and pull requests are welcome. For non-trivial changes, please open an issue first so we
-can agree on the approach. Run `make test` and `pnpm lint && pnpm test` (for the console) before
-submitting. Durable semantics are the contract: if a PR changes acknowledgement or recovery
-behavior, it should come with a matching crash-test.
+Issues and pull requests are welcome. For non-trivial changes, open an issue
+first to agree on the approach. Follow [AGENTS.md](AGENTS.md) for contribution
+rules and documentation placement, and run the relevant checks before submitting.
+
+[Report an issue](https://github.com/kuttidb/kuttidb/issues) ·
+[Security policy](docs/SECURITY.md)
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE) (`Apache-2.0`).
+[Apache License, Version 2.0](LICENSE). Self-host it, use it, and build on it.
+
+---
 
 <div align="center">
-<sub>Built in C. One binary. Warm out of the oven. 🥖</sub>
+
+<img src="docs/logo.png" alt="" width="40" />
+
+**Less to run. More to build.**<br />
+<sub>Built in C. Served warm.</sub>
+
 </div>
