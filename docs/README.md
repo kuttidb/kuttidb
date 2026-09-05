@@ -22,6 +22,7 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | Document | Contents |
 |---|---|
 | [guides/GETTING_STARTED.md](guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
+| [guides/SAAS_DEMO.md](guides/SAAS_DEMO.md) | One-command report demo: cache, background jobs, event replay, and crash recovery |
 | [design/ARCHITECTURE.md](design/ARCHITECTURE.md) | Engines, storage separation, durability model |
 | [design/PROTOCOL.md](design/PROTOCOL.md) | Binary wire protocol, CLI flags, limits |
 | [messaging/QUEUES.md](messaging/QUEUES.md) | Queue semantics, delivery and dead-letter rules |
@@ -38,4 +39,5 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | [operations/BENCHMARKS.md](operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [guides/MIGRATION.md](guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
 | [plans/ROADMAP.md](plans/ROADMAP.md) | Milestones, priorities, and known limitations |
+| [plans/SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md](plans/SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md) | Agent assignment: bounded resources, mixed workloads, disk-backed messaging, and single-server SaaS performance |
 | [../openapi/management-v1.yaml](../openapi/management-v1.yaml) | Versioned Management API contract |

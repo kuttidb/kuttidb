@@ -4,7 +4,7 @@
 
 # KuttiDB
 
-**A lightweight, crash-recoverable event cache — with queues, exchanges, streams, and cache state in one binary.**
+**Cache, background jobs, and replayable events. One small binary for your SaaS.**
 
 Zero-copy between local processes · network-accessible across machines · no JVM, no Erlang, no external dependencies for a plaintext build.
 
@@ -16,10 +16,33 @@ Zero-copy between local processes · network-accessible across machines · no JV
 
 ---
 
-KuttiDB is one executable, one configuration, one data directory. It started as a cache and grew the
-messaging primitives people usually bolt on next to one: durable queues, routing, streams, and
-atomic cache-plus-event commits — all recoverable after a crash, all observable over a single
-authenticated Management API.
+KuttiDB gives your application fast cache access, durable work queues, and replayable event
+streams in one executable, with one configuration and one data directory. Built for small and
+midsize SaaS teams running on a single server, with an authenticated Management API for operations.
+
+## Try all three in 60 seconds
+
+Generate a report, cache its status, acknowledge the background job, and replay its completion
+event. Then watch the demo **kill and restart its own server** and verify recovery.
+
+```sh
+curl -fsSL https://kuttidb.com/demo.sh | bash
+```
+
+Requires **macOS or Linux, Python 3.10+, and curl**. Reuses an installed KuttiDB binary or downloads
+a checksum-verified release into a temporary folder. No pip install or account needed. Download
+time varies; the demo itself takes seconds. It uses a private local socket and removes its own
+server and temporary data when finished.
+
+[![Recorded demo: cache, report worker, durable queue, event replay, and crash recovery](landing/demo.gif)](https://kuttidb.com/#demo)
+
+This is a real recorded run; the memory value is that server's sampled RSS, not a benchmark or
+peak-memory guarantee. Cache writes use `--durability always`. The restart checks process-crash
+recovery on the same disk, not protection from disk or machine loss.
+
+Already cloned the repository? Run `make && python3 examples/saas_demo.py`.
+[Read the demo](examples/saas_demo.py), [follow the walkthrough](docs/guides/SAAS_DEMO.md),
+or [replay the recording](https://kuttidb.com/#demo).
 
 ## Highlights
 
@@ -41,7 +64,7 @@ authenticated Management API.
 - **Management API & Web console** — an authenticated HTTP/1.1 admin surface (audited, bounded,
   SSE-capable) and a self-hosted React console for dashboards and day-two operations.
 
-## Quick start
+## Connect from your application
 
 For a small single-host application, Python can manage one local KuttiDB
 instance directly. The opt-in factory derives an owner-only Unix socket and
@@ -180,6 +203,7 @@ Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architectur
 | Document | Contents |
 |---|---|
 | [GETTING_STARTED.md](docs/guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
+| [SAAS_DEMO.md](docs/guides/SAAS_DEMO.md) | One-command report demo: cache, background jobs, event replay, and crash recovery |
 | [ARCHITECTURE.md](docs/design/ARCHITECTURE.md) | Engines, storage separation, durability model |
 | [PROTOCOL.md](docs/design/PROTOCOL.md) | Binary wire protocol, CLI flags, limits |
 | [QUEUES.md](docs/messaging/QUEUES.md) | Queue semantics, delivery and dead-letter rules |

@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-09-05T08:53:34.575944+00:00",
+  "platform": "Darwin 24.3.0 / arm64",
+  "server_sha256": "9e36ffb4d8874d7fb8102bae8cdf55e62b8caf2e6f4d79e498db9d052e2de5e3",
+  "durability": "always",
+  "threads": 1,
+  "note": "Real local demo run. RSS is a sample, not a benchmark or peak. SIGKILL tests process-crash recovery, not disk or machine loss.",
+  "events": [
+    {
+      "at": 0.037,
+      "text": "KuttiDB / one server. Three capabilities."
+    },
+    {
+      "at": 0.642,
+      "text": "LOCAL    Private socket. Temporary data. Durable writes."
+    },
+    {
+      "at": 1.245,
+      "text": "CACHE    report:42 -> queued"
+    },
+    {
+      "at": 1.851,
+      "text": "WORKER   Generated report:42 (3 CSV rows)"
+    },
+    {
+      "at": 2.454,
+      "text": "QUEUE    Job acknowledged. Queue drained."
+    },
+    {
+      "at": 3.059,
+      "text": "STREAM   report.ready appended at offset 0"
+    },
+    {
+      "at": 3.665,
+      "text": "WORKER   Picked up report:43; no ACK yet."
+    },
+    {
+      "at": 4.279,
+      "text": "MEMORY   2.0 MiB server RSS (sample, not peak)"
+    },
+    {
+      "at": 4.881,
+      "text": "CRASH    Killing this demo's server with SIGKILL..."
+    },
+    {
+      "at": 5.521,
+      "text": "RESTART  Reopened the same data directory."
+    },
+    {
+      "at": 6.123,
+      "text": "CACHE    report:42 -> ready: 3 rows"
+    },
+    {
+      "at": 6.724,
+      "text": "QUEUE    report:43 redelivered; report:42 stays ACKed."
+    },
+    {
+      "at": 7.33,
+      "text": "REPLAY   report.ready recovered at offset 0"
+    },
+    {
+      "at": 7.934,
+      "text": "PASS     Cache + jobs + replay. All recovery checks passed."
+    },
+    {
+      "at": 8.556,
+      "text": "CLEANUP  Demo server stopped. Temporary data removed."
+    }
+  ]
+}

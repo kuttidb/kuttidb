@@ -11,11 +11,11 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>KuttiDB — one binary. Cache, queues, streams. Crash-recoverable.</title>
-<meta name="description" content="KuttiDB is a lightweight, crash-recoverable event cache written in C — with durable queues, exchanges, streams, and atomic cache-plus-event commits in one binary. Apache-2.0." />
+<meta name="description" content="Cache, background jobs, and replayable events in one small binary for your SaaS. Try a real report-generation demo with crash recovery in 60 seconds. Apache-2.0." />
 <link rel="icon" href="logo.png" />
 <link rel="apple-touch-icon" href="logo.png" />
-<meta property="og:title" content="KuttiDB — the event cache that keeps its promises" />
-<meta property="og:description" content="Durable queues, exchanges, streams and an atomic cache in one C binary. No JVM, no Erlang, no dependencies. Apache-2.0." />
+<meta property="og:title" content="KuttiDB — cache, jobs, and events in one small binary" />
+<meta property="og:description" content="Cache, durable jobs, and replayable events for your SaaS. Run the 60-second demo and watch it recover after a process crash." />
 <meta property="og:image" content="logo.png" />
 <meta name="theme-color" content="#120d09" />
 <style>
@@ -235,6 +235,20 @@
   .codewin .st { color: #a3d69a; }
   .codewin .nb { color: #e2926b; }
   .codewin .ok { color: var(--green); }
+
+  /* --------------------------------------------------------- recorded demo */
+  .demo-recording { min-width: 0; scroll-margin-top: 110px; }
+  .codewin .demo-log { height: 360px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; }
+  .demo-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+  .demo-controls .btn { padding: 9px 13px; font-size: 14px; }
+  .demo-controls [hidden] { display: none; }
+  #demo-status { font-size: 14px; color: var(--muted); }
+  .demo-caption { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
+  .demo-links { display: flex; flex-wrap: wrap; gap: 14px 24px; margin-top: 22px; font-size: 16px; }
+  .demo-links a { color: var(--gold); }
+  #demo-command { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 80px; font-size: 16px; }
+  .demo-log:focus-visible, .demo-controls button:focus-visible, .copybtn:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
   /* ------------------------------------------------------------ stats band */
   .stats { border-block: 1px solid var(--border); background: var(--bg-soft); }
@@ -519,6 +533,7 @@
       KuttiDB <span class="beta">v0.0.1-beta</span>
     </a>
     <nav class="nav-links">
+      <a href="#demo">Demo</a>
       <a href="#features">Features</a>
       <a href="#atomic">Atomic ops</a>
       <a href="#benchmarks">Benchmarks</a>
@@ -543,10 +558,10 @@
   <div class="wrap hero-grid">
     <div>
       <span class="eyebrow"><span class="dot"></span> Open source · <b>Apache-2.0</b> · written in C · macOS &amp; Linux</span>
-      <h1>The event cache that<br /><span class="grad">keeps its promises.</span></h1>
+      <h1>Cache. Jobs. Events.<br /><span class="grad">One small binary.</span></h1>
       <p class="lede">
-        KuttiDB is a lightweight, crash-recoverable event cache with durable queues,
-        exchanges, streams, and atomic cache-plus-event commits — in <b style="color:var(--text)">one binary</b>.
+        Fast cache access, durable background jobs, and replayable events for your SaaS.
+        <b style="color:var(--text)">One server to run. One place to start.</b>
       </p>
       <p class="subnote">
         No JVM. No Erlang. No external dependencies for a plaintext build.
@@ -554,7 +569,7 @@
       </p>
       <div class="hero-ctas">
         <a class="btn btn-primary" href="#quickstart">
-          Get started
+          Run the 60-second demo
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
         </a>
         <a class="btn btn-ghost" href="https://github.com/kuttidb/kuttidb">Star on GitHub ★</a>
@@ -563,35 +578,39 @@
         <span class="pill"><b>1</b> executable</span>
         <span class="pill"><b>1</b> config</span>
         <span class="pill"><b>1</b> data directory</span>
-        <span class="pill"><b>~1.7 MiB</b> idle RSS</span>
+        <span class="pill"><b>Real</b> crash-recovery demo</span>
       </div>
     </div>
 
-    <div class="codeblock">
+    <div class="demo-recording" id="demo">
       <div class="codewin">
         <div class="codewin-bar">
           <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-          <span class="title">quickstart.py — python 3</span>
+          <span class="title">Recorded run / cache, jobs &amp; event replay</span>
         </div>
-<pre><span class="cm"># pip install kuttidb-client</span>
-<span class="kw">from</span> kuttidb_client <span class="kw">import</span> KuttiDBClient
-
-<span class="kw">with</span> <span class="fn">KuttiDBClient</span>(port=<span class="nb">7379</span>) <span class="kw">as</span> db:
-    db.<span class="fn">put</span>(<span class="st">"greeting"</span>, <span class="st">b"hello"</span>, ttl=<span class="nb">60</span>)
-    <span class="fn">print</span>(db.<span class="fn">get</span>(<span class="st">"greeting"</span>))              <span class="cm"># b'hello'</span>
-
-    db.<span class="fn">queue_declare</span>(<span class="st">"jobs"</span>, durable=<span class="kw">True</span>,
-                      max_depth=<span class="nb">10_000</span>,
-                      dead_letter_queue=<span class="st">"jobs.dead"</span>)
-    db.<span class="fn">queue_publish</span>(<span class="st">"jobs"</span>, <span class="st">b"resize:123"</span>)
-    delivery = db.<span class="fn">queue_consume</span>(<span class="st">"jobs"</span>, visibility=<span class="nb">30</span>)
-    <span class="kw">if</span> delivery:
-        <span class="fn">process</span>(delivery[<span class="st">"value"</span>])
-        db.<span class="fn">queue_ack</span>(<span class="st">"jobs"</span>, delivery[<span class="st">"id"</span>])
-
-<span class="ok">✓ cache put, queue publish, ACK — all crash-recoverable</span></pre>
+        <pre id="demo-output" class="demo-log" tabindex="0" aria-label="Recorded demo output"><!-- demo-transcript:start -->KuttiDB / one server. Three capabilities.
+LOCAL    Private socket. Temporary data. Durable writes.
+CACHE    report:42 -&gt; queued
+WORKER   Generated report:42 (3 CSV rows)
+QUEUE    Job acknowledged. Queue drained.
+STREAM   report.ready appended at offset 0
+WORKER   Picked up report:43; no ACK yet.
+MEMORY   2.0 MiB server RSS (sample, not peak)
+CRASH    Killing this demo&#x27;s server with SIGKILL...
+RESTART  Reopened the same data directory.
+CACHE    report:42 -&gt; ready: 3 rows
+QUEUE    report:43 redelivered; report:42 stays ACKed.
+REPLAY   report.ready recovered at offset 0
+PASS     Cache + jobs + replay. All recovery checks passed.
+CLEANUP  Demo server stopped. Temporary data removed.<!-- demo-transcript:end --></pre>
       </div>
-      <button class="copybtn" data-copy="1">COPY</button>
+      <div class="demo-controls">
+        <button class="btn btn-ghost" id="demo-replay" type="button" hidden>Replay recording</button>
+        <button class="btn btn-ghost" id="demo-result" type="button" hidden>Show result</button>
+        <span id="demo-status" role="status">Recorded locally; run it yourself below.</span>
+      </div>
+      <p class="demo-caption"><!-- demo-caption:start -->Recorded 2026-09-05 · Darwin 24.3.0 / arm64 · cache durability: always · one event-loop thread.<!-- demo-caption:end --></p>
+      <p class="demo-caption">RSS is one server sample, not peak usage. This checks process-crash recovery on the same disk.</p>
     </div>
   </div>
 </section>
@@ -789,31 +808,30 @@ db.<span class="fn">queue_browse</span>(<span class="st">"orders.created"</span>
 <section class="section" id="quickstart">
   <div class="wrap">
     <p class="kicker reveal">Quick start</p>
-    <h2 class="reveal">From curl to durable queue in three commands.</h2>
-    <p class="section-lede reveal" style="margin-bottom:46px;">
-      One executable, one configuration, one data directory. The installer picks the right binary
-      for your platform from GitHub Releases (macOS arm64/x86_64, Linux x86_64/arm64) and verifies
-      its checksum — no build tools needed. The WAL file is the local recovery log —
-      keep it and your durable queue and stream data survive the restart.
+    <h2 class="reveal">One command. Three capabilities.<br />Then watch recovery.</h2>
+    <p class="section-lede reveal" style="margin-bottom:30px;">
+      Generate a report, cache its status, process a job, and replay an event.
+      The demo kills its own server, restarts it, and checks what survived.
     </p>
-    <div class="codeblock reveal" style="max-width:760px;">
+    <div class="codeblock reveal" style="max-width:850px;">
       <div class="codewin">
         <div class="codewin-bar">
           <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-          <span class="title">sh — install &amp; run</span>
+          <span class="title">macOS or Linux / Python 3.10+ and curl</span>
         </div>
-<pre><span class="cm"># install the official prebuilt binary (sha256-verified)</span>
-$ curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
-<span class="ok">kuttidb installed ✓ — kuttidb, kuttidb-cli, kuttidb-bench in ~/.local/bin</span>
-
-<span class="cm"># start listening on 127.0.0.1:7379 with a durable WAL</span>
-$ kuttidb 7379 kuttidb.wal
-<span class="ok">kuttidb: listening on 127.0.0.1:7379 — warm out of the oven 🥖</span>
-
-<span class="cm"># building from source instead? clone the repo, then `make`.
-# throwaway experiment? WAL to stdout: ./kuttidb 7379 -</span></pre>
+<pre id="demo-command">curl -fsSL https://kuttidb.com/demo.sh | bash</pre>
       </div>
-      <button class="copybtn" data-copy="1">COPY</button>
+      <button class="copybtn" data-copy-target="demo-command" type="button" aria-label="Copy demo command">COPY</button>
+    </div>
+    <p class="demo-caption" style="max-width:780px; margin-top:20px;">
+      No account. No pip install. Uses your installed KuttiDB or downloads a checksum-verified
+      release temporarily. Its private socket, process, and data are cleaned up afterward.
+      The demo takes seconds; first-run download time varies.
+    </p>
+    <div class="demo-links">
+      <a href="https://github.com/kuttidb/kuttidb/blob/main/examples/saas_demo.py">Read the demo source ↗</a>
+      <a href="https://github.com/kuttidb/kuttidb/blob/main/docs/guides/SAAS_DEMO.md">Walkthrough &amp; recovery guarantees ↗</a>
+      <a href="https://github.com/kuttidb/kuttidb/blob/main/docs/guides/GETTING_STARTED.md">Set up your own server ↗</a>
     </div>
   </div>
 </section>
@@ -1382,16 +1400,17 @@ kuttidb_embed_close(ec);</pre>
   // copy buttons — progressive enhancement; page works fully without JS
   document.querySelectorAll('.copybtn').forEach(function (btn) {
     btn.addEventListener('click', function () {
-      var pre = btn.parentElement.querySelector('pre');
-      if (!pre || !navigator.clipboard) return;
-      var text = pre.innerText.split('\n')
+      var pre = btn.dataset.copyTarget ? document.getElementById(btn.dataset.copyTarget) : btn.parentElement.querySelector('pre');
+      if (!pre) return;
+      if (!navigator.clipboard) { btn.textContent = 'SELECT TO COPY'; return; }
+      var text = pre.textContent.split('\n')
         .filter(function (l) { return !l.trim().startsWith('✓'); })
         .map(function (l) { return l.replace(/^\$\s?/, ''); })
         .join('\n').trim();
       navigator.clipboard.writeText(text).then(function () {
         btn.textContent = 'COPIED ✓'; btn.classList.add('done');
         setTimeout(function () { btn.textContent = 'COPY'; btn.classList.remove('done'); }, 1600);
-      });
+      }).catch(function () { btn.textContent = 'SELECT TO COPY'; });
     });
   });
 
@@ -1433,5 +1452,6 @@ kuttidb_embed_close(ec);</pre>
     a.addEventListener('click', function () { document.getElementById('nav').classList.remove('open'); });
   });
 </script>
+<script src="demo-player.js" defer></script>
 </body>
 </html>

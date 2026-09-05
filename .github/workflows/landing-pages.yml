@@ -13,6 +13,9 @@ on:
     branches: [main]
     paths:
       - 'landing/**'
+      - 'examples/saas_demo.py'
+      - 'examples/package_demo.py'
+      - 'src/kuttidb_client.py'
       - '.github/workflows/landing-pages.yml'
   workflow_dispatch: {}
 
@@ -43,7 +46,10 @@ jobs:
           # yet. No-op afterwards.
           enablement: true
 
-      # The site is prebuilt and self-contained — just publish the folder as-is.
+      - name: Package the runnable demo and native client
+        run: python3 examples/package_demo.py
+
+      # The page stays static; only the downloadable demo bundle is staged.
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

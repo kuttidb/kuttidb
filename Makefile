@@ -139,6 +139,7 @@ test: all core_test platform_test managed_lifecycle_test managed_lock_test queue
 	@python3 src/test_managed_server.py
 	@python3 src/test_protocol_fuzz.py
 	@python3 src/test_reliability.py
+	@python3 examples/saas_demo.py --server ./kuttidb
 	@set -e; tmp=$$(mktemp -d); ./kuttidb 7394 $$tmp/kuttidb.wal 100 \
 		--queue-wal $$tmp/queue.wal 2>/dev/null & server_pid=$$!; \
 	trap 'kill $$server_pid 2>/dev/null || true; rm -rf $$tmp' EXIT; sleep 0.7; \

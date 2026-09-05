@@ -141,6 +141,11 @@ add_test(NAME embed_aslr COMMAND embed_aslr_test)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(
+        NAME saas_demo
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/examples/saas_demo.py
+                --server $<TARGET_FILE:kuttidb>
+    )
+    add_test(
         NAME management_api
         COMMAND ${CMAKE_COMMAND} -E env "KUTTIDB_SERVER=$<TARGET_FILE:kuttidb>"
                 ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/src/test_management_api.py

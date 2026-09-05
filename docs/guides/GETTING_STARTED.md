@@ -10,6 +10,17 @@ The same server also works with the Go, Java, Rust, and Node.js clients in
 
 ## 1. Install and run it
 
+For a complete cache + job + event workflow before setting up your own server,
+try the [60-second SaaS demo](SAAS_DEMO.md):
+
+```sh
+curl -fsSL https://kuttidb.com/demo.sh | bash
+```
+
+The demo needs Python 3.10+ and curl, runs an isolated temporary server, and
+cleans it up afterward. To keep a server running for your own application,
+continue below.
+
 **Option A — prebuilt binary (no toolchain needed).** The installer detects
 your platform (macOS arm64/x86_64, Linux x86_64/arm64), downloads the latest
 release, and verifies its checksum:

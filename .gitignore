@@ -47,3 +47,5 @@ clients/python/kuttidb/embed.py
 clients/python/kuttidb/local.py
 clients/python/LICENSE
 clients/python/dist/
+# Generated from the canonical demo and client before GitHub Pages upload.
+/landing/demo.tar.gz
