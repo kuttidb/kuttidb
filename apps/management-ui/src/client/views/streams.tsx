@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Plus, Trash2, Send, Scissors, Activity, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { usePolling } from "@/hooks/use-polling";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -17,19 +16,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { BinaryValue, encodeDraft, type BinaryField } from "@/components/binary-value";
 import { ConfirmDestructive } from "@/components/confirm";
 import { ErrorBanner } from "@/components/error-banner";
-import { CopyId, CursorPager, DetailGrid, LastRefreshed, PageHeader, StateBadge } from "@/components/shared";
-import { admin, ApiError, list, newIdempotencyKey } from "@/lib/api";
-import { idFromName, nameFromId } from "@/lib/codec";
+import { CopyId, ConnectionContextLine, EmptyState, LastRefreshed, PageHeader, Section, Skeleton, StatusDot } from "@/components/shared";
+import { admin, list, newIdempotencyKey } from "@/lib/api";
+import { nameFromId } from "@/lib/codec";
 import { formatBytes, formatDuration } from "@/lib/format";
 import type { StreamDetail, StreamPartition, StreamRecord, StreamSummary, JobEntry } from "@/lib/types";
 
 export function StreamsView({ profileId, onOpenStream }: { profileId: string; onOpenStream: (streamId: string) => void }) {
   const [streams, setStreams] = useState<StreamSummary[]>([]);
   const [declareOpen, setDeclareOpen] = useState(false);
-  const { lastUpdated, error, refresh } = usePolling(
+  const { lastUpdated, error, stale, refresh } = usePolling(
     useCallback(async () => setStreams((await list<StreamSummary>(profileId, "streams")).data), [profileId]),
     15_000
   );
+  const loadedOnce = lastUpdated !== null || error !== null;
   return (
     <div>
       <PageHeader
@@ -37,36 +37,55 @@ export function StreamsView({ profileId, onOpenStream }: { profileId: string; on
         description="Durable partitioned append logs with replay and retention."
         actions={
           <>
-            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} />
-            <Button size="sm" onClick={() => setDeclareOpen(true)}><Plus className="size-4 mr-1" />Declare stream</Button>
+            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} stale={stale} />
+            <Button size="sm" onClick={() => setDeclareOpen(true)}><Plus className="size-4" />Declare stream</Button>
           </>
         }
       />
       {error && streams.length === 0 && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead><TableHead>Stream ID</TableHead>
-                <TableHead className="text-right">Partitions</TableHead><TableHead className="text-right">Records</TableHead><TableHead className="text-right">Retained</TableHead>
+      {error && stale && streams.length > 0 && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
+      {!loadedOnce ? (
+        <div className="grid gap-2" aria-busy="true">
+          {Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-11 w-full" />)}
+          <p className="text-sm text-muted-foreground">Checking streams…</p>
+        </div>
+      ) : streams.length === 0 ? (
+        <div className="border-t border-rule-strong pt-2">
+          <EmptyState
+            title="No streams declared."
+            hint="Declare a durable stream to append partitioned records."
+            action={<Button size="sm" onClick={() => setDeclareOpen(true)}><Plus className="size-4" />Declare stream</Button>}
+          />
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead><TableHead>Stream ID</TableHead>
+              <TableHead className="text-right">Partitions</TableHead><TableHead className="text-right">Records</TableHead><TableHead className="text-right">Retained</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {streams.map((stream) => (
+              <TableRow key={stream.id} className="cursor-pointer" onClick={() => onOpenStream(stream.id)}>
+                <TableCell>
+                  <a
+                    href={`#/c/${encodeURIComponent(profileId)}/streams/${encodeURIComponent(stream.id)}`}
+                    className="text-left font-medium hover:underline"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    {stream.name}
+                  </a>
+                </TableCell>
+                <TableCell><CopyId id={stream.id} /></TableCell>
+                <TableCell className="text-right tabular-nums">{stream.partition_count}</TableCell>
+                <TableCell className="text-right tabular-nums">{stream.retained_record_count}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatBytes(stream.retained_bytes)}</TableCell>
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {streams.map((stream) => (
-                <TableRow key={stream.id} className="cursor-pointer" onClick={() => onOpenStream(stream.id)}>
-                  <TableCell className="font-medium">{stream.name}</TableCell>
-                  <TableCell><CopyId id={stream.id} /></TableCell>
-                  <TableCell className="text-right tabular-nums">{stream.partition_count}</TableCell>
-                  <TableCell className="text-right tabular-nums">{stream.retained_record_count}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatBytes(stream.retained_bytes)}</TableCell>
-                </TableRow>
-              ))}
-              {streams.length === 0 && <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground py-8">No streams declared.</TableCell></TableRow>}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+            ))}
+          </TableBody>
+        </Table>
+      )}
       <DeclareStreamDialog open={declareOpen} onOpenChange={setDeclareOpen} profileId={profileId} onDone={refresh} />
     </div>
   );
@@ -92,8 +111,8 @@ function DeclareStreamDialog({ open, onOpenChange, profileId, onDone }: { open: 
       <DialogContent className="sm:max-w-md">
         <DialogHeader><DialogTitle>Declare stream</DialogTitle><DialogDescription>Ordering is guaranteed within a partition, not across partitions.</DialogDescription></DialogHeader>
         <div className="grid gap-4 py-2">
-          <div className="grid gap-2"><Label htmlFor="stream-name">Name</Label><Input id="stream-name" value={name} onChange={(event) => setName(event.target.value)} spellCheck={false} /></div>
-          <div className="grid gap-2"><Label htmlFor="stream-partitions">Partitions</Label><Input id="stream-partitions" inputMode="numeric" value={partitions} onChange={(event) => setPartitions(event.target.value)} /></div>
+          <div className="grid gap-1.5"><Label htmlFor="stream-name">Name</Label><Input id="stream-name" value={name} onChange={(event) => setName(event.target.value)} spellCheck={false} /></div>
+          <div className="grid gap-1.5"><Label htmlFor="stream-partitions">Partitions</Label><Input id="stream-partitions" inputMode="numeric" value={partitions} onChange={(event) => setPartitions(event.target.value)} /></div>
           {error && <ErrorBanner error={error} />}
         </div>
         <DialogFooter>
@@ -113,6 +132,9 @@ export function StreamDetailView({ profileId, streamId, onBack }: { profileId: s
   const [retentionOpen, setRetentionOpen] = useState(false);
   const [truncatePartition, setTruncatePartition] = useState<number | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  /** Revision captured when the confirmation opens, not the polling snapshot. */
+  const [confirmEtag, setConfirmEtag] = useState<string | null>(null);
+  const [dialogError, setDialogError] = useState<Error | null>(null);
   const [busy, setBusy] = useState(false);
 
   const loader = useCallback(async () => {
@@ -124,73 +146,109 @@ export function StreamDetailView({ profileId, streamId, onBack }: { profileId: s
     setEtag(detailResponse.etag);
     setPartitions(partitionsResponse.data);
   }, [profileId, streamId]);
-  const { lastUpdated, refresh } = usePolling(loader, 15_000);
+  const { lastUpdated, error: pollError, stale, refresh } = usePolling(loader, 15_000);
+
+  // Confirmation-time revision for the destructive dialog (delete and
+  // truncate): fetch the current ETag when the dialog opens.
+  const destructiveTarget = deleteOpen ? "delete" : truncatePartition !== null ? "truncate" : null;
+  useEffect(() => {
+    if (!destructiveTarget) return;
+    let cancelled = false;
+    setConfirmEtag(null);
+    admin<{ data: StreamDetail }>(profileId, `streams/${streamId}`)
+      .then((response) => { if (!cancelled) setConfirmEtag(response.etag); })
+      .catch(() => { /* the mutation will surface the real precondition error */ });
+    return () => { cancelled = true; };
+  }, [destructiveTarget, profileId, streamId]);
 
   const decodedName = detail ? nameFromId(detail.id) : null;
 
   const deleteStream = async () => {
-    setBusy(true); setError(null);
+    setBusy(true); setDialogError(null);
     try {
-      await admin<JobEntry>(profileId, `streams/${streamId}`, { method: "DELETE", idempotencyKey: newIdempotencyKey(), ifMatch: etag ?? undefined, confirm: streamId, body: {} });
+      await admin<JobEntry>(profileId, `streams/${streamId}`, { method: "DELETE", idempotencyKey: newIdempotencyKey(), ifMatch: confirmEtag ?? etag ?? undefined, confirm: streamId, body: {} });
       toast.success("Deletion job queued — track it under Maintenance");
       setDeleteOpen(false);
       onBack();
-    } catch (reason) { setError(reason instanceof Error ? reason : new Error(String(reason))); }
+    } catch (reason) { setDialogError(reason instanceof Error ? reason : new Error(String(reason))); }
     finally { setBusy(false); }
   };
 
   const truncate = async (partition: number, baseOffset: number) => {
-    setBusy(true); setError(null);
+    setBusy(true); setDialogError(null);
     try {
       await admin(profileId, `streams/${streamId}/partitions/${partition}:truncate`, {
-        method: "POST", idempotencyKey: newIdempotencyKey(), ifMatch: etag ?? undefined, confirm: streamId,
+        method: "POST", idempotencyKey: newIdempotencyKey(), ifMatch: confirmEtag ?? etag ?? undefined, confirm: streamId,
         body: { base_offset: baseOffset }
       });
       toast.success("Truncation job queued — track it under Maintenance");
       setTruncatePartition(null);
       refresh();
-    } catch (reason) { setError(reason instanceof Error ? reason : new Error(String(reason))); }
+    } catch (reason) { setDialogError(reason instanceof Error ? reason : new Error(String(reason))); }
     finally { setBusy(false); }
   };
+
+  const viewError = error ?? pollError;
+  const connectionContext = (
+    <>
+      <ConnectionContextLine profileId={profileId} />
+      {decodedName && <span>Stream: <span className="font-medium text-foreground">{decodedName}</span></span>}
+    </>
+  );
 
   return (
     <div>
       <PageHeader
         title={decodedName ?? streamId}
-        description={<span className="font-mono text-xs">{streamId}</span>}
+        breadcrumb={
+          <button type="button" className="text-sm text-muted-foreground hover:text-foreground hover:underline" onClick={onBack}>
+            Streams
+          </button>
+        }
+        description={<CopyId id={streamId} label={`Copy stream ID ${streamId}`} />}
         actions={
           <>
-            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} />
-            <Button variant="outline" size="sm" onClick={() => setRetentionOpen(true)}><Pencil className="size-4 mr-1" />Retention</Button>
+            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} stale={stale} />
+            <Button variant="outline" size="sm" onClick={() => setRetentionOpen(true)}><Pencil className="size-4" />Retention</Button>
             <DropdownMenu>
-              <DropdownMenuTrigger asChild><Button variant="outline" size="icon"><Activity className="size-4" /></Button></DropdownMenuTrigger>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" aria-label="Stream actions" aria-haspopup="menu"><Activity className="size-4" />Actions</Button>
+              </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 {partitions.map((partition) => (
                   <DropdownMenuItem key={partition.partition} onClick={() => setTruncatePartition(partition.partition)}>
-                    <Scissors className="size-4 mr-2" />Truncate partition {partition.partition}…
+                    <Scissors className="size-4" />Truncate partition {partition.partition}…
                   </DropdownMenuItem>
                 ))}
-                <DropdownMenuItem className="text-destructive" onClick={() => setDeleteOpen(true)}><Trash2 className="size-4 mr-2" />Delete stream…</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => setDeleteOpen(true)}><Trash2 className="size-4" />Delete stream…</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </>
         }
       />
-      {error && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
+      {(viewError || error) && <ErrorBanner error={viewError ?? error} onRetry={refresh} className="mb-4" />}
       {detail && (
-        <Tabs defaultValue="records">
-          <TabsList className="mb-4">
-            <TabsTrigger value="records">Records</TabsTrigger>
-            <TabsTrigger value="append"><Send className="size-3.5 mr-1" />Append</TabsTrigger>
-            <TabsTrigger value="tail"><Activity className="size-3.5 mr-1" />Tail</TabsTrigger>
-            <TabsTrigger value="partitions">Partitions</TabsTrigger>
-          </TabsList>
-          <TabsContent value="records"><RecordsTab profileId={profileId} streamId={streamId} partitions={partitions} /></TabsContent>
-          <TabsContent value="append"><AppendTab profileId={profileId} streamId={streamId} partitions={partitions} onAppended={refresh} /></TabsContent>
-          <TabsContent value="tail"><TailTab profileId={profileId} streamId={streamId} partitions={partitions} /></TabsContent>
-          <TabsContent value="partitions">
-            <Card>
-              <CardContent className="p-0">
+        <>
+          <div className="mb-4 border-y border-rule-strong">
+            <dl className="flex flex-wrap gap-x-8 gap-y-1 px-0 py-3 text-sm">
+              <div className="flex gap-2"><dt className="text-muted-foreground">Partitions</dt><dd className="font-medium tabular-nums">{partitions.length}</dd></div>
+              <div className="flex gap-2"><dt className="text-muted-foreground">Retention</dt><dd className="font-medium">{formatBytes(detail.max_retained_bytes)} / {formatDuration(detail.max_retained_age_ms)} max</dd></div>
+              <div className="flex gap-2"><dt className="text-muted-foreground">Revision</dt><dd className="font-mono text-xs">{etag ?? `s-${detail.revision}`}</dd></div>
+            </dl>
+          </div>
+          <Tabs defaultValue="records">
+            <TabsList className="mb-4">
+              <TabsTrigger value="records">Records</TabsTrigger>
+              <TabsTrigger value="append">Append</TabsTrigger>
+              <TabsTrigger value="tail">Tail</TabsTrigger>
+              <TabsTrigger value="partitions">Partitions</TabsTrigger>
+            </TabsList>
+            <TabsContent value="records"><RecordsTab profileId={profileId} streamId={streamId} partitions={partitions} /></TabsContent>
+            <TabsContent value="append"><AppendTab profileId={profileId} streamId={streamId} partitions={partitions} onAppended={refresh} /></TabsContent>
+            <TabsContent value="tail"><TailTab profileId={profileId} streamId={streamId} partitions={partitions} /></TabsContent>
+            <TabsContent value="partitions">
+              <div className="border-t border-rule-strong pt-3">
                 <Table>
                   <TableHeader><TableRow><TableHead>Partition</TableHead><TableHead className="text-right">Base offset</TableHead><TableHead className="text-right">Next offset</TableHead><TableHead className="text-right">Retained</TableHead></TableRow></TableHeader>
                   <TableBody>
@@ -204,10 +262,10 @@ export function StreamDetailView({ profileId, streamId, onBack }: { profileId: s
                     ))}
                   </TableBody>
                 </Table>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
+              </div>
+            </TabsContent>
+          </Tabs>
+        </>
       )}
       {detail && (
         <RetentionDialog
@@ -218,15 +276,20 @@ export function StreamDetailView({ profileId, streamId, onBack }: { profileId: s
       <ConfirmDestructive
         open={deleteOpen} onOpenChange={setDeleteOpen} confirmId={streamId} inFlight={busy}
         title="Delete stream"
+        confirmLabel="Delete stream"
         description="Queues a conditional durable deletion job that removes the stream, all retained records, and its consumer-group offsets."
+        context={connectionContext}
+        error={dialogError}
         onConfirm={() => void deleteStream()}
       />
       {truncatePartition !== null && detail && (
         <TruncateDialog
-          open onOpenChange={() => setTruncatePartition(null)} partition={truncatePartition}
+          open onOpenChange={() => { setTruncatePartition(null); setDialogError(null); }} partition={truncatePartition}
           baseOffset={partitions.find((entry) => entry.partition === truncatePartition)?.base_offset ?? 0}
           nextOffset={partitions.find((entry) => entry.partition === truncatePartition)?.next_offset ?? 0}
           inFlight={busy}
+          context={connectionContext}
+          error={dialogError}
           onConfirm={(baseOffset) => void truncate(truncatePartition, baseOffset)}
         />
       )}
@@ -234,8 +297,9 @@ export function StreamDetailView({ profileId, streamId, onBack }: { profileId: s
   );
 }
 
-function TruncateDialog({ open, onOpenChange, partition, baseOffset, nextOffset, inFlight, onConfirm }: {
-  open: boolean; onOpenChange: (open: boolean) => void; partition: number; baseOffset: number; nextOffset: number; inFlight: boolean; onConfirm: (baseOffset: number) => void;
+function TruncateDialog({ open, onOpenChange, partition, baseOffset, nextOffset, inFlight, context, error, onConfirm }: {
+  open: boolean; onOpenChange: (open: boolean) => void; partition: number; baseOffset: number; nextOffset: number; inFlight: boolean;
+  context?: ReactNode; error?: unknown; onConfirm: (baseOffset: number) => void;
 }) {
   const [value, setValue] = useState(String(nextOffset));
   return (
@@ -243,9 +307,11 @@ function TruncateDialog({ open, onOpenChange, partition, baseOffset, nextOffset,
       <DialogContent className="sm:max-w-md">
         <DialogHeader><DialogTitle>Truncate partition {partition}</DialogTitle>
           <DialogDescription>Advances the retained base offset. Retained range: {baseOffset} → {nextOffset}. Runs as a bounded asynchronous job.</DialogDescription></DialogHeader>
-        <div className="grid gap-2 py-2">
+        <div className="grid gap-1.5 py-2">
           <Label htmlFor="truncate-offset">New base offset</Label>
           <Input id="truncate-offset" inputMode="numeric" value={value} onChange={(event) => setValue(event.target.value)} className="font-mono" />
+          {context && <p className="text-xs text-muted-foreground">{context}</p>}
+          {error ? <ErrorBanner error={error} /> : null}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
@@ -282,9 +348,9 @@ function RetentionDialog({ open, onOpenChange, profileId, streamId, detail, etag
         <DialogHeader><DialogTitle>Retention ceilings</DialogTitle>
           <DialogDescription>Both values are required and replace the current ceilings atomically (ETag {etag ?? "unknown"}).</DialogDescription></DialogHeader>
         <div className="grid gap-4 py-2">
-          <div className="grid gap-2"><Label htmlFor="retention-bytes">Max retained bytes (0 = unlimited)</Label>
+          <div className="grid gap-1.5"><Label htmlFor="retention-bytes">Max retained bytes (0 = unlimited)</Label>
             <Input id="retention-bytes" inputMode="numeric" value={bytes} onChange={(event) => setBytes(event.target.value)} className="font-mono" /></div>
-          <div className="grid gap-2"><Label htmlFor="retention-age">Max retained age ms (0 = unlimited)</Label>
+          <div className="grid gap-1.5"><Label htmlFor="retention-age">Max retained age ms (0 = unlimited)</Label>
             <Input id="retention-age" inputMode="numeric" value={ageMs} onChange={(event) => setAgeMs(event.target.value)} className="font-mono" /></div>
           <p className="text-xs text-muted-foreground">Before: {formatBytes(detail.max_retained_bytes)} / {formatDuration(detail.max_retained_age_ms)}</p>
           {error && <ErrorBanner error={error} />}
@@ -318,42 +384,45 @@ function RecordsTab({ profileId, streamId, partitions }: { profileId: string; st
 
   return (
     <div className="grid gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Select value={partition} onValueChange={(value) => { setPartition(value); setOffset("0"); }}>
-          <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {partitions.map((entry) => <SelectItem key={entry.partition} value={String(entry.partition)}>Partition {entry.partition}</SelectItem>)}
-          </SelectContent>
-        </Select>
-        <Input value={offset} onChange={(event) => setOffset(event.target.value)} inputMode="numeric" className="w-32 font-mono" placeholder="offset" />
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="grid gap-1.5">
+          <Label htmlFor="records-partition">Partition</Label>
+          <Select value={partition} onValueChange={(value) => { setPartition(value); setOffset("0"); }}>
+            <SelectTrigger id="records-partition" className="w-40"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {partitions.map((entry) => <SelectItem key={entry.partition} value={String(entry.partition)}>Partition {entry.partition}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="records-offset">Offset</Label>
+          <Input id="records-offset" value={offset} onChange={(event) => setOffset(event.target.value)} inputMode="numeric" className="w-32 font-mono" />
+        </div>
         <Button size="sm" variant="outline" onClick={() => void load(Number(offset) || 0)} disabled={busy}>Fetch from offset</Button>
         <Button size="sm" variant="ghost" onClick={() => { setOffset(String(nextOffsetOf)); void load(nextOffsetOf); }} disabled={busy || nextOffsetOf === 0}>Latest</Button>
       </div>
       {error && <ErrorBanner error={error} onRetry={() => void load(Number(offset) || 0)} />}
       <div className="grid gap-3">
+        {busy && records.length === 0 && <div aria-busy="true" className="grid gap-2">{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-20 w-full" />)}</div>}
         {records.map((record) => (
-          <Card key={`${record.partition}:${record.offset}`}>
-            <CardHeader className="pb-1">
-              <CardTitle className="text-xs font-mono font-normal text-muted-foreground flex items-center gap-2">
-                partition {record.partition} · offset {record.offset}
-                {record.key && <Badge variant="outline" className="text-[10px] font-normal">keyed</Badge>}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-2">
-              {record.key && (
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">Key</p>
-                  <BinaryValue value={record.key as BinaryField} compact />
-                </div>
-              )}
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Body</p>
-                <BinaryValue value={record.body as BinaryField} />
+          <div key={`${record.partition}:${record.offset}`} className="border bg-card p-3">
+            <p className="mb-2 flex items-center gap-2 font-mono text-xs text-muted-foreground">
+              partition {record.partition} · offset {record.offset}
+              {record.key && <Badge variant="neutral" className="text-xs">keyed</Badge>}
+            </p>
+            {record.key && (
+              <div className="mb-2">
+                <p className="mb-1 text-xs text-muted-foreground">Key</p>
+                <BinaryValue value={record.key as BinaryField} compact />
               </div>
-            </CardContent>
-          </Card>
+            )}
+            <div>
+              <p className="mb-1 text-xs text-muted-foreground">Body</p>
+              <BinaryValue value={record.body as BinaryField} />
+            </div>
+          </div>
         ))}
-        {records.length === 0 && !busy && <p className="text-sm text-muted-foreground">No records in range.</p>}
+        {records.length === 0 && !busy && <p className="text-sm text-muted-foreground">No records in this range. Partition and offset are independent — an offset belongs to one partition.</p>}
       </div>
     </div>
   );
@@ -408,43 +477,63 @@ function AppendTab({ profileId, streamId, partitions, onAppended }: { profileId:
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center justify-between">Append records
-        <label className="flex items-center gap-2 text-xs font-normal text-muted-foreground"><Switch checked={batch} onCheckedChange={setBatch} className="scale-90" /> batch mode</label>
-      </CardTitle></CardHeader>
-      <CardContent className="grid gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Tabs value={mode} onValueChange={(value) => setMode(value as typeof mode)}>
-            <TabsList><TabsTrigger value="text">Text</TabsTrigger><TabsTrigger value="json">JSON</TabsTrigger><TabsTrigger value="base64">Base64</TabsTrigger></TabsList>
-          </Tabs>
-          <Select value={partition} onValueChange={setPartition}>
-            <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Partition: auto (keyed)</SelectItem>
-              {partitions.map((entry) => <SelectItem key={entry.partition} value={String(entry.partition)}>Partition {entry.partition}</SelectItem>)}
-            </SelectContent>
-          </Select>
-          {!batch && <Input value={keyText} onChange={(event) => setKeyText(event.target.value)} placeholder="Optional partition key" spellCheck={false} className="max-w-xs" />}
-        </div>
-        {!batch ? (
-          <>
-            <Textarea value={raw} onChange={(event) => setRaw(event.target.value)} rows={4} spellCheck={false} className="font-mono text-xs" />
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-muted-foreground">{draft.bytes} bytes</span>
-              {draft.error && <span className="text-xs text-destructive">{draft.error}</span>}
-              <Button className="ml-auto" onClick={() => void appendOne()} disabled={busy || !draft.base64 || Boolean(draft.error)}><Send className="size-4 mr-1" />Append</Button>
+    <div className="border-t border-rule-strong pt-3">
+      <Section
+        title="Append records"
+        actions={
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Switch checked={batch} onCheckedChange={setBatch} aria-label="Batch mode" /> batch mode
+          </label>
+        }
+      >
+        <div className="grid gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Tabs value={mode} onValueChange={(value) => setMode(value as typeof mode)}>
+              <TabsList aria-label="Encoding"><TabsTrigger value="text">Text</TabsTrigger><TabsTrigger value="json">JSON</TabsTrigger><TabsTrigger value="base64">Base64</TabsTrigger></TabsList>
+            </Tabs>
+            <div className="grid gap-1.5">
+              <Label htmlFor="append-partition">Partition</Label>
+              <Select value={partition} onValueChange={setPartition}>
+                <SelectTrigger id="append-partition" className="w-44"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">auto (keyed)</SelectItem>
+                  {partitions.map((entry) => <SelectItem key={entry.partition} value={String(entry.partition)}>Partition {entry.partition}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
-          </>
-        ) : (
-          <>
-            <p className="text-xs text-muted-foreground">One record body per line (up to 100), written as one durable WAL batch.</p>
-            <Textarea value={batchLines} onChange={(event) => setBatchLines(event.target.value)} rows={6} spellCheck={false} className="font-mono text-xs" />
-            <Button className="ml-auto justify-self-end" onClick={() => void appendBatch()} disabled={busy || batchLines.trim().length === 0}><Send className="size-4 mr-1" />Append batch</Button>
-          </>
-        )}
-        {error && <ErrorBanner error={error} />}
-      </CardContent>
-    </Card>
+            {!batch && (
+              <div className="grid flex-1 gap-1.5">
+                <Label htmlFor="append-key">Partition key (optional)</Label>
+                <Input id="append-key" value={keyText} onChange={(event) => setKeyText(event.target.value)} spellCheck={false} className="max-w-xs" />
+              </div>
+            )}
+          </div>
+          {!batch ? (
+            <>
+              <div className="grid gap-1.5">
+                <Label htmlFor="append-body">Record body</Label>
+                <Textarea id="append-body" value={raw} onChange={(event) => setRaw(event.target.value)} rows={4} spellCheck={false} className="max-w-[640px] font-mono text-xs" />
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-xs text-muted-foreground">{draft.bytes} bytes</span>
+                {draft.error && <span className="text-xs text-destructive">{draft.error}</span>}
+                <Button className="ml-auto" onClick={() => void appendOne()} disabled={busy || !draft.base64 || Boolean(draft.error)}><Send className="size-4" />{busy ? "Appending…" : "Append"}</Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground">One record body per line (up to 100), written as one durable WAL batch.</p>
+              <div className="grid gap-1.5">
+                <Label htmlFor="append-batch">Record bodies, one per line</Label>
+                <Textarea id="append-batch" value={batchLines} onChange={(event) => setBatchLines(event.target.value)} rows={6} spellCheck={false} className="max-w-[640px] font-mono text-xs" />
+              </div>
+              <Button className="justify-self-end" onClick={() => void appendBatch()} disabled={busy || batchLines.trim().length === 0}><Send className="size-4" />{busy ? "Appending…" : "Append batch"}</Button>
+            </>
+          )}
+          {error && <ErrorBanner error={error} />}
+        </div>
+      </Section>
+    </div>
   );
 }
 
@@ -498,39 +587,41 @@ function TailTab({ profileId, streamId, partitions }: { profileId: string; strea
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-2"><CardTitle className="text-sm">Live tail</CardTitle></CardHeader>
-      <CardContent className="grid gap-3">
-        <p className="text-xs text-muted-foreground">
-          Bounded SSE worker through the console gateway. The server ends each worker after a short lifetime and throttles to the advertised event rate; the gateway buffers for safety, so events arrive as one bounded page. Tailing stops on navigation or disconnect.
-        </p>
-        <div className="flex items-end gap-2">
-          <div className="grid gap-1"><Label>Partition</Label>
-            <Select value={partition} onValueChange={setPartition}>
-              <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
-              <SelectContent>{partitions.map((entry) => <SelectItem key={entry.partition} value={String(entry.partition)}>{entry.partition}</SelectItem>)}</SelectContent>
-            </Select>
+    <div className="border-t border-rule-strong pt-3">
+      <Section title="Live tail">
+        <div className="grid gap-3">
+          <p className="max-w-3xl text-xs text-muted-foreground">
+            Bounded SSE worker through the console gateway. The server ends each worker after a short lifetime and throttles to the advertised event rate; the gateway buffers for safety, so events arrive as one bounded page. Tailing stops on navigation or disconnect.
+          </p>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="grid gap-1.5"><Label htmlFor="tail-partition">Partition</Label>
+              <Select value={partition} onValueChange={setPartition}>
+                <SelectTrigger id="tail-partition" className="w-36"><SelectValue /></SelectTrigger>
+                <SelectContent>{partitions.map((entry) => <SelectItem key={entry.partition} value={String(entry.partition)}>Partition {entry.partition}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5"><Label htmlFor="tail-offset">Offset</Label>
+              <Input id="tail-offset" value={offset} onChange={(event) => setOffset(event.target.value)} inputMode="numeric" className="w-28 font-mono" /></div>
+            {running
+              ? <Button variant="outline" onClick={stop} aria-live="polite">Stop tail</Button>
+              : <Button onClick={() => void start()} aria-live="polite"><Activity className="size-4" />Start tail</Button>}
+            {running && <span className="inline-flex items-center gap-1.5 text-xs text-info"><StatusDot tone="info" />Tail running</span>}
           </div>
-          <div className="grid gap-1"><Label htmlFor="tail-offset">Offset</Label>
-            <Input id="tail-offset" value={offset} onChange={(event) => setOffset(event.target.value)} inputMode="numeric" className="w-28 font-mono" /></div>
-          {running
-            ? <Button variant="outline" onClick={stop}>Stop</Button>
-            : <Button onClick={() => void start()}><Activity className="size-4 mr-1" />Start tail</Button>}
-          {running && <StateBadge state="running" />}
+          {error && <ErrorBanner error={error} />}
+          <div className="grid gap-2">
+            {events.map((event) => event.kind === "offset_out_of_range"
+              ? <div key={`${event.partition}:${event.offset}`} className="border border-warning/40 bg-warning-surface px-3 py-2 text-sm text-warning">offset_out_of_range — retention advanced past offset {event.offset}.</div>
+              : (
+                <div key={`${event.partition}:${event.offset}`} className="border p-2">
+                  <p className="mb-1 font-mono text-xs text-muted-foreground">partition {event.partition} · offset {event.offset}</p>
+                  <BinaryValue value={event.body} compact />
+                </div>
+              ))}
+            {events.length === 0 && running && <p className="text-sm text-muted-foreground">Waiting for tail events…</p>}
+          </div>
         </div>
-        {error && <ErrorBanner error={error} />}
-        <div className="grid gap-2">
-          {events.map((event) => event.kind === "offset_out_of_range"
-            ? <div key={`${event.partition}:${event.offset}`} className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm">offset_out_of_range — retention advanced past offset {event.offset}.</div>
-            : (
-              <div key={`${event.partition}:${event.offset}`} className="rounded-lg border p-2">
-                <p className="text-xs font-mono text-muted-foreground mb-1">partition {event.partition} · offset {event.offset}</p>
-                <BinaryValue value={event.body} compact />
-              </div>
-            ))}
-        </div>
-      </CardContent>
-    </Card>
+      </Section>
+    </div>
   );
 }
 

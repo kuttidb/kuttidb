@@ -1,11 +1,10 @@
 import { useCallback, useState } from "react";
-import { Database, ListOrdered, Workflow, Gauge, ScrollText, ArrowRight } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ArrowRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ErrorBanner } from "@/components/error-banner";
-import { LastRefreshed, PageHeader, StateBadge } from "@/components/shared";
+import { DetailGrid, EmptyState, LastRefreshed, PageHeader, Section, StateBadge, StatusDot, SummaryCell, SummaryStrip } from "@/components/shared";
 import { usePolling } from "@/hooks/use-polling";
 import { useConnections } from "@/state/connections";
 import { admin, list, ApiError } from "@/lib/api";
@@ -30,131 +29,179 @@ export function OverviewView({ profileId, onNavigate }: { profileId: string; onN
     setJobs(jobsResponse.data);
   }, [profileId]);
 
-  const { lastUpdated, error, refresh } = usePolling(loader, 15_000);
+  const { lastUpdated, error, stale, refresh } = usePolling(loader, 15_000);
   const caps = capabilities.get(profileId);
-  const auditHealthy = status?.audit?.healthy ?? true;
-  const persistenceHealthy = status?.persistence_healthy ?? true;
+  // Health fields are unknown until the first status read; never default to healthy.
+  const auditHealthy: boolean | null = status ? status.audit.healthy : null;
+  const persistenceHealthy: boolean | null = status ? status.persistence_healthy : null;
   const ready = status?.ready ?? false;
+  /**
+   * Real hash links with exactly one connection prefix (matching the shell's
+   * `#/c/{profileId}/...` routes). The router picks these up directly.
+   */
+  const hrefFor = useCallback((path: string[]) =>
+    `#/c/${encodeURIComponent(profileId)}/${path.map(encodeURIComponent).join("/")}`, [profileId]);
 
   return (
     <div>
       <PageHeader
         title="Overview"
         description="Bounded process and engine health. Dashboard state is weakly consistent — not a transactional snapshot."
-        actions={<LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} polling />}
+        actions={
+          <span className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground">Weakly consistent</span>
+            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} stale={stale} />
+          </span>
+        }
       />
-      {error && !status && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
-      {!status && !error && (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-28 rounded-xl" />)}
-        </div>
+      {mutationsBlocked(profileId) && (
+        <ErrorBanner error={new ApiError("audit_unavailable", "The audit trail is unhealthy. All mutations are blocked for this connection; reads remain available.", 503)} className="mb-4" />
       )}
-      {status && (
+      {error && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
+
+      {!status ? (
         <>
-          {mutationsBlocked(profileId) && (
-            <ErrorBanner error={new ApiError("audit_unavailable", "The audit trail is unhealthy. All mutations are blocked for this connection; reads remain available.", 503)} className="mb-4" />
-          )}
-          <div className="rounded-xl border bg-card p-4 mb-4">
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-              <span className="flex items-center gap-2 font-medium">
-                <span className={`size-2 rounded-full ${ready && persistenceHealthy ? "bg-chart-3" : "bg-destructive"}`} />
-                {ready ? (persistenceHealthy ? "Ready" : "Degraded") : "Not ready"}
-              </span>
-              <span className="text-muted-foreground">v{status.server_version}</span>
-              <span className="text-muted-foreground">uptime {formatDuration(status.uptime_seconds * 1000)}</span>
-              <Badge variant="outline" className="font-mono text-[11px]">{status.durability}</Badge>
-              <Badge variant="outline" className={`font-mono text-[11px] ${auditHealthy ? "bg-chart-3/15 text-chart-3 border-transparent" : "bg-destructive/10 text-destructive border-transparent"}`}>
-                audit {auditHealthy ? "healthy" : "unhealthy"}
-              </Badge>
-              <span className="text-muted-foreground text-xs ml-auto">{status.event_loops} event loops · {status.event_backend}</span>
+          <div className="mb-6 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+            <span className="flex items-center gap-2 font-medium text-muted-foreground">
+              <StatusDot tone="neutral" />
+              {error ? "Unknown" : "Checking…"}
+            </span>
+            <span className="text-xs text-muted-foreground">Readiness, durability, uptime, and audit state stay unknown until the first status read completes.</span>
+          </div>
+          {!error && (
+            <div className="grid gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-3">
+                {Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-24" />)}
+              </div>
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+                <Skeleton className="h-48 lg:col-span-2" />
+                <Skeleton className="h-48" />
+              </div>
             </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="mb-6 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+            <span className="flex items-center gap-2 font-medium">
+              <StatusDot tone={ready && persistenceHealthy ? "success" : "destructive"} />
+              {ready ? (persistenceHealthy ? "Ready" : "Degraded") : "Not ready"}
+            </span>
+            <span className="text-muted-foreground">v{status.server_version}</span>
+            <span className="text-muted-foreground">uptime {formatDuration(status.uptime_seconds * 1000)}</span>
+            <Badge variant="outline" className="font-mono text-xs">{status.durability}</Badge>
+            <Badge variant={auditHealthy ? "success" : "destructive"} className="font-mono text-xs">
+              audit {auditHealthy ? "healthy" : "unhealthy"}
+            </Badge>
+            <span className="text-muted-foreground text-xs ml-auto">{status.event_loops} event loops · {status.event_backend}</span>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 mb-4">
-            <EngineCard
-              icon={<Database className="size-4" />} title="Keyspace" onOpen={() => onNavigate(["c", profileId, "keyspace"])}
-              rows={[["entries", status.keyspace.entry_count], ["live bytes", formatBytes(status.keyspace.live_bytes)], ["expired", status.keyspace.expired_count], ["evicted", status.keyspace.evicted_count]]}
+          <SummaryStrip className="mb-6">
+            <SummaryCell
+              label={<SummaryLink href={hrefFor(["keyspace"])}>Keyspace</SummaryLink>}
+              quantity={status.keyspace.entry_count}
+              facts={`Live bytes ${formatBytes(status.keyspace.live_bytes)} · Expired ${status.keyspace.expired_count} · Evicted ${status.keyspace.evicted_count}`}
             />
-            <EngineCard
-              icon={<ListOrdered className="size-4" />} title="Queues" onOpen={() => onNavigate(["c", profileId, "queues"])}
-              rows={[["queues", status.queues.count], ["ready", status.queues.ready_depth], ["in-flight", status.queues.in_flight], ["dead-letter", status.queues.dead_letter_count]]}
+            <SummaryCell
+              label={<SummaryLink href={hrefFor(["queues"])}>Queues</SummaryLink>}
+              quantity={status.queues.count}
+              facts={`Ready ${status.queues.ready_depth} · In flight ${status.queues.in_flight} · Dead letter ${status.queues.dead_letter_count}`}
             />
-            <EngineCard
-              icon={<Workflow className="size-4" />} title="Streams" onOpen={() => onNavigate(["c", profileId, "streams"])}
-              rows={[["streams", status.streams.count], ["partitions", status.streams.partition_count], ["retained", formatBytes(status.streams.retained_bytes)], ["groups", status.streams.group_count]]}
+            <SummaryCell
+              label={<SummaryLink href={hrefFor(["streams"])}>Streams</SummaryLink>}
+              quantity={status.streams.count}
+              facts={`Partitions ${status.streams.partition_count} · Retained ${formatBytes(status.streams.retained_bytes)} · Groups ${status.streams.group_count}`}
             />
-            <EngineCard
-              icon={<Gauge className="size-4" />} title="Management pressure"
-              rows={[["tails", status.management.active_tails], ["deliveries", status.management.active_deliveries], ["claims", status.management.active_claims], ["jobs", `${status.management.queued_jobs}q / ${status.management.running_jobs}r`]]}
-            />
-          </div>
+          </SummaryStrip>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium flex items-center gap-2"><ScrollText className="size-4 text-muted-foreground" />Recent jobs</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {jobs.length === 0
-                  ? <p className="text-sm text-muted-foreground">No maintenance jobs yet.</p>
-                  : (
-                    <ul className="space-y-1.5">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <Section title="Recent jobs" className="lg:col-span-2">
+              {jobs.length === 0
+                ? <EmptyState title="No maintenance jobs yet." hint="Maintenance jobs appear here after they run." className="px-0" />
+                : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Job</TableHead>
+                        <TableHead>Kind</TableHead>
+                        <TableHead>State</TableHead>
+                        <TableHead className="text-right"><span className="sr-only">Actions</span></TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
                       {jobs.map((job) => (
-                        <li key={job.job_id} className="flex items-center gap-2 text-sm">
-                          <StateBadge state={job.state} />
-                          <span className="font-mono text-xs">{job.job_id}</span>
-                          <span className="text-muted-foreground truncate">{job.kind}</span>
-                          <Button variant="ghost" size="sm" className="ml-auto h-6 px-2 text-xs" onClick={() => onNavigate(["c", profileId, "operations", "maintenance"])}>
-                            view <ArrowRight className="size-3" />
-                          </Button>
-                        </li>
+                        <TableRow key={job.job_id}>
+                          <TableCell className="font-mono text-xs">{job.job_id}</TableCell>
+                          <TableCell className="text-muted-foreground">{job.kind}</TableCell>
+                          <TableCell><StateBadge state={job.state} /></TableCell>
+                          <TableCell className="text-right">
+                            <a className="inline-flex h-6 items-center gap-1 px-2 text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-foreground" href={hrefFor(["operations", "maintenance"])}>
+                              view <ArrowRight className="size-3" />
+                            </a>
+                          </TableCell>
+                        </TableRow>
                       ))}
-                    </ul>
-                  )}
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium">Persistence & engines</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex flex-wrap gap-2">
-                  {maintenance.map((engine) => (
-                    <Badge key={engine.engine} variant="outline" className={`font-mono text-[11px] ${engine.checkpoint_available ? "bg-chart-3/15 text-chart-3 border-transparent" : "bg-muted text-muted-foreground border-transparent"}`}>
-                      {engine.engine}: checkpoint {engine.checkpoint_available ? "available" : "unavailable"}
-                    </Badge>
-                  ))}
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Enabled engines: {(caps?.enabled_engines ?? []).join(", ") || "unknown"}. Contract {caps?.management_api_contract ?? "?"}.
-                  Queue persistence {status.queues.persistence_healthy ? "healthy" : "unhealthy"}, stream persistence {status.streams.persistence_healthy ? "healthy" : "unhealthy"}.
-                </p>
+                    </TableBody>
+                  </Table>
+                )}
+            </Section>
+            <Section title="Persistence & engines">
+              <div className="grid gap-3">
+                <DetailGrid
+                  rows={[
+                    ...maintenance.map((engine) => ({
+                      label: engine.engine,
+                      value: (
+                        <span className="inline-flex items-center gap-1.5">
+                          <StatusDot tone={engine.checkpoint_available ? "success" : "neutral"} />
+                          checkpoint {engine.checkpoint_available ? "available" : "unavailable"}
+                        </span>
+                      )
+                    })),
+                    { label: "Enabled engines", value: (caps?.enabled_engines ?? []).join(", ") || "unknown" },
+                    { label: "API contract", value: caps?.management_api_contract ?? "?", mono: true },
+                    { label: "Queue persistence", value: status.queues.persistence_healthy ? "healthy" : "unhealthy" },
+                    { label: "Stream persistence", value: status.streams.persistence_healthy ? "healthy" : "unhealthy" }
+                  ]}
+                />
                 {loadError && <ErrorBanner error={loadError} />}
-              </CardContent>
-            </Card>
+              </div>
+            </Section>
           </div>
+
+          <Section title="Management pressure" className="mt-6">
+            <div className="flex flex-wrap gap-x-10 gap-y-3 text-sm">
+              {([
+                ["Active tails", status.management.active_tails],
+                ["Active deliveries", status.management.active_deliveries],
+                ["Active claims", status.management.active_claims],
+                ["Queued jobs", status.management.queued_jobs],
+                ["Running jobs", status.management.running_jobs]
+              ] as [string, number][]).map(([label, value]) => (
+                <div key={label}>
+                  <p className="text-xs text-muted-foreground">{label}</p>
+                  <p className="font-medium tabular-nums">{value}</p>
+                </div>
+              ))}
+            </div>
+          </Section>
         </>
       )}
     </div>
   );
 }
 
-function EngineCard({ icon, title, rows, onOpen }: { icon: React.ReactNode; title: string; rows: [string, React.ReactNode][]; onOpen?: () => void }) {
+/**
+ * Summary headings and job links are real hash links with a single connection
+ * prefix, so they are announced as links and survive middle-click/new-tab.
+ */
+function SummaryLink({ children, href }: { children: React.ReactNode; href: string }) {
   return (
-    <Card className={onOpen ? "cursor-pointer hover:border-primary/40 transition-colors" : undefined} onClick={onOpen}>
-      <CardHeader className="pb-1">
-        <CardTitle className="text-sm font-medium flex items-center gap-2 text-muted-foreground">{icon}{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-          {rows.map(([label, value]) => (
-            <div key={label}>
-              <dt className="text-xs text-muted-foreground">{label}</dt>
-              <dd className="font-medium tabular-nums">{value}</dd>
-            </div>
-          ))}
-        </dl>
-      </CardContent>
-    </Card>
+    <a
+      href={href}
+      className="text-sm font-medium underline decoration-border underline-offset-4 transition-colors hover:decoration-foreground"
+    >
+      {children}
+    </a>
   );
 }

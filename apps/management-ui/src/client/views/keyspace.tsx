@@ -3,7 +3,6 @@ import { Plus, Trash2, Layers, KeyRound } from "lucide-react";
 import { toast } from "sonner";
 import { usePolling } from "@/hooks/use-polling";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,7 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { BinaryValue, encodeDraft } from "@/components/binary-value";
 import { ConfirmDestructive } from "@/components/confirm";
 import { ErrorBanner } from "@/components/error-banner";
-import { CursorPager, CopyId, LastRefreshed, PageHeader } from "@/components/shared";
+import { ConnectionContextLine, CursorPager, CopyId, LastRefreshed, PageHeader, Section, Skeleton } from "@/components/shared";
 import { admin, ApiError, list, newIdempotencyKey } from "@/lib/api";
 import { base64FromUtf8, isValidB64uId, nameFromId, idFromName } from "@/lib/codec";
 import { formatBytes, formatRelative } from "@/lib/format";
@@ -51,8 +50,10 @@ export function KeyspaceView({ profileId }: { profileId: string }) {
     setKeyspace(aggregate.json.data);
   }, [profileId, basePath, cursor]);
 
-  const { lastUpdated, error, refresh } = usePolling(loader, 20_000);
+  const { lastUpdated, error, stale, refresh } = usePolling(loader, 20_000);
   const resetToFirstPage = () => { setBackStack([]); setCursor(null); refresh(); };
+  const loadedOnce = lastUpdated !== null || error !== null;
+  const filtered = prefix.trim().length > 0 || expires !== "all";
 
   return (
     <div>
@@ -61,63 +62,100 @@ export function KeyspaceView({ profileId }: { profileId: string }) {
         description="Default keyspace entries. Listing is metadata-only and weakly consistent; cursors expire after ten minutes and on server restart."
         actions={
           <>
-            <Button variant="outline" size="sm" onClick={() => setClaimsOpen(true)}><KeyRound className="size-4 mr-1" />Claims</Button>
-            <Button variant="outline" size="sm" onClick={() => setBatchOpen(true)}><Layers className="size-4 mr-1" />Batch</Button>
-            <Button size="sm" onClick={() => setPutOpen(true)}><Plus className="size-4 mr-1" />Put entry</Button>
+            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} stale={stale} />
+            <Button variant="outline" size="sm" onClick={() => setClaimsOpen(true)}><KeyRound className="size-4" />Claims</Button>
+            <Button variant="outline" size="sm" onClick={() => setBatchOpen(true)}><Layers className="size-4" />Batch</Button>
+            <Button size="sm" onClick={() => setPutOpen(true)}><Plus className="size-4" />Put entry</Button>
           </>
         }
       />
       {keyspace && (
-        <div className="grid gap-3 sm:grid-cols-4 mb-4">
-          <MiniStat label="entries" value={keyspace.entry_count} />
-          <MiniStat label="live bytes" value={formatBytes(keyspace.live_bytes)} />
-          <MiniStat label="expired" value={keyspace.expired_count} />
-          <MiniStat label="revision" value={`k-${keyspace.revision}`} mono />
+        <div className="mb-4 border-y border-rule-strong">
+          <dl className="flex flex-wrap gap-x-8 gap-y-1 py-3 text-sm">
+            <div className="flex gap-2"><dt className="text-muted-foreground">Entries</dt><dd className="font-medium tabular-nums">{keyspace.entry_count}</dd></div>
+            <div className="flex gap-2"><dt className="text-muted-foreground">Live bytes</dt><dd className="font-medium tabular-nums">{formatBytes(keyspace.live_bytes)}</dd></div>
+            <div className="flex gap-2"><dt className="text-muted-foreground">Expired</dt><dd className="font-medium tabular-nums">{keyspace.expired_count}</dd></div>
+            <div className="flex gap-2"><dt className="text-muted-foreground">Revision</dt><dd className="font-mono text-xs">k-{keyspace.revision}</dd></div>
+          </dl>
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <Input value={prefix} onChange={(event) => setPrefix(event.target.value)} placeholder="Prefix filter (plain text)" className="w-56" />
-        <Select value={expires} onValueChange={(value) => { setExpires(value as ExpiresFilter); setBackStack([]); setCursor(null); }}>
-          <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All entries</SelectItem>
-            <SelectItem value="present">With expiry</SelectItem>
-            <SelectItem value="none">Without expiry</SelectItem>
-          </SelectContent>
-        </Select>
+      <div className="mb-3 flex flex-wrap items-end gap-2">
+        <div className="grid gap-1.5">
+          <Label htmlFor="keyspace-prefix">Prefix search (server-side)</Label>
+          <Input id="keyspace-prefix" value={prefix} onChange={(event) => setPrefix(event.target.value)} placeholder="report:" className="w-56" spellCheck={false} />
+        </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="keyspace-expires">Expiry</Label>
+          <Select value={expires} onValueChange={(value) => { setExpires(value as ExpiresFilter); setBackStack([]); setCursor(null); }}>
+            <SelectTrigger id="keyspace-expires" className="w-40"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All entries</SelectItem>
+              <SelectItem value="present">With expiry</SelectItem>
+              <SelectItem value="none">Without expiry</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
         <Button variant="ghost" size="sm" onClick={resetToFirstPage}>Apply</Button>
-        <div className="ml-auto"><LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} /></div>
       </div>
 
       {error && entries.length === 0 && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Key</TableHead>
-                <TableHead>Entry ID</TableHead>
-                <TableHead className="text-right">Size</TableHead>
-                <TableHead className="text-right">Expires</TableHead>
+      {error && stale && entries.length > 0 && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
+      {!loadedOnce ? (
+        <div className="grid gap-2" aria-busy="true">
+          {Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="h-11 w-full" />)}
+          <p className="text-sm text-muted-foreground">Checking entries…</p>
+        </div>
+      ) : entries.length === 0 ? (
+        <div className="border-t border-rule-strong pt-2">
+          {filtered ? (
+            <div className="grid justify-items-start gap-1.5 px-4 py-10">
+              <p className="text-sm font-medium">No keys match this prefix.</p>
+              <p className="text-sm text-muted-foreground">Adjust the prefix or expiry filter and apply again.</p>
+              <Button variant="outline" size="sm" className="mt-2" onClick={() => { setPrefix(""); setExpires("all"); resetToFirstPage(); }}>
+                Clear filter
+              </Button>
+            </div>
+          ) : (
+            <div className="grid justify-items-start gap-1.5 px-4 py-10">
+              <p className="text-sm font-medium">No entries yet.</p>
+              <p className="text-sm text-muted-foreground">Put a durable key to start using the keyspace.</p>
+              <Button size="sm" className="mt-2" onClick={() => setPutOpen(true)}><Plus className="size-4" />Put entry</Button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Key</TableHead>
+              <TableHead>Entry ID</TableHead>
+              <TableHead className="text-right">Size</TableHead>
+              <TableHead className="text-right">Expires</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {entries.map((entry) => (
+              <TableRow key={entry.id} className="cursor-pointer" onClick={() => void openEntry(profileId, entry.id, setSelected, setPageError)}>
+                <TableCell>
+                  <button
+                    type="button"
+                    className="text-left font-medium hover:underline"
+                    onClick={(event) => { event.stopPropagation(); void openEntry(profileId, entry.id, setSelected, setPageError); }}
+                  >
+                    {entry.key}
+                  </button>
+                </TableCell>
+                <TableCell><CopyId id={entry.id} /></TableCell>
+                <TableCell className="text-right tabular-nums">{formatBytes(entry.value_size)}</TableCell>
+                <TableCell className="text-right text-muted-foreground">
+                  {entry.expires_at === null ? "No expiry" : `${formatRelative(entry.expires_at * 1000)}${entry.remaining_ttl_ms !== null ? ` (${Math.round((entry.remaining_ttl_ms ?? 0) / 1000)}s)` : ""}`}
+                </TableCell>
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {entries.map((entry) => (
-                <TableRow key={entry.id} className="cursor-pointer" onClick={() => void openEntry(profileId, entry.id, setSelected, setPageError)}>
-                  <TableCell className="font-medium">{entry.key}</TableCell>
-                  <TableCell><CopyId id={entry.id} /></TableCell>
-                  <TableCell className="text-right tabular-nums">{formatBytes(entry.value_size)}</TableCell>
-                  <TableCell className="text-right text-muted-foreground">
-                    {entry.expires_at === null ? "never" : `${formatRelative(entry.expires_at * 1000)}${entry.remaining_ttl_ms !== null ? ` (${Math.round((entry.remaining_ttl_ms ?? 0) / 1000)}s)` : ""}`}
-                  </TableCell>
-                </TableRow>
-              ))}
-              {entries.length === 0 && <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground py-8">No entries match.</TableCell></TableRow>}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+            ))}
+          </TableBody>
+        </Table>
+      )}
       <div className="mt-3">
         <CursorPager
           nextCursor={meta?.nextCursor}
@@ -145,6 +183,7 @@ export function KeyspaceView({ profileId }: { profileId: string }) {
     </div>
   );
 }
+
 async function openEntry(profileId: string, id: string, setSelected: (entry: KeyspaceEntry) => void, setError: (error: Error) => void) {
   try {
     const response = await admin<{ data: KeyspaceEntry }>(profileId, `keyspaces/default/entries/${id}`);
@@ -152,15 +191,6 @@ async function openEntry(profileId: string, id: string, setSelected: (entry: Key
   } catch (reason) {
     setError(reason instanceof Error ? reason : new Error(String(reason)));
   }
-}
-
-function MiniStat({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
-  return (
-    <div className="rounded-xl border bg-card px-4 py-3">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`text-lg font-semibold tabular-nums ${mono ? "font-mono text-base" : ""}`}>{value}</p>
-    </div>
-  );
 }
 
 type ValueMode = "text" | "json" | "base64";
@@ -207,27 +237,34 @@ export function PutEntryDialog({ open, onOpenChange, profileId, existingKey, onD
           <DialogDescription>Durable put through the Management API. Values are stored as bytes; the byte count is exact.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-2">
-          <div className="grid gap-2">
+          <div className="grid gap-1.5">
             <div className="flex items-center justify-between">
               <Label htmlFor="entry-key">Key</Label>
               <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Switch checked={useRawId} onCheckedChange={setUseRawId} className="scale-90" /> raw b64u ID
+                <Switch checked={useRawId} onCheckedChange={setUseRawId} aria-label="Use raw b64u ID" /> raw b64u ID
               </label>
             </div>
-            <Input id="entry-key" value={keyText} onChange={(event) => setKeyText(event.target.value)} placeholder="greeting" spellCheck={false} />
-            {entryId.length > 0 && idValid && <p className="text-xs font-mono text-muted-foreground">{entryId}</p>}
+            <Input id="entry-key" value={keyText} onChange={(event) => setKeyText(event.target.value)} placeholder="greeting" spellCheck={false} aria-invalid={entryId.length > 0 && !idValid ? true : undefined} />
+            {entryId.length > 0 && idValid && <p className="font-mono text-xs text-muted-foreground">{entryId}</p>}
             {entryId.length > 0 && !idValid && <p className="text-xs text-destructive">Not a valid opaque entry ID.</p>}
           </div>
-          <Tabs value={mode} onValueChange={(value) => setMode(value as ValueMode)}>
-            <TabsList><TabsTrigger value="text">Text</TabsTrigger><TabsTrigger value="json">JSON</TabsTrigger><TabsTrigger value="base64">Base64</TabsTrigger></TabsList>
-          </Tabs>
-          <Textarea value={raw} onChange={(event) => setRaw(event.target.value)} rows={4} spellCheck={false} placeholder={mode === "base64" ? "aGVsbG8=" : "hello"} className="font-mono text-xs" />
-          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <div className="grid gap-1.5">
+            <Label>Encoding</Label>
+            <Tabs value={mode} onValueChange={(value) => setMode(value as ValueMode)}>
+              <TabsList aria-label="Value encoding"><TabsTrigger value="text">Text</TabsTrigger><TabsTrigger value="json">JSON</TabsTrigger><TabsTrigger value="base64">Base64</TabsTrigger></TabsList>
+            </Tabs>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="entry-value">Value ({mode})</Label>
+            <Textarea id="entry-value" value={raw} onChange={(event) => setRaw(event.target.value)} rows={4} spellCheck={false} className="font-mono text-xs" />
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
             <span>{draft.bytes} bytes</span>
             {draft.error && <span className="text-destructive">{draft.error}</span>}
-            <Label className="ml-auto flex items-center gap-2 font-normal">TTL seconds
-              <Input value={ttlSeconds} onChange={(event) => setTtlSeconds(event.target.value)} inputMode="numeric" placeholder="—" className="w-24 h-8" />
-            </Label>
+            <div className="ml-auto grid w-32 gap-1">
+              <Label htmlFor="entry-ttl" className="text-xs">TTL seconds</Label>
+              <Input id="entry-ttl" value={ttlSeconds} onChange={(event) => setTtlSeconds(event.target.value)} inputMode="numeric" className="h-8" />
+            </div>
           </div>
           {error && <ErrorBanner error={error} />}
         </div>
@@ -267,20 +304,23 @@ function EntryDialog({ entry, onClose, profileId, onDeleted }: { entry: Keyspace
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="break-all">{decodedName ?? entry.key}</DialogTitle>
-          <DialogDescription className="font-mono text-xs break-all">{entry.id}</DialogDescription>
+          <DialogDescription className="break-all font-mono text-xs">{entry.id}</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 py-2">
           <BinaryValue value={entry.value} />
           {error && <ErrorBanner error={error} />}
         </div>
         <DialogFooter>
-          <Button variant="destructive" onClick={() => setConfirmOpen(true)}><Trash2 className="size-4 mr-1" />Delete</Button>
           <Button variant="outline" onClick={onClose}>Close</Button>
+          <Button variant="destructive" onClick={() => setConfirmOpen(true)}><Trash2 className="size-4" />Delete</Button>
         </DialogFooter>
         <ConfirmDestructive
           open={confirmOpen} onOpenChange={setConfirmOpen} confirmId={entry.id} inFlight={busy}
           title="Delete keyspace entry"
           description="Removes this exact entry durably. The decoded name is only a preview — the opaque ID is authoritative."
+          context={<ConnectionContextLine profileId={profileId} />}
+          error={error}
+          confirmLabel="Delete entry"
           onConfirm={() => void remove()}
         />
       </DialogContent>
@@ -361,23 +401,39 @@ function BatchDialog({ open, onOpenChange, profileId, onDone }: { open: boolean;
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList><TabsTrigger value="put">Batch put</TabsTrigger><TabsTrigger value="delete">Batch delete</TabsTrigger><TabsTrigger value="get">Batch get</TabsTrigger></TabsList>
           <TabsContent value="put" className="grid gap-3 pt-2">
-            <Textarea value={putLines} onChange={(event) => setPutLines(event.target.value)} rows={5} className="font-mono text-xs" placeholder={"key=value\nkey2=value2"} spellCheck={false} />
-            <div className="flex items-center gap-2">
-              <Input value={ttlSeconds} onChange={(event) => setTtlSeconds(event.target.value)} placeholder="TTL seconds (optional)" inputMode="numeric" className="w-48 h-8" />
+            <div className="grid gap-1.5">
+              <Label htmlFor="batch-put-lines">Entries, one key=value per line</Label>
+              <Textarea id="batch-put-lines" value={putLines} onChange={(event) => setPutLines(event.target.value)} rows={5} className="font-mono text-xs" spellCheck={false} />
+            </div>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="grid w-48 gap-1">
+                <Label htmlFor="batch-ttl" className="text-xs">TTL seconds (optional)</Label>
+                <Input id="batch-ttl" value={ttlSeconds} onChange={(event) => setTtlSeconds(event.target.value)} inputMode="numeric" className="h-8" />
+              </div>
               <Button onClick={() => void runPut()} disabled={busy}>{busy ? "Applying…" : "Apply batch put"}</Button>
             </div>
           </TabsContent>
           <TabsContent value="delete" className="grid gap-3 pt-2">
-            <Textarea value={deleteLines} onChange={(event) => setDeleteLines(event.target.value)} rows={5} className="font-mono text-xs" placeholder="one key or b64u:… ID per line" spellCheck={false} />
-            <Button variant="destructive" onClick={() => void runDelete()} disabled={busy || deleteLines.trim().length === 0}>{busy ? "Deleting…" : "Delete batch"}</Button>
+            <div className="grid gap-1.5">
+              <Label htmlFor="batch-delete-lines">Keys or b64u:… IDs, one per line</Label>
+              <Textarea id="batch-delete-lines" value={deleteLines} onChange={(event) => setDeleteLines(event.target.value)} rows={5} className="font-mono text-xs" spellCheck={false} />
+            </div>
+            <div>
+              <Button variant="destructive" onClick={() => void runDelete()} disabled={busy || deleteLines.trim().length === 0}>{busy ? "Deleting…" : "Delete batch"}</Button>
+            </div>
           </TabsContent>
           <TabsContent value="get" className="grid gap-3 pt-2">
-            <Textarea value={getLines} onChange={(event) => setGetLines(event.target.value)} rows={5} className="font-mono text-xs" placeholder="one key or b64u:… ID per line" spellCheck={false} />
-            <Button variant="outline" onClick={() => void runGet()} disabled={busy || getLines.trim().length === 0}>{busy ? "Reading…" : "Read batch"}</Button>
+            <div className="grid gap-1.5">
+              <Label htmlFor="batch-get-lines">Keys or b64u:… IDs, one per line</Label>
+              <Textarea id="batch-get-lines" value={getLines} onChange={(event) => setGetLines(event.target.value)} rows={5} className="font-mono text-xs" spellCheck={false} />
+            </div>
+            <div>
+              <Button variant="outline" onClick={() => void runGet()} disabled={busy || getLines.trim().length === 0}>{busy ? "Reading…" : "Read batch"}</Button>
+            </div>
           </TabsContent>
         </Tabs>
         {error && <ErrorBanner error={error} className="mt-2" />}
-        {result && <pre className="font-mono text-xs bg-muted rounded-md p-2 max-h-48 overflow-auto mt-2">{result}</pre>}
+        {result && <pre className="mt-2 max-h-48 overflow-auto bg-muted p-2 font-mono text-xs">{result}</pre>}
       </DialogContent>
     </Dialog>
   );
@@ -451,19 +507,28 @@ function ClaimsDialog({ open, onOpenChange, profileId }: { open: boolean; onOpen
           <DialogDescription>Advanced diagnostics. A claim leases native ownership of one key; expired or completed claims are never reusable.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 py-2">
-          <div className="flex gap-2">
-            <Input value={key} onChange={(event) => setKey(event.target.value)} placeholder="Key" spellCheck={false} />
-            <Input value={leaseMs} onChange={(event) => setLeaseMs(event.target.value)} inputMode="numeric" placeholder="lease ms" className="w-28" />
+          <div className="flex flex-wrap gap-2">
+            <div className="grid flex-1 gap-1.5">
+              <Label htmlFor="claim-key">Key</Label>
+              <Input id="claim-key" value={key} onChange={(event) => setKey(event.target.value)} spellCheck={false} />
+            </div>
+            <div className="grid w-28 gap-1.5">
+              <Label htmlFor="claim-lease">Lease ms</Label>
+              <Input id="claim-lease" value={leaseMs} onChange={(event) => setLeaseMs(event.target.value)} inputMode="numeric" />
+            </div>
           </div>
-          <p className="text-xs font-mono text-muted-foreground">{entryId || "b64u:…"}</p>
+          <p className="font-mono text-xs text-muted-foreground">{entryId || "b64u:…"}</p>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" onClick={() => void createClaim()} disabled={busy || !entryId}>Create claim</Button>
             <Button size="sm" variant="outline" onClick={() => void getOrRefresh()} disabled={busy || !entryId}>Get or refresh</Button>
           </div>
           {claim && (
-            <div className="rounded-lg border p-3 grid gap-2">
+            <div className="grid gap-2 border p-3">
               <p className="font-mono text-xs">{claim.claim_id}</p>
-              <Input value={value} onChange={(event) => setValue(event.target.value)} placeholder="Value (text) to complete with" spellCheck={false} />
+              <div className="grid gap-1.5">
+                <Label htmlFor="claim-complete-value">Value (text) to complete with</Label>
+                <Input id="claim-complete-value" value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} />
+              </div>
               <div className="flex gap-2">
                 <Button size="sm" onClick={() => void completeClaim()} disabled={busy}>Complete</Button>
                 <Button size="sm" variant="outline" onClick={() => void releaseClaim()} disabled={busy}>Release</Button>
@@ -471,7 +536,7 @@ function ClaimsDialog({ open, onOpenChange, profileId }: { open: boolean; onOpen
             </div>
           )}
           {error && <ErrorBanner error={error} />}
-          {claimState && claim?.claim_id === undefined && <pre className="font-mono text-xs bg-muted rounded-md p-2 max-h-40 overflow-auto">{claimState}</pre>}
+          {claimState && claim?.claim_id === undefined && <pre className="max-h-40 overflow-auto bg-muted p-2 font-mono text-xs">{claimState}</pre>}
         </div>
       </DialogContent>
     </Dialog>

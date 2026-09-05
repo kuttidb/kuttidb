@@ -47,6 +47,8 @@
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
+    "happy-dom": "^20.14.0",
+    "playwright-core": "^1.63.0",
     "shadcn": "^4.21.0",
     "tsx": "^4.20.5",
     "typescript": "^5.9.3",

@@ -2,14 +2,12 @@ import { useCallback, useState } from "react";
 import { HardDriveDownload, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { usePolling } from "@/hooks/use-polling";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfirmDestructive } from "@/components/confirm";
 import { ErrorBanner } from "@/components/error-banner";
-import { CopyId, DetailGrid, LastRefreshed, PageHeader, StateBadge } from "@/components/shared";
+import { ConnectionContextLine, CopyId, DetailGrid, EmptyState, LastRefreshed, PageHeader, Section, Skeleton, StateBadge, StatusDot } from "@/components/shared";
 import { admin, list, newIdempotencyKey } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import type { JobEntry, MaintenanceEntry } from "@/lib/types";
@@ -30,7 +28,7 @@ export function MaintenanceView({ profileId }: { profileId: string }) {
     setEngines(maintenanceResponse.data);
     setJobs(jobsResponse.data);
   }, [profileId]);
-  const { lastUpdated, refresh } = usePolling(loader, 5_000);
+  const { lastUpdated, error: pollError, stale, refresh } = usePolling(loader, 5_000);
 
   const checkpoint = async (kind: "keyspace-checkpoint" | "queue-checkpoint" | "stream-checkpoint" | "checkpoint-all") => {
     setBusy(true); setError(null);
@@ -53,71 +51,87 @@ export function MaintenanceView({ profileId }: { profileId: string }) {
     finally { setBusy(false); }
   };
 
+  const viewError = error ?? pollError;
+
   return (
     <div>
       <PageHeader
-        title="Maintenance & jobs"
-        description="Checkpoints run as bounded asynchronous jobs. Only queued jobs are cancellable."
-        actions={<LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} polling />}
+        title="Maintenance"
+        description="Checkpoints run as bounded asynchronous jobs. Only queued jobs are cancellable; an accepted job is queued, not completed."
+        actions={<LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} stale={stale} />}
       />
-      {error && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
-      <Card className="mb-4">
-        <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><HardDriveDownload className="size-4 text-muted-foreground" />Checkpoints</CardTitle></CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {engines.map((engine) => (
-              <Button key={engine.engine} size="sm" variant="outline" disabled={busy || !engine.checkpoint_available}
-                onClick={() => void checkpoint(`${engine.engine === "keyspace" ? "keyspace" : engine.engine === "queue" ? "queue" : "stream"}-checkpoint` as "keyspace-checkpoint")}>
-                {engine.engine} {engine.checkpoint_available ? "" : "(unavailable)"}
-              </Button>
-            ))}
-            <Button size="sm" disabled={busy} onClick={() => void checkpoint("checkpoint-all")}>All engines</Button>
-          </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-sm">Jobs</CardTitle></CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow><TableHead>Job</TableHead><TableHead>Kind</TableHead><TableHead>State</TableHead><TableHead>Created</TableHead><TableHead className="text-right">Actions</TableHead></TableRow>
-            </TableHeader>
-            <TableBody>
-              {jobs.map((job) => (
-                <TableRow key={job.job_id}>
-                  <TableCell><CopyId id={job.job_id} /></TableCell>
-                  <TableCell className="font-mono text-xs">{job.kind}</TableCell>
-                  <TableCell><StateBadge state={job.state} /></TableCell>
-                  <TableCell className="text-muted-foreground text-xs">{formatTimestamp(job.created_at)}</TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => setDetailJob(job)}>Inspect</Button>
-                      {job.state === "queued" && (
-                        <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setCancelTarget(job)}><Ban className="size-3.5" />Cancel</Button>
-                      )}
-                    </div>
-                  </TableCell>
-                </TableRow>
+      {viewError && <ErrorBanner error={viewError} onRetry={refresh} className="mb-4" />}
+      <Section title="Checkpoints">
+        <div className="grid gap-3">
+          {lastUpdated === null && !viewError ? (
+            <div className="grid gap-2" aria-busy="true">
+              {Array.from({ length: 2 }, (_, index) => <Skeleton key={index} className="h-9 w-64" />)}
+            </div>
+          ) : (
+            <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              {engines.map((engine) => (
+                <li key={engine.engine} className="flex items-center justify-between gap-2 border px-3 py-2.5">
+                  <span className="inline-flex items-center gap-2 text-sm">
+                    <StatusDot tone={engine.checkpoint_available ? "success" : "neutral"} />
+                    {engine.engine}
+                  </span>
+                  <Button size="xs" variant="outline" disabled={busy || !engine.checkpoint_available}
+                    onClick={() => void checkpoint(`${engine.engine === "keyspace" ? "keyspace" : engine.engine === "queue" ? "queue" : "stream"}-checkpoint` as "keyspace-checkpoint")}>
+                    {engine.checkpoint_available ? "Checkpoint" : "Unavailable"}
+                  </Button>
+                </li>
               ))}
-              {jobs.length === 0 && <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground py-8">No jobs yet.</TableCell></TableRow>}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+            </ul>
+          )}
+          <div>
+            <Button size="sm" disabled={busy} onClick={() => void checkpoint("checkpoint-all")}><HardDriveDownload className="size-4" />Checkpoint all engines</Button>
+          </div>
+        </div>
+      </Section>
+      <div className="mt-6 border-t border-rule-strong pt-3">
+        <h2 className="mb-3 text-base font-semibold tracking-[-0.015em]">Jobs</h2>
+        {jobs.length === 0
+          ? <EmptyState title="No jobs yet." hint="Checkpoint jobs you enqueue appear here with their live state." />
+          : (
+            <Table>
+              <TableHeader>
+                <TableRow><TableHead>Job</TableHead><TableHead>Kind</TableHead><TableHead>State</TableHead><TableHead>Created</TableHead><TableHead className="text-right">Actions</TableHead></TableRow>
+              </TableHeader>
+              <TableBody>
+                {jobs.map((job) => (
+                  <TableRow key={job.job_id}>
+                    <TableCell><CopyId id={job.job_id} /></TableCell>
+                    <TableCell className="font-mono text-xs">{job.kind}</TableCell>
+                    <TableCell><StateBadge state={job.state} /></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{formatTimestamp(job.created_at)}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button size="sm" variant="ghost" onClick={() => setDetailJob(job)}>Inspect</Button>
+                        {job.state === "queued" && (
+                          <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setCancelTarget(job)}><Ban className="size-3.5" />Cancel</Button>
+                        )}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+      </div>
 
       <Dialog open={detailJob !== null} onOpenChange={(open) => { if (!open) setDetailJob(null); }}>
         <DialogContent className="sm:max-w-lg">
-          <DialogHeader><DialogTitle>Job {detailJob?.job_id}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle className="break-all">Job {detailJob?.job_id}</DialogTitle></DialogHeader>
           {detailJob && (
             <div className="grid gap-3 py-2">
               <DetailGrid rows={[
                 { label: "Kind", value: detailJob.kind, mono: true },
                 { label: "State", value: <StateBadge state={detailJob.state} /> },
                 { label: "Created", value: formatTimestamp(detailJob.created_at) },
-                { label: "Completed", value: formatTimestamp(detailJob.completed_at ?? null) }
+                { label: "Completed", value: detailJob.completed_at ? formatTimestamp(detailJob.completed_at) : "—" }
               ]} />
               {detailJob.error && <ErrorBanner error={new Error(detailJob.error.message ?? "Job failed")} />}
-              {detailJob.result && <pre className="font-mono text-xs bg-muted rounded-md p-2 max-h-48 overflow-auto">{JSON.stringify(detailJob.result, null, 2)}</pre>}
+              {detailJob.result && <pre className="max-h-48 overflow-auto bg-muted p-2 font-mono text-xs">{JSON.stringify(detailJob.result, null, 2)}</pre>}
             </div>
           )}
           <DialogFooter><Button variant="outline" onClick={() => setDetailJob(null)}>Close</Button></DialogFooter>
@@ -125,8 +139,11 @@ export function MaintenanceView({ profileId }: { profileId: string }) {
       </Dialog>
       {cancelTarget && (
         <ConfirmDestructive
-          open onOpenChange={() => setCancelTarget(null)} confirmId={cancelTarget.job_id} inFlight={busy}
+          open onOpenChange={() => { setCancelTarget(null); setError(null); }} confirmId={cancelTarget.job_id} inFlight={busy}
           title="Cancel queued job" description={`Cancels ${cancelTarget.kind} while it is still queued.`}
+          context={<ConnectionContextLine profileId={profileId} />}
+          error={error}
+          confirmLabel="Cancel job"
           onConfirm={() => void cancel(cancelTarget)}
         />
       )}

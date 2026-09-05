@@ -20,41 +20,43 @@ export function BinaryValue({ value, compact = false, className }: { value: Bina
   const json = jsonPreviewFromBase64(value.data);
   const size = value.size ?? bytes?.byteLength ?? 0;
   const copy = async () => {
-    await navigator.clipboard.writeText(value.data);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
+    try {
+      await navigator.clipboard.writeText(value.data);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch { /* clipboard unavailable */ }
   };
   return (
     <div className={cn("min-w-0", className)}>
-      <Tabs defaultValue={compact ? "utf8" : "utf8"}>
-        <div className="flex items-center gap-2">
-          <TabsList className="h-7">
-            <TabsTrigger value="utf8" className="px-2 text-xs"><FileText className="size-3 mr-1" />UTF-8</TabsTrigger>
-            {json !== null && <TabsTrigger value="json" className="px-2 text-xs"><Braces className="size-3 mr-1" />JSON</TabsTrigger>}
-            <TabsTrigger value="b64" className="px-2 text-xs"><Binary className="size-3 mr-1" />Base64</TabsTrigger>
-            {(utf8 === null || !compact) && <TabsTrigger value="hex" className="px-2 text-xs">Hex</TabsTrigger>}
+      <Tabs defaultValue="utf8">
+        <div className="flex flex-wrap items-center gap-2">
+          <TabsList className="h-7 border-b-0">
+            <TabsTrigger value="utf8" className="h-7 px-2 text-xs after:hidden"><FileText className="mr-1 size-3" />UTF-8</TabsTrigger>
+            {json !== null && <TabsTrigger value="json" className="h-7 px-2 text-xs after:hidden"><Braces className="mr-1 size-3" />JSON</TabsTrigger>}
+            <TabsTrigger value="b64" className="h-7 px-2 text-xs after:hidden"><Binary className="mr-1 size-3" />Base64</TabsTrigger>
+            {(utf8 === null || !compact) && <TabsTrigger value="hex" className="h-7 px-2 text-xs after:hidden">Hex</TabsTrigger>}
           </TabsList>
-          <Badge variant="secondary" className="font-mono text-[10px]">{size} B</Badge>
-          <Button variant="ghost" size="icon" className="ml-auto size-7" onClick={() => void copy()} title="Copy canonical Base64">
-            {copied ? <Check className="size-3.5 text-chart-3" /> : <Copy className="size-3.5" />}
+          <Badge variant="neutral" className="font-mono text-xs">{size} B</Badge>
+          <Button variant="ghost" size="icon" className="ml-auto size-7" onClick={() => void copy()} aria-label="Copy canonical Base64" title="Copy canonical Base64">
+            {copied ? <Check className="size-3.5 text-success" aria-label="Copied" /> : <Copy className="size-3.5" />}
           </Button>
         </div>
         <TabsContent value="utf8" className="mt-2">
           {utf8 !== null
-            ? <pre className={cn("font-mono text-xs whitespace-pre-wrap break-all bg-muted rounded-md p-2", compact && "truncate")}>{utf8}</pre>
+            ? <pre className={cn("rounded-none bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all", compact && "truncate")}>{utf8}</pre>
             : <p className="text-xs text-muted-foreground">Not valid UTF-8 — see Base64 or Hex.</p>}
         </TabsContent>
         {json !== null && (
           <TabsContent value="json" className="mt-2">
-            <pre className="font-mono text-xs whitespace-pre-wrap break-all bg-muted rounded-md p-2 max-h-48 overflow-auto">{JSON.stringify(json, null, 2)}</pre>
+            <pre className="max-h-48 overflow-auto rounded-none bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all">{JSON.stringify(json, null, 2)}</pre>
           </TabsContent>
         )}
         <TabsContent value="b64" className="mt-2">
-          <pre className={cn("font-mono text-xs whitespace-pre-wrap break-all bg-muted rounded-md p-2", compact && "truncate")}>{value.data}</pre>
+          <pre className={cn("rounded-none bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all", compact && "truncate")}>{value.data}</pre>
         </TabsContent>
         {bytes !== null && (utf8 === null || !compact) && (
           <TabsContent value="hex" className="mt-2">
-            <pre className="font-mono text-[11px] whitespace-pre-wrap break-all bg-muted rounded-md p-2 max-h-32 overflow-auto">{toHex(bytes)}</pre>
+            <pre className="max-h-32 overflow-auto rounded-none bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all">{toHex(bytes)}</pre>
           </TabsContent>
         )}
       </Tabs>

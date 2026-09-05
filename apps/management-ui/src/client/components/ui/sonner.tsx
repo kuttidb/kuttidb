@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   CircleCheckIcon,
   InfoIcon,
@@ -7,10 +8,23 @@ import {
 } from "lucide-react"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 
+/** Track the app-resolved theme class so toasts never drift from the shell. */
+function useResolvedThemeClass(): "light" | "dark" {
+  const resolve = () => document.documentElement.classList.contains("dark") ? "dark" : "light";
+  const [theme, setTheme] = useState<"light" | "dark">(resolve);
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(resolve()));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+  return theme;
+}
+
 const Toaster = ({ ...props }: ToasterProps) => {
+  const theme = useResolvedThemeClass();
   return (
     <Sonner
-      theme="system"
+      theme={theme}
       className="toaster group"
       icons={{
         success: <CircleCheckIcon className="size-4" />,

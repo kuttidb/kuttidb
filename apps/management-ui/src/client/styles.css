@@ -3,83 +3,142 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* KuttiDB "Warm Operations" — cream canvas, toasted amber accent, cocoa text. */
+/*
+ * KuttiDB console design system — the working side of the KuttiDB landing page.
+ * Paper canvas, olive-black ink, precise rules, compact squared controls, and
+ * one toast mascot. Values are specified in docs/design/MANAGEMENT_UI_DESIGN_SYSTEM.md;
+ * brand primitives come from landing/landing.css.
+ */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.975 0.008 95);
-  --foreground: oklch(0.28 0.035 45);
-  --card: oklch(0.993 0.005 95);
-  --card-foreground: oklch(0.28 0.035 45);
-  --popover: oklch(0.993 0.005 95);
-  --popover-foreground: oklch(0.28 0.035 45);
-  --primary: oklch(0.64 0.155 52);
-  --primary-foreground: oklch(0.985 0.005 95);
-  --secondary: oklch(0.94 0.014 85);
-  --secondary-foreground: oklch(0.32 0.035 45);
-  --muted: oklch(0.945 0.012 85);
-  --muted-foreground: oklch(0.5 0.03 55);
-  --accent: oklch(0.945 0.03 80);
-  --accent-foreground: oklch(0.32 0.035 45);
-  --destructive: oklch(0.577 0.216 27);
-  --destructive-foreground: oklch(0.985 0.005 95);
-  --border: oklch(0.885 0.018 80);
-  --input: oklch(0.85 0.02 78);
-  --ring: oklch(0.64 0.155 52);
-  --chart-1: oklch(0.64 0.155 52);
-  --chart-2: oklch(0.55 0.12 180);
-  --chart-3: oklch(0.6 0.14 145);
-  --chart-4: oklch(0.66 0.14 300);
-  --chart-5: oklch(0.6 0.18 15);
-  --sidebar: oklch(0.28 0.03 45);
-  --sidebar-foreground: oklch(0.92 0.01 85);
-  --sidebar-primary: oklch(0.64 0.155 52);
-  --sidebar-primary-foreground: oklch(0.985 0.005 95);
-  --sidebar-accent: oklch(0.34 0.035 45);
-  --sidebar-accent-foreground: oklch(0.95 0.008 85);
-  --sidebar-border: oklch(0.36 0.03 45);
-  --sidebar-ring: oklch(0.64 0.155 52);
+  /* Brand primitives (landing stylesheet). */
+  --brand-paper: #f5f2e9;
+  --brand-ink: #27271f;
+  --brand-orange: #ed742f;
+  --brand-green: #c8daac;
+
+  /* Geometry: explicit radii, no derivations. Surface 0, controls 4, tags 2. */
+  --radius: 4px;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+
+  --background: #f5f2e9;
+  --foreground: #27271f;
+  --card: #fbf9f2;
+  --card-foreground: #27271f;
+  --popover: #fbf9f2;
+  --popover-foreground: #27271f;
+  --secondary: #e6e8df;
+  --secondary-foreground: #27271f;
+  --muted: #e6e8df;
+  --muted-foreground: #606156;
+  --border: #cecec1;
+  --input: #818373;
+  --rule-strong: #27271f;
+  --primary: #27271f;
+  --primary-foreground: #f5f2e9;
+  --primary-hover: #46483c;
+  --brand-orange-soft: #f8d9c3;
+  --accent: #eee4d7;
+  --accent-foreground: #27271f;
+  --link: #9a3b0b;
+  --ring: #397aa0;
+  --success: #35532b;
+  --success-surface: #e4edd9;
+  --warning: #754c0b;
+  --warning-surface: #f6e8c6;
+  --destructive: #9b332c;
+  --danger-surface: #f7e4df;
+  --destructive-foreground: #fbf9f2;
+  --info: #315b70;
+  --info-surface: #e2edf1;
+
+  /* Chart aliases: orange, olive, blue, brown, gray. Semantic status must not
+     borrow these; actual charts are deferred until a real dataset justifies one. */
+  --chart-1: #ed742f;
+  --chart-2: #757a58;
+  --chart-3: #397aa0;
+  --chart-4: #885028;
+  --chart-5: #8a8b7d;
+
+  /* Sidebar mirrors the canvas; the active rail is brand orange (see shell). */
+  --sidebar: #f5f2e9;
+  --sidebar-foreground: #27271f;
+  --sidebar-primary: #eee4d7;
+  --sidebar-primary-foreground: #27271f;
+  --sidebar-accent: #e6e8df;
+  --sidebar-accent-foreground: #27271f;
+  --sidebar-border: #cecec1;
+  --sidebar-ring: #397aa0;
+
+  /* Overlay treatment: the only permitted shadow, plus the shared scrim. */
+  --overlay-shadow: 0 8px 24px rgb(39 39 31 / 14%);
+  --scrim: rgb(20 24 18 / 40%);
 }
 
 .dark {
-  --background: oklch(0.22 0.02 45);
-  --foreground: oklch(0.93 0.008 85);
-  --card: oklch(0.26 0.025 45);
-  --card-foreground: oklch(0.93 0.008 85);
-  --popover: oklch(0.26 0.025 45);
-  --popover-foreground: oklch(0.93 0.008 85);
-  --primary: oklch(0.7 0.15 55);
-  --primary-foreground: oklch(0.22 0.02 45);
-  --secondary: oklch(0.31 0.025 45);
-  --secondary-foreground: oklch(0.93 0.008 85);
-  --muted: oklch(0.31 0.025 45);
-  --muted-foreground: oklch(0.68 0.02 70);
-  --accent: oklch(0.34 0.03 45);
-  --accent-foreground: oklch(0.93 0.008 85);
-  --destructive: oklch(0.65 0.2 25);
-  --destructive-foreground: oklch(0.985 0.005 95);
-  --border: oklch(0.34 0.025 45);
-  --input: oklch(0.36 0.025 45);
-  --ring: oklch(0.7 0.15 55);
-  --chart-1: oklch(0.7 0.15 55);
-  --chart-2: oklch(0.6 0.12 180);
-  --chart-3: oklch(0.65 0.14 145);
-  --chart-4: oklch(0.68 0.14 300);
-  --chart-5: oklch(0.65 0.18 15);
-  --sidebar: oklch(0.2 0.02 45);
-  --sidebar-foreground: oklch(0.92 0.01 85);
-  --sidebar-primary: oklch(0.7 0.15 55);
-  --sidebar-primary-foreground: oklch(0.22 0.02 45);
-  --sidebar-accent: oklch(0.28 0.025 45);
-  --sidebar-accent-foreground: oklch(0.93 0.008 85);
-  --sidebar-border: oklch(0.28 0.025 45);
-  --sidebar-ring: oklch(0.7 0.15 55);
+  --background: #20241e;
+  --foreground: #f5f2e9;
+  --card: #252a23;
+  --card-foreground: #f5f2e9;
+  --popover: #252a23;
+  --popover-foreground: #f5f2e9;
+  --secondary: #30362c;
+  --secondary-foreground: #f5f2e9;
+  --muted: #30362c;
+  --muted-foreground: #b9beae;
+  --border: #515947;
+  --input: #859079;
+  --rule-strong: #aab49b;
+  --primary: #f5f2e9;
+  --primary-foreground: #27271f;
+  --primary-hover: #dfdfd1;
+  --brand-orange-soft: #5a3418;
+  --accent: #423526;
+  --accent-foreground: #f5f2e9;
+  --link: #f4ac79;
+  --ring: #8dc4df;
+  --success: #c8daac;
+  --success-surface: #303e29;
+  --warning: #edcd83;
+  --warning-surface: #403722;
+  --destructive: #f1aaa0;
+  --danger-surface: #442a26;
+  --destructive-foreground: #20241e;
+  --info: #a6cddd;
+  --info-surface: #263b44;
+
+  --chart-1: #ed742f;
+  --chart-2: #9aa07c;
+  --chart-3: #8dc4df;
+  --chart-4: #c98d5e;
+  --chart-5: #a7ab97;
+
+  --sidebar: #20241e;
+  --sidebar-foreground: #f5f2e9;
+  --sidebar-primary: #423526;
+  --sidebar-primary-foreground: #f5f2e9;
+  --sidebar-accent: #30362c;
+  --sidebar-accent-foreground: #f5f2e9;
+  --sidebar-border: #515947;
+  --sidebar-ring: #8dc4df;
+
+  --overlay-shadow: 0 8px 24px rgb(10 12 9 / 45%);
+  --scrim: rgb(8 10 7 / 55%);
 }
 
 @theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* Explicit squared radius scale: tags 2 px, controls/overlays 4 px. Every
+     rounded-* utility resolves to these; no computed derivations. */
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --radius-3xl: 4px;
+  --radius-4xl: 4px;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -88,6 +147,7 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -96,6 +156,19 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-surface: var(--success-surface);
+  --color-warning: var(--warning);
+  --color-warning-surface: var(--warning-surface);
+  --color-danger-surface: var(--danger-surface);
+  --color-info: var(--info);
+  --color-info-surface: var(--info-surface);
+  --color-link: var(--link);
+  --color-brand-orange: var(--brand-orange);
+  --color-brand-green: var(--brand-green);
+  --color-brand-ink: var(--brand-ink);
+  --color-brand-paper: var(--brand-paper);
+  --color-rule-strong: var(--rule-strong);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -112,18 +185,66 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  --font-editorial: Georgia, "Times New Roman", serif;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground antialiased;
-    font-feature-settings: "tnum" 1;
-  }
   html {
+    /* The theme manager sets an inline color-scheme once a preference resolves. */
     color-scheme: light dark;
   }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "tnum" 1;
+  }
+  ::selection {
+    background: var(--brand-orange);
+    color: var(--brand-ink);
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
 }
+
+/* Coarse pointers get 44 px touch targets for controls and rows. */
+@media (pointer: coarse) {
+  [data-slot="button"],
+  [data-slot="input"],
+  [data-slot="select-trigger"],
+  [data-slot="switch-trigger"] {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Sonner toasts: squared paper cards matching the popover surface. */
+[data-sonner-toast] {
+  border-radius: var(--radius) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: var(--overlay-shadow) !important;
+  font-family: var(--font-sans);
+}
+[data-sonner-toast] [data-icon] {
+  color: var(--muted-foreground);
+}
+[data-sonner-toast][data-type="success"] [data-icon] { color: var(--success); }
+[data-sonner-toast][data-type="error"] [data-icon] { color: var(--destructive); }
+[data-sonner-toast][data-type="warning"] [data-icon] { color: var(--warning); }
+[data-sonner-toast][data-type="info"] [data-icon] { color: var(--info); }

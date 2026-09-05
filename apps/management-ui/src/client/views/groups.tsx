@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import { usePolling } from "@/hooks/use-polling";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,7 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfirmDestructive } from "@/components/confirm";
 import { ErrorBanner } from "@/components/error-banner";
-import { CopyId, DetailGrid, LastRefreshed, PageHeader, StateBadge } from "@/components/shared";
+import { ConnectionContextLine, CopyId, DetailGrid, EmptyState, LastRefreshed, PageHeader, Section, Skeleton, StateBadge, StatusDot } from "@/components/shared";
 import { admin, ApiError, list, newIdempotencyKey } from "@/lib/api";
 import { formatDuration } from "@/lib/format";
 import type { ConsumerGroupDetail, ConsumerGroupListItem, GroupMember, GroupOffsetsEntry, StreamSummary } from "@/lib/types";
@@ -21,7 +20,7 @@ import type { ConsumerGroupDetail, ConsumerGroupListItem, GroupMember, GroupOffs
 /** Built from streams × per-stream groups; the global endpoint hides the stream ID. */
 export function ConsumerGroupsView({ profileId, onOpenGroup }: { profileId: string; onOpenGroup: (streamId: string, groupId: string) => void }) {
   const [rows, setRows] = useState<{ stream: StreamSummary; group: ConsumerGroupListItem }[]>([]);
-  const { lastUpdated, error, refresh } = usePolling(
+  const { lastUpdated, error, stale, refresh } = usePolling(
     useCallback(async () => {
       const streams = (await list<StreamSummary>(profileId, "streams")).data;
       const all = await Promise.all(streams.map(async (stream) => {
@@ -32,34 +31,57 @@ export function ConsumerGroupsView({ profileId, onOpenGroup }: { profileId: stri
     }, [profileId]),
     15_000
   );
+  const loadedOnce = lastUpdated !== null || error !== null;
   return (
     <div>
       <PageHeader
-        title="Consumer Groups"
+        title="Consumer groups"
         description="Stream consumer groups with generation, membership, and lag."
-        actions={<LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} />}
+        actions={<LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} stale={stale} />}
       />
       {error && rows.length === 0 && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow><TableHead>Stream</TableHead><TableHead>Group</TableHead><TableHead className="text-right">Generation</TableHead><TableHead className="text-right">Members</TableHead></TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map(({ stream, group }) => (
-                <TableRow key={`${stream.id}:${group.group}`} className="cursor-pointer" onClick={() => onOpenGroup(stream.id, group.group)}>
-                  <TableCell className="font-medium">{stream.name}</TableCell>
-                  <TableCell className="font-medium">{group.group}</TableCell>
-                  <TableCell className="text-right tabular-nums">g-{group.generation}</TableCell>
-                  <TableCell className="text-right tabular-nums">{group.active_member_count}</TableCell>
-                </TableRow>
-              ))}
-              {rows.length === 0 && <TableRow><TableCell colSpan={4} className="text-center text-muted-foreground py-8">No consumer groups. Groups appear when members join via clients or management sessions.</TableCell></TableRow>}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      {!loadedOnce ? (
+        <div className="grid gap-2" aria-busy="true">
+          {Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-11 w-full" />)}
+          <p className="text-sm text-muted-foreground">Checking consumer groups…</p>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="border-t border-rule-strong pt-2">
+          <EmptyState title="No consumer groups yet." hint="Groups appear when members join via clients or management sessions." />
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow><TableHead>Stream</TableHead><TableHead>Group</TableHead><TableHead className="text-right">Generation</TableHead><TableHead className="text-right">Members</TableHead></TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map(({ stream, group }) => (
+              <TableRow key={`${stream.id}:${group.group}`} className="cursor-pointer" onClick={() => onOpenGroup(stream.id, group.group)}>
+                <TableCell>
+                  <a
+                    href={`#/c/${encodeURIComponent(profileId)}/groups/${encodeURIComponent(stream.id)}/${encodeURIComponent(group.group)}`}
+                    className="text-left font-medium hover:underline"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    {stream.name}
+                  </a>
+                </TableCell>
+                <TableCell>
+                  <a
+                    href={`#/c/${encodeURIComponent(profileId)}/groups/${encodeURIComponent(stream.id)}/${encodeURIComponent(group.group)}`}
+                    className="text-left font-mono text-xs hover:underline"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    {group.group}
+                  </a>
+                </TableCell>
+                <TableCell className="text-right tabular-nums">g-{group.generation}</TableCell>
+                <TableCell className="text-right tabular-nums">{group.active_member_count}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </div>
   );
 }
@@ -85,38 +107,43 @@ export function GroupDetailView({ profileId, streamId, groupId, onBack }: { prof
     setOffsets(offsetsResponse.data);
     try { setMembers((await list<GroupMember>(profileId, `streams/${streamId}/consumer-groups/${groupId}/members`)).data); } catch { setMembers([]); }
   }, [profileId, streamId, groupId]);
-  const { lastUpdated, refresh } = usePolling(loader, 10_000);
+  const { lastUpdated, error: pollError, stale, refresh } = usePolling(loader, 10_000);
+
+  const viewError = error ?? pollError;
 
   return (
     <div>
       <PageHeader
         title={detail?.group ?? groupId}
+        breadcrumb={
+          <button type="button" className="text-sm text-muted-foreground hover:text-foreground hover:underline" onClick={onBack}>
+            Consumer groups
+          </button>
+        }
         description={<span className="font-mono text-xs">stream {streamId} · group {groupId}</span>}
         actions={
           <>
-            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} />
-            <Button variant="outline" size="sm" onClick={() => setJoinOpen(true)}><LogIn className="size-4 mr-1" />Management session</Button>
-            <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}><RotateCcw className="size-4 mr-1" />Reset offsets</Button>
+            <LastRefreshed lastUpdated={lastUpdated} onRefresh={refresh} stale={stale} />
+            <Button variant="outline" size="sm" onClick={() => setJoinOpen(true)}><LogIn className="size-4" />Management session</Button>
+            <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}><RotateCcw className="size-4" />Reset offsets</Button>
           </>
         }
       />
-      {error && <ErrorBanner error={error} onRetry={refresh} className="mb-4" />}
+      {viewError && <ErrorBanner error={viewError} onRetry={refresh} className="mb-4" />}
       {detail && (
-        <div className="grid gap-4 lg:grid-cols-3 mb-4">
-          <Card className="lg:col-span-1">
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Group</CardTitle></CardHeader>
-            <CardContent>
+        <>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(280px,1fr)_2fr] lg:gap-8">
+            <div className="border-t border-rule-strong pt-3">
+              <h2 className="mb-3 text-base font-semibold tracking-[-0.015em]">Group</h2>
               <DetailGrid rows={[
                 { label: "Group", value: detail.group },
                 { label: "Group ID", value: <CopyId id={groupId} />, mono: true },
                 { label: "Generation (ETag)", value: etag ?? `g-${detail.generation}`, mono: true },
                 { label: "Active members", value: detail.active_member_count }
               ]} />
-            </CardContent>
-          </Card>
-          <Card className="lg:col-span-2">
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Offsets & lag</CardTitle></CardHeader>
-            <CardContent className="p-0">
+            </div>
+            <div className="border-t border-rule-strong pt-3">
+              <h2 className="mb-3 text-base font-semibold tracking-[-0.015em]">Offsets &amp; lag</h2>
               <Table>
                 <TableHeader><TableRow><TableHead>Partition</TableHead><TableHead className="text-right">Offset</TableHead><TableHead className="text-right">High-water</TableHead><TableHead className="text-right">Lag</TableHead><TableHead /></TableRow></TableHeader>
                 <TableBody>
@@ -133,35 +160,33 @@ export function GroupDetailView({ profileId, streamId, groupId, onBack }: { prof
                   ))}
                 </TableBody>
               </Table>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-      {detail && (
-        <Card className="mb-4">
-          <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><Users className="size-4 text-muted-foreground" />Members (privacy-safe snapshot)</CardTitle></CardHeader>
-          <CardContent>
+            </div>
+          </div>
+          <div className="mt-6 border-t border-rule-strong pt-3">
+            <h2 className="mb-3 flex items-center gap-2 text-base font-semibold tracking-[-0.015em]"><Users className="size-4 text-muted-foreground" />Members <span className="text-sm font-normal text-muted-foreground">(privacy-safe snapshot)</span></h2>
             {members.length === 0
               ? <p className="text-sm text-muted-foreground">No active members.</p>
               : (
-                <ul className="grid gap-2 sm:grid-cols-2">
+                <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {members.map((member) => (
-                    <li key={member.member_id} className="rounded-lg border px-3 py-2 flex items-center gap-3 text-sm">
+                    <li key={member.member_id} className="flex items-center gap-3 border px-3 py-2 text-sm">
                       <span className="font-mono text-xs">{member.member_id}</span>
-                      <Badge variant="outline" className="text-[10px]">{member.assigned_partition_count} partition(s)</Badge>
-                      <span className="ml-auto text-xs text-muted-foreground flex items-center gap-1"><Timer className="size-3" />{formatDuration(member.lease_remaining_ms)}</span>
+                      <Badge variant="neutral" className="text-xs">{member.assigned_partition_count} partition(s)</Badge>
+                      <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground"><Timer className="size-3" />{formatDuration(member.lease_remaining_ms)}</span>
                     </li>
                   ))}
                 </ul>
               )}
-          </CardContent>
-        </Card>
+          </div>
+        </>
       )}
       {session && (
-        <SessionWorkspace
-          profileId={profileId} streamId={streamId} groupId={groupId} session={session}
-          onLeft={() => { setSession(null); refresh(); }} onRefreshed={refresh}
-        />
+        <div className="mt-6">
+          <SessionWorkspace
+            profileId={profileId} streamId={streamId} groupId={groupId} session={session}
+            onLeft={() => { setSession(null); refresh(); }} onRefreshed={refresh}
+          />
+        </div>
       )}
 
       {commitTarget && detail && (
@@ -211,7 +236,7 @@ function CommitOffsetDialog({ open, onOpenChange, profileId, streamId, groupId, 
       <DialogContent className="sm:max-w-md">
         <DialogHeader><DialogTitle>Commit offset — partition {entry.partition}</DialogTitle>
           <DialogDescription>Administrative commit with the current generation {generationEtag}. It never joins or changes membership.</DialogDescription></DialogHeader>
-        <div className="grid gap-2 py-2">
+        <div className="grid gap-1.5 py-2">
           <Label htmlFor="commit-offset">Offset</Label>
           <Input id="commit-offset" inputMode="numeric" value={offset} onChange={(event) => setOffset(event.target.value)} className="font-mono" />
           {error && <ErrorBanner error={error} />}
@@ -235,9 +260,9 @@ function ResetOffsetsDialog({ open, onOpenChange, profileId, streamId, groupId, 
   const [force, setForce] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
+  const [confirmError, setConfirmError] = useState<Error | null>(null);
   const submit = async () => {
-    setBusy(true); setError(null);
+    setBusy(true); setConfirmError(null);
     try {
       await admin(profileId, `streams/${streamId}/consumer-groups/${groupId}:reset-offsets`, {
         method: "POST", idempotencyKey: newIdempotencyKey(), ifMatch: generationEtag, confirm: groupId,
@@ -251,7 +276,7 @@ function ResetOffsetsDialog({ open, onOpenChange, profileId, streamId, groupId, 
       toast.success("Offsets reset for every partition");
       setConfirmOpen(false); onOpenChange(false);
       onDone();
-    } catch (reason) { setError(reason instanceof Error ? reason : new Error(String(reason))); }
+    } catch (reason) { setConfirmError(reason instanceof Error ? reason : new Error(String(reason))); }
     finally { setBusy(false); }
   };
   return (
@@ -261,9 +286,9 @@ function ResetOffsetsDialog({ open, onOpenChange, profileId, streamId, groupId, 
           <DialogHeader><DialogTitle>Reset offsets</DialogTitle>
             <DialogDescription>Resets every partition. Active groups require force and exact confirmation.</DialogDescription></DialogHeader>
           <div className="grid gap-4 py-2">
-            <div className="grid gap-2"><Label>Strategy</Label>
+            <div className="grid gap-1.5"><Label htmlFor="reset-strategy">Strategy</Label>
               <Select value={strategy} onValueChange={setStrategy}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger id="reset-strategy"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="earliest">earliest</SelectItem>
                   <SelectItem value="latest">latest</SelectItem>
@@ -272,14 +297,13 @@ function ResetOffsetsDialog({ open, onOpenChange, profileId, streamId, groupId, 
                 </SelectContent>
               </Select>
             </div>
-            {strategy === "absolute" && <div className="grid gap-2"><Label>Offset</Label><Input inputMode="numeric" value={offset} onChange={(event) => setOffset(event.target.value)} className="font-mono" /></div>}
-            {strategy === "relative" && <div className="grid gap-2"><Label>Delta (negative to rewind)</Label><Input inputMode="numeric" value={delta} onChange={(event) => setDelta(event.target.value)} className="font-mono" /></div>}
+            {strategy === "absolute" && <div className="grid gap-1.5"><Label htmlFor="reset-offset">Offset</Label><Input id="reset-offset" inputMode="numeric" value={offset} onChange={(event) => setOffset(event.target.value)} className="font-mono" /></div>}
+            {strategy === "relative" && <div className="grid gap-1.5"><Label htmlFor="reset-delta">Delta (negative to rewind)</Label><Input id="reset-delta" inputMode="numeric" value={delta} onChange={(event) => setDelta(event.target.value)} className="font-mono" /></div>}
             {activeMembers > 0 && (
               <label className="flex items-center gap-2 text-sm">
-                <Switch checked={force} onCheckedChange={setForce} /> force with {activeMembers} active member(s)
+                <Switch checked={force} onCheckedChange={setForce} aria-label={`Force reset with ${activeMembers} active members`} /> force with {activeMembers} active member(s)
               </label>
             )}
-            {error && <ErrorBanner error={error} />}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
@@ -291,6 +315,9 @@ function ResetOffsetsDialog({ open, onOpenChange, profileId, streamId, groupId, 
         open={confirmOpen} onOpenChange={setConfirmOpen} confirmId={groupId} inFlight={busy}
         title={`Reset offsets for ${groupLabel}`}
         description={`Applies ${strategy} to every partition of this group.`}
+        context={<ConnectionContextLine profileId={profileId} />}
+        error={confirmError}
+        confirmLabel="Reset offsets"
         onConfirm={() => void submit()}
       />
     </>
@@ -304,9 +331,9 @@ function JoinSessionDialog({ open, onOpenChange, profileId, streamId, groupId, g
   const [leaseMs, setLeaseMs] = useState("30000");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
+  const [confirmError, setConfirmError] = useState<Error | null>(null);
   const submit = async () => {
-    setBusy(true); setError(null);
+    setBusy(true); setConfirmError(null);
     try {
       const response = await admin<{ data: { session_id: string; lease_ms: number; assigned_partitions: number[] } }>(
         profileId, `streams/${streamId}/consumer-groups/${groupId}/sessions`,
@@ -314,7 +341,7 @@ function JoinSessionDialog({ open, onOpenChange, profileId, streamId, groupId, g
       );
       onJoined({ session_id: response.json.data.session_id, lease_ms: response.json.data.lease_ms, assigned: response.json.data.assigned_partitions ?? [], joinedAt: Date.now() });
       toast.success("Management session joined");
-    } catch (reason) { setError(reason instanceof Error ? reason : new Error(String(reason))); }
+    } catch (reason) { setConfirmError(reason instanceof Error ? reason : new Error(String(reason))); }
     finally { setBusy(false); }
   };
   return (
@@ -324,8 +351,7 @@ function JoinSessionDialog({ open, onOpenChange, profileId, streamId, groupId, g
           <DialogHeader><DialogTitle>Join via management session</DialogTitle>
             <DialogDescription>Joining may rebalance active members of {groupLabel}. The session lease expires server-side regardless of this browser.</DialogDescription></DialogHeader>
           <div className="grid gap-4 py-2">
-            <div className="grid gap-2"><Label>Lease ms</Label><Input inputMode="numeric" value={leaseMs} onChange={(event) => setLeaseMs(event.target.value)} className="font-mono" /></div>
-            {error && <ErrorBanner error={error} />}
+            <div className="grid gap-1.5"><Label htmlFor="session-lease">Lease ms</Label><Input id="session-lease" inputMode="numeric" value={leaseMs} onChange={(event) => setLeaseMs(event.target.value)} className="font-mono" /></div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
@@ -337,6 +363,9 @@ function JoinSessionDialog({ open, onOpenChange, profileId, streamId, groupId, g
         open={confirmOpen} onOpenChange={setConfirmOpen} confirmId={groupId} inFlight={busy}
         title="Join consumer group"
         description="Confirms a management session join that can rebalance members."
+        context={<ConnectionContextLine profileId={profileId} />}
+        error={confirmError}
+        confirmLabel="Join group"
         onConfirm={() => void submit()}
       />
     </>
@@ -404,24 +433,23 @@ function SessionWorkspace({ profileId, streamId, groupId, session, onLeft, onRef
 
   const expired = remaining <= 0 || state === "expired";
   return (
-    <Card className={expired ? "opacity-70" : undefined}>
-      <CardHeader className="pb-2"><CardTitle className="text-sm flex items-center gap-2"><HeartPulse className="size-4 text-muted-foreground" />Management session</CardTitle></CardHeader>
-      <CardContent className="grid gap-3">
+    <Section title="Management session">
+      <div className={`grid gap-3 border bg-card p-4 ${expired ? "border-warning/50" : ""}`}>
         <div className="flex flex-wrap items-center gap-2">
           <CopyId id={session.session_id} />
-          <StateBadge state={expired ? "failed" : "active"} />
-          <Badge variant="outline" className="text-[10px]">lease {expired ? "expired" : formatDuration(remaining)}</Badge>
-          <Badge variant="outline" className="text-[10px]">assigned: {session.assigned.join(", ") || "none"}</Badge>
+          <StateBadge state={expired ? "expired" : "active"} />
+          <Badge variant="outline" className="text-xs">lease {expired ? "expired" : formatDuration(remaining)}</Badge>
+          <Badge variant="outline" className="text-xs">assigned: {session.assigned.join(", ") || "none"}</Badge>
           <div className="ml-auto flex gap-2">
             <Button size="sm" variant="outline" onClick={() => void heartbeat()} disabled={busy || expired}>Heartbeat</Button>
-            <Button size="sm" variant="destructive" onClick={() => void leave()} disabled={busy || expired}><LogOut className="size-3.5 mr-1" />Leave</Button>
+            <Button size="sm" variant="destructive" onClick={() => void leave()} disabled={busy || expired}><LogOut className="size-3.5" />Leave</Button>
           </div>
         </div>
         <p className="text-xs text-muted-foreground">Correctness relies on server lease expiry, not browser cleanup. Fetching reads only assigned partitions.</p>
-        <div className="flex items-end gap-2">
-          <div className="grid gap-1"><Label htmlFor="session-offset">Offset</Label>
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="grid gap-1.5"><Label htmlFor="session-offset">Offset</Label>
             <Input id="session-offset" value={offset} onChange={(event) => setOffset(event.target.value)} inputMode="numeric" className="w-28 font-mono" /></div>
-          <div className="grid gap-1"><Label htmlFor="session-max">Max records</Label>
+          <div className="grid gap-1.5"><Label htmlFor="session-max">Max records</Label>
             <Input id="session-max" value={maxRecords} onChange={(event) => setMaxRecords(event.target.value)} inputMode="numeric" className="w-24" /></div>
           <Button size="sm" variant="outline" onClick={() => void fetchRecords()} disabled={busy || expired}>Fetch assigned</Button>
         </div>
@@ -429,14 +457,15 @@ function SessionWorkspace({ profileId, streamId, groupId, session, onLeft, onRef
         {records.length > 0 && (
           <ul className="grid gap-1">
             {records.map((record) => (
-              <li key={record.offset} className="font-mono text-xs flex gap-3 rounded border px-2 py-1">
+              <li key={record.offset} className="flex gap-3 border px-2 py-1 font-mono text-xs">
                 <span className="text-muted-foreground">offset {record.offset}</span>
                 <span className="truncate">{record.body?.data ?? "(no body)"}</span>
               </li>
             ))}
           </ul>
         )}
-      </CardContent>
-    </Card>
+        {expired && <p className="inline-flex items-center gap-1.5 text-xs text-warning"><StatusDot tone="warning" />Session lease expired — join again to fetch or commit.</p>}
+      </div>
+    </Section>
   );
 }
