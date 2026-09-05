@@ -16,7 +16,7 @@
 
   <groupId>io.github.kuttidb</groupId>
   <artifactId>kuttidb-client</artifactId>
-  <version>0.0.7-beta</version>
+  <version>0.0.8-beta</version>
   <packaging>jar</packaging>
 
   <name>KuttiDB Java Client</name>
