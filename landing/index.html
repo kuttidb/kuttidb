@@ -45,6 +45,8 @@
 
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
+  /* clip, not hidden: creates no scroll container, so sticky header keeps working */
+  html, body { overflow-x: clip; }
   body {
     margin: 0;
     background: var(--bg);
@@ -134,6 +136,11 @@
     }
     .nav.open .nav-links a { padding: 9px 0; font-size: 16px; }
   }
+  @media (max-width: 430px) {
+    .nav { gap: 14px; }
+    .nav-cta .btn { padding: 8px 12px; font-size: 13px; }
+    .brand { font-size: 16px; }
+  }
 
   /* ------------------------------------------------------------------ hero */
   .hero {
@@ -153,9 +160,12 @@
     display: grid; grid-template-columns: 1.05fr .95fr; gap: 56px; align-items: center;
   }
   @media (max-width: 960px) { .hero-grid { grid-template-columns: 1fr; gap: 44px; } }
+  /* grid blowout guard: let columns shrink below their content's min width so
+     long code lines scroll inside <pre> instead of widening the page */
+  .hero-grid > *, .atomic > *, .bench-grid > *, .panel-grid > * { min-width: 0; }
 
   .eyebrow {
-    display: inline-flex; align-items: center; gap: 10px;
+    display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap;
     font-size: 13px; font-weight: 600; color: var(--muted);
     border: 1px solid var(--border-2); border-radius: 999px;
     padding: 7px 14px; margin-bottom: 26px;
@@ -211,11 +221,13 @@
   .codewin-bar .r { background: #e5566d; } .codewin-bar .y { background: #e2b542; } .codewin-bar .g { background: #57c26b; }
   .codewin-bar .title {
     margin-left: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--faint);
+    min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .codewin pre {
     margin: 0; padding: 18px 20px 20px;
-    overflow-x: auto; line-height: 1.62;
+    overflow-x: auto; -webkit-overflow-scrolling: touch; line-height: 1.62;
     font-family: var(--font-mono); font-size: 13px; color: #d9cdb4;
+    max-width: 100%;
   }
   .codewin .cm { color: #6f6350; }
   .codewin .kw { color: #f6c453; }
@@ -341,19 +353,6 @@
   table.bench td.hl { color: var(--gold); font-weight: 700; }
   table.bench tr:hover td { background: rgba(244,233,213,.02); }
 
-  /* --------------------------------------------------------------- clients */
-  .client-row { display: flex; flex-wrap: wrap; gap: 12px; }
-  .client {
-    display: inline-flex; align-items: center; gap: 10px;
-    border: 1px solid var(--border-2); border-radius: 14px;
-    padding: 13px 20px; text-decoration: none;
-    background: var(--surface);
-    transition: border-color .15s ease, transform .15s ease;
-  }
-  .client:hover { border-color: rgba(246,196,83,.4); transform: translateY(-2px); }
-  .client .cname { font-weight: 700; font-size: 15px; }
-  .client .cnote { font-size: 12.5px; color: var(--faint); }
-
   /* ------------------------------------------------------- sdk cap tabs */
   .sdk-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 42px; }
   .sdk-tab {
@@ -385,7 +384,7 @@
   .cap-list li.no::before { content: "—"; color: var(--faint); font-weight: 600; }
   .sdk-meta { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 8px; }
   .sdk-meta .pill { font-size: 11.5px; }
-  .sdk-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .sdk-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 12px; }
   .sdk-heading h3 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.012em; }
   .sdk-heading a {
     font: 600 12px var(--font-mono); letter-spacing: .06em;
@@ -483,6 +482,31 @@
   }
   .copybtn:hover { color: var(--gold); border-color: rgba(246,196,83,.4); }
   .copybtn.done { color: var(--green); border-color: rgba(143,209,138,.4); }
+
+  /* --------------------------------------------------------- mobile compact */
+  @media (max-width: 640px) {
+    body { font-size: 15.5px; }
+    .section { padding: 60px 0; }
+    .hero { padding: 66px 0 50px; }
+    .wrap { padding: 0 18px; }
+    h1 { font-size: clamp(30px, 9.4vw, 40px); }
+    .hero p.lede { font-size: 17px; }
+    .honest { padding: 26px 20px; }
+    .honest blockquote { font-size: 18px; }
+    .codewin { font-size: 12.5px; }
+    .codewin pre { font-size: 11.8px; padding: 13px 13px 15px; }
+    .codewin-bar { padding: 9px 12px; }
+    .codewin-bar .title { font-size: 11px; }
+    .copybtn { top: 40px; right: 10px; }
+    .stat { padding: 20px 16px; }
+    .commit-flow { font-size: 11.5px; padding: 11px 12px; }
+    table.bench, .model-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .sdk-tabs { gap: 7px; margin-bottom: 32px; }
+    .sdk-tab { padding: 9px 13px; font-size: 13px; }
+    .sdk-tab .v { display: none; }
+    .panel-grid { gap: 30px; }
+    .cta { padding: 74px 0; }
+  }
 </style>
 </head>
 <body>
@@ -499,7 +523,6 @@
       <a href="#atomic">Atomic ops</a>
       <a href="#benchmarks">Benchmarks</a>
       <a href="#quickstart">Quick start</a>
-      <a href="#clients">Clients</a>
       <a href="#docs">Docs</a>
     </nav>
     <div class="nav-cta">
@@ -792,33 +815,16 @@ $ ./kuttidb 7379 -</pre>
   </div>
 </section>
 
-<!-- ================================================================= CLIENTS -->
-<section class="section alt" id="clients">
-  <div class="wrap">
-    <p class="kicker reveal">Native clients, zero ceremony</p>
-    <h2 class="reveal">Talk to it from the language you already have.</h2>
-    <p class="section-lede reveal" style="margin-bottom:44px;">
-      First-class client libraries — TCP, shared-memory embed, and in-process transports where the platform allows.
-    </p>
-    <div class="client-row reveal">
-      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients"><span class="cname">Python</span><span class="cnote">TCP · shm embed · in-process</span></a>
-      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/nodejs"><span class="cname">Node.js</span><span class="cnote">zero dependencies</span></a>
-      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/go"><span class="cname">Go</span><span class="cnote">idiomatic, tested</span></a>
-      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/java"><span class="cname">Java</span><span class="cnote">no JVM needed server-side</span></a>
-      <a class="client" href="https://github.com/kuttidb/kuttidb"><span class="cname">C / C++</span><span class="cnote">libkuttidb_embed.dylib/.so</span></a>
-    </div>
-  </div>
-</section>
-
 <!-- ============================================================ SDK CAPS -->
-<section class="section" id="sdk">
+<section class="section alt" id="sdk">
   <div class="wrap">
     <p class="kicker reveal">Capability explorer</p>
     <h2 class="reveal">Every capability. Every client.<br />At the version the registry serves.</h2>
     <p class="section-lede reveal" style="margin-bottom:46px;">
       Pick a language — each tab lists what the published package ships today and walks the
       whole v1.8 surface in one pass: cache, queues, exchanges, atomic commits, single-flight,
-      stale-while-revalidate, and streams.
+      stale-while-revalidate, and streams. Sources live in
+      <a href="https://github.com/kuttidb/kuttidb/tree/main/clients" style="color:var(--orange);">clients/</a>.
     </p>
 
     <div class="sdk-tabs" role="tablist" aria-label="Client SDK capabilities">
@@ -1355,8 +1361,7 @@ kuttidb_embed_close(ec);</pre>
       <nav class="foot-links">
         <a href="#features">Features</a>
         <a href="#quickstart">Quick start</a>
-        <a href="#clients">Clients</a>
-        <a href="#sdk">SDKs</a>
+        <a href="#sdk">Clients &amp; SDKs</a>
         <a href="#benchmarks">Benchmarks</a>
         <a href="#docs">Docs</a>
         <a href="https://github.com/kuttidb/kuttidb">GitHub</a>
