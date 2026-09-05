@@ -91,7 +91,7 @@ the recovered state is identical. Retention remains a ceiling, not an
 acknowledgement: a crash before a trim boundary reaches the WAL replays
 slightly more history, and the startup retention pass re-trims it. Fetching
 from a lagging offset still walks the retained prefix before it — segment
-files with sparse offset indexes are the planned fix (see `ROADMAP.md`).
+files with sparse offset indexes are the planned fix.
 
 Durability acknowledgement with group fsync: all writers share one
 sequentially ordered WAL, and a record's durability implies the durability of

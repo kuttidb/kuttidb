@@ -29,8 +29,7 @@ Conventions while pre-1.0:
   cut. Breaking durability or acknowledgement changes must land behind a
   pre-release first and be called out in the release notes.
 
-There is no time-based cadence yet; releases follow milestones in
-[ROADMAP.md](../plans/ROADMAP.md).
+There is no time-based cadence yet; releases follow project milestones.
 
 ## Cutting a release
 
@@ -115,7 +114,7 @@ repair, and prefer a new patch version.
   `ubuntu-22.04` deliberately; moving to a newer image raises the glibc floor
   for every user — treat that as a compatibility decision, not a chore.
 - **Windows is not built.** The platform layer still needs the IOCP /
-  named-pipe / file-locking backend ([ROADMAP.md](../plans/ROADMAP.md)).
+  named-pipe / file-locking backend; that port is planned but not started.
 - **macOS signing/notarization is not done yet.** Binaries are unsigned; the
   first run may need a right-click → Open or
   `xattr -d com.apple.quarantine`. Gatekeeper policy is tracked in the

@@ -51,8 +51,4 @@ clients/python/dist/
 /landing/demo.tar.gz
 
 # Local planning documents — kept out of the repository by request.
-# Historical plan files remain tracked for their public inbound links.
-docs/plans/MANAGEMENT_UI_REDESIGN_INSTRUCTION.md
-docs/plans/MANAGEMENT_UI_REDESIGN_QA_PLAN.md
-docs/plans/MANAGEMENT_UI_INDEPENDENT_AUDIT_PLAN.md
-docs/plans/assets/
+docs/plans/

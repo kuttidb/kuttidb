@@ -13,7 +13,6 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | [`messaging/`](messaging) | Queue, exchange, and stream semantics |
 | [`operations/`](operations) | Deployment, Docker, Kubernetes, benchmarks |
 | [`api/`](api) | Management API reference |
-| [`plans/`](plans) | Roadmap and implementation plans / instructions used for development |
 | [`adr/`](adr) | Architecture decision records |
 | [`SECURITY.md`](SECURITY.md) | Security policy (kept directly under `docs/` so GitHub still recognizes it) |
 
@@ -40,6 +39,4 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | [operations/KUBERNETES.md](operations/KUBERNETES.md) | Manifests, probes, and production notes |
 | [operations/BENCHMARKS.md](operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [guides/MIGRATION.md](guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
-| [plans/ROADMAP.md](plans/ROADMAP.md) | Milestones, priorities, and known limitations |
-| [plans/SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md](plans/SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md) | Agent assignment: bounded resources, mixed workloads, disk-backed messaging, and single-server SaaS performance |
 | [../openapi/management-v1.yaml](../openapi/management-v1.yaml) | Versioned Management API contract |

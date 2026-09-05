@@ -312,7 +312,6 @@ ports, and a Prometheus metrics listener. Multi-architecture images cover
 | [BENCHMARKS.md](docs/operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [MIGRATION.md](docs/guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
 | [CLIENT_PUBLISHING.md](docs/operations/CLIENT_PUBLISHING.md) | Publishing the client SDKs to PyPI, npm, crates.io, and Go |
-| [SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md](docs/plans/SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md) | Agent assignment: bounded resources, mixed workloads, disk-backed messaging, and single-server SaaS performance |
 | [openapi/management-v1.yaml](openapi/management-v1.yaml) | Versioned Management API contract |
 
 ## Testing and benchmarks
@@ -328,8 +327,7 @@ runs, and ASLR-safe embedded regions. Changes to acknowledgement or recovery
 behavior require a matching crash-test. Console changes also require
 `pnpm lint && pnpm test` from `apps/management-ui`.
 
-[Recorded benchmarks and methodology](docs/operations/BENCHMARKS.md) ·
-[Roadmap](docs/plans/ROADMAP.md)
+[Recorded benchmarks and methodology](docs/operations/BENCHMARKS.md)
 
 ## What KuttiDB is not
 
