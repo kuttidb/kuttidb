@@ -51,6 +51,16 @@ Keep published package coordinates aligned with the client manifests and
 [publishing guide](CLIENT_PUBLISHING.md). C/C++ uses the repository's native
 library build instructions; it has no registry entry in that publishing guide.
 
+## Server installation
+
+The homepage's installation section distinguishes the official binary installer
+from a source build. Keep its command and support claims aligned with
+[`landing/install.sh`](../../landing/install.sh) and
+[GETTING_STARTED.md](../guides/GETTING_STARTED.md): the official installer
+supports macOS and Linux on arm64 and x86_64, verifies release checksums, and
+installs to `~/.local/bin` by default. Source-build commands are run from a
+cloned repository.
+
 ## Content sources
 
 Product descriptions follow the [project README](../../README.md),
