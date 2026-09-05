@@ -354,6 +354,46 @@
   .client .cname { font-weight: 700; font-size: 15px; }
   .client .cnote { font-size: 12.5px; color: var(--faint); }
 
+  /* ------------------------------------------------------- sdk cap tabs */
+  .sdk-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 42px; }
+  .sdk-tab {
+    display: inline-flex; align-items: baseline; gap: 8px;
+    font: inherit; font-size: 14px; font-weight: 700;
+    color: var(--muted); background: var(--surface);
+    border: 1px solid var(--border-2); border-radius: 12px;
+    padding: 11px 18px; cursor: pointer;
+    transition: border-color .15s ease, color .15s ease, background .15s ease;
+  }
+  .sdk-tab:hover { border-color: rgba(246,196,83,.4); color: var(--text); }
+  .sdk-tab[aria-selected="true"] {
+    color: var(--text); border-color: rgba(246,196,83,.5); background: var(--surface-2);
+  }
+  .sdk-tab .v { font: 600 11px var(--font-mono); color: var(--faint); }
+  .sdk-tab[aria-selected="true"] .v { color: var(--orange); }
+  .sdk-panel[hidden] { display: none; }
+  .panel-grid { display: grid; grid-template-columns: .92fr 1.08fr; gap: 46px; align-items: start; }
+  @media (max-width: 960px) { .panel-grid { grid-template-columns: 1fr; gap: 36px; } }
+  .cap-list {
+    margin: 26px 0 0; padding: 0; list-style: none;
+    display: grid; grid-template-columns: 1fr; gap: 9px 22px;
+    color: var(--muted); font-size: 14px; line-height: 1.5;
+  }
+  @media (min-width: 520px) { .cap-list { grid-template-columns: 1fr 1fr; } }
+  .cap-list li { position: relative; padding-left: 24px; }
+  .cap-list li::before { content: "✓"; position: absolute; left: 0; top: 0; color: var(--green); font-weight: 700; }
+  .cap-list li b { color: var(--text); font-weight: 600; }
+  .cap-list li.no::before { content: "—"; color: var(--faint); font-weight: 600; }
+  .sdk-meta { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .sdk-meta .pill { font-size: 11.5px; }
+  .sdk-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .sdk-heading h3 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.012em; }
+  .sdk-heading a {
+    font: 600 12px var(--font-mono); letter-spacing: .06em;
+    color: var(--orange); text-decoration: none; white-space: nowrap;
+  }
+  .sdk-heading a:hover { color: var(--gold); }
+  .sdk-note { color: var(--faint); font-size: 12.5px; margin: 12px 0 0; }
+
   /* ---------------------------------------------------------------- honest */
   .honest {
     border: 1px solid var(--border-2);
@@ -765,9 +805,476 @@ $ ./kuttidb 7379 -</pre>
       <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/nodejs"><span class="cname">Node.js</span><span class="cnote">zero dependencies</span></a>
       <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/go"><span class="cname">Go</span><span class="cnote">idiomatic, tested</span></a>
       <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/java"><span class="cname">Java</span><span class="cnote">no JVM needed server-side</span></a>
-      <a class="client" href="https://github.com/kuttidb/kuttidb/tree/main/clients/rust"><span class="cname">Rust</span><span class="cnote">safe wrapper</span></a>
       <a class="client" href="https://github.com/kuttidb/kuttidb"><span class="cname">C / C++</span><span class="cnote">libkuttidb_embed.dylib/.so</span></a>
     </div>
+  </div>
+</section>
+
+<!-- ============================================================ SDK CAPS -->
+<section class="section" id="sdk">
+  <div class="wrap">
+    <p class="kicker reveal">Capability explorer</p>
+    <h2 class="reveal">Every capability. Every client.<br />At the version the registry serves.</h2>
+    <p class="section-lede reveal" style="margin-bottom:46px;">
+      Pick a language — each tab lists what the published package ships today and walks the
+      whole v1.8 surface in one pass: cache, queues, exchanges, atomic commits, single-flight,
+      stale-while-revalidate, and streams.
+    </p>
+
+    <div class="sdk-tabs" role="tablist" aria-label="Client SDK capabilities">
+      <button class="sdk-tab" role="tab" data-sdk="python" id="tab-python" aria-controls="sdk-python" aria-selected="true">Python <span class="v">0.0.6b0</span></button>
+      <button class="sdk-tab" role="tab" data-sdk="node" id="tab-node" aria-controls="sdk-node" aria-selected="false">Node.js <span class="v">0.0.6-beta</span></button>
+      <button class="sdk-tab" role="tab" data-sdk="go" id="tab-go" aria-controls="sdk-go" aria-selected="false">Go <span class="v">go-v0.0.6-beta</span></button>
+      <button class="sdk-tab" role="tab" data-sdk="java" id="tab-java" aria-controls="sdk-java" aria-selected="false">Java <span class="v">0.0.8-beta</span></button>
+      <button class="sdk-tab" role="tab" data-sdk="rust" id="tab-rust" aria-controls="sdk-rust" aria-selected="false">Rust <span class="v">0.0.6-beta</span></button>
+      <button class="sdk-tab" role="tab" data-sdk="c" id="tab-c" aria-controls="sdk-c" aria-selected="false">C / C++ <span class="v">in repo</span></button>
+    </div>
+
+    <!-- ============================================================ PYTHON -->
+    <div class="sdk-panel" data-sdk="python" id="sdk-python" role="tabpanel" aria-labelledby="tab-python">
+      <div class="panel-grid">
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">sh — install (PyPI)</span></div>
+<pre>$ pip install kuttidb</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <ul class="cap-list">
+            <li><b>Cache</b> — put/get/delete, TTL, eviction</li>
+            <li><b>KV batches</b> — put_many / get_many</li>
+            <li><b>Stats, health &amp; capabilities</b></li>
+            <li><b>Durable queues</b> — dead-letter, named consumers</li>
+            <li><b>Queue batches &amp; inventory</b></li>
+            <li><b>Exchanges</b> — direct / fanout / topic, alternates</li>
+            <li><b>Atomic cache + messaging</b> — one commit id</li>
+            <li><b>Single-flight &amp; SWR</b> loading</li>
+            <li><b>Partitioned streams</b> — groups, keyed fetch</li>
+            <li><b>Shared-memory embed</b> — KuttiEmbed / LocalKuttiDB</li>
+            <li><b>Managed lifecycle</b> — private local server</li>
+            <li><b>AUTH + TLS</b> — stdlib only, no dependencies</li>
+          </ul>
+          <div class="sdk-meta">
+            <span class="pill"><b>PyPI</b> pypi.org/project/kuttidb</span>
+            <span class="pill">TCP</span><span class="pill">TLS</span><span class="pill">Unix</span>
+            <span class="pill">embed</span><span class="pill">managed</span>
+          </div>
+        </div>
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">python — the full v1.8 surface in one pass</span></div>
+<pre>from kuttidb import KuttiDBClient
+
+with KuttiDBClient(port=7379) as db:
+    db.health()                                   # every engine writable?
+    db.put("greeting", b"hello", ttl=60)          # TTL in seconds
+    db.put_many([("a", b"1"), ("b", b"2")])       # one round trip
+
+    db.queue_declare("jobs", durable=True, max_depth=100)
+    db.queue_publish("jobs", b"payload")
+    job = db.queue_consume("jobs", visibility=30)
+    db.queue_ack("jobs", job["id"])
+
+    db.exchange_declare("events", type="topic", durable=True)
+    db.exchange_bind("events", "jobs", "order.*")
+    routes = db.exchange_publish("events", "order.new", b"event")
+
+    # one durable commit: cache write + message delivery
+    r = db.put_and_publish("k", b"v", exchange="events", routing_key="order.new")
+    assert r["tx_id"] &gt; 0 and r["routed"] == routes
+
+    # anti-stampede loading and stale-while-revalidate
+    db.get_or_load("hot", lambda: b"expensive", ttl=60)
+    db.put_swr("k", b"fresh", ttl=30, stale_for=60)
+    r = db.get_or_refresh("k", lease=5)           # value / stale / refresh
+
+    db.stream_declare("orders", partitions=2)
+    p = db.stream_append("orders", b"record", key=b"user-1")
+    db.stream_commit("orders", "workers", p["partition"], p["offset"])
+
+with KuttiDBClient.managed(data_dir="./data", idle_timeout=60) as local:
+    local.put("k", b"v")                          # private local server</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <p class="sdk-note">Single connection per instance — worker threads dial their own clients. Misses return <code>None</code>, never exceptions.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================== NODE -->
+    <div class="sdk-panel" data-sdk="node" id="sdk-node" role="tabpanel" aria-labelledby="tab-node" hidden>
+      <div class="panel-grid">
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">sh — install (npm)</span></div>
+<pre>$ npm install @kuttidb/client@beta
+<span class="cm"># 0.0.6-beta — prereleases publish under the `beta` dist-tag</span></pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <ul class="cap-list">
+            <li><b>Cache</b> — put/get/delete, TTL, eviction</li>
+            <li><b>KV batches</b> — putMany / getMany</li>
+            <li><b>Stats, health &amp; capabilities</b></li>
+            <li><b>Durable queues</b> — dead-letter, named consumers</li>
+            <li><b>Queue batches &amp; inventory</b></li>
+            <li><b>Exchanges</b> — direct / fanout / topic, alternates</li>
+            <li><b>Atomic cache + messaging</b> — one commit id</li>
+            <li><b>Single-flight &amp; SWR</b> loading</li>
+            <li><b>Partitioned streams</b> — groups, keyed fetch</li>
+            <li><b>Built-in pool</b> — pipelined connections</li>
+            <li><b>Managed lifecycle</b> — Client.managed()</li>
+            <li><b>AUTH + TLS</b> — zero dependencies</li>
+          </ul>
+          <div class="sdk-meta">
+            <span class="pill"><b>npm</b> @kuttidb/client</span>
+            <span class="pill">TCP</span><span class="pill">TLS</span><span class="pill">Unix</span>
+            <span class="pill">pool</span><span class="pill">managed</span>
+          </div>
+        </div>
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">node — the full v1.8 surface in one pass</span></div>
+<pre>const { Client } = require("@kuttidb/client");
+
+const db = new Client({ port: 7379, poolSize: 4 });
+await db.health();
+await db.put("greeting", Buffer.from("hello"), { ttl: 60 });
+await db.putMany([["a", "1"], ["b", "2"]]);
+
+await db.queueDeclare("jobs", { durable: true, maxDepth: 100 });
+await db.queuePublish("jobs", Buffer.from("payload"));
+const msg = await db.queueConsume("jobs", { visibility: 30 });
+await db.queueAck("jobs", msg.id);
+
+await db.exchangeDeclare("events", { type: "topic", durable: true });
+await db.exchangeBind("events", "jobs", "order.*");
+const routes = await db.exchangePublish("events", "order.new",
+                                        Buffer.from("event"));
+
+// one durable commit: cache write + message delivery
+await db.putAndPublish("k", Buffer.from("v"),
+                       { exchange: "events", routingKey: "order.new" });
+
+// anti-stampede loading and stale-while-revalidate
+await db.getOrLoad("hot", async () =&gt; Buffer.from("expensive"),
+                   { ttl: 60 });
+await db.putSwr("k", Buffer.from("fresh"),
+                { ttl: 30, staleFor: 60, refreshAfter: null });
+await db.getOrRefresh("k", { lease: 5 });
+
+await db.streamDeclare("orders", { partitions: 2 });
+const pos = await db.streamAppend("orders",
+                                  Buffer.from("record"), { key: "user-1" });
+await db.streamCommit("orders", "workers", pos.partition, pos.offset);</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <p class="sdk-note">Async/await throughout; the pool pipelines requests so a slow consumer never blocks cache traffic.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================================================================ GO -->
+    <div class="sdk-panel" data-sdk="go" id="sdk-go" role="tabpanel" aria-labelledby="tab-go" hidden>
+      <div class="panel-grid">
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">sh — install (go modules)</span></div>
+<pre>$ go get github.com/kuttidb/kuttidb/clients/go
+<span class="cm"># released as git tags: go-v0.0.6-beta</span></pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <ul class="cap-list">
+            <li><b>Cache</b> — Put/Get/Delete, TTL, eviction</li>
+            <li><b>KV batches</b> — PutMany / GetMany</li>
+            <li><b>Stats, health &amp; capabilities</b></li>
+            <li><b>Durable queues</b> — dead-letter, named consumers</li>
+            <li><b>Queue batches &amp; inventory</b></li>
+            <li><b>Exchanges</b> — direct / fanout / topic, alternates</li>
+            <li><b>Atomic cache + messaging</b> — one commit id</li>
+            <li><b>Single-flight &amp; SWR</b> loading</li>
+            <li><b>Partitioned streams</b> — groups, keyed fetch</li>
+            <li><b>Built-in pool</b> + <b>cgo embed</b> client</li>
+            <li><b>Managed lifecycle</b> — NewManaged()</li>
+            <li><b>AUTH + TLS</b></li>
+          </ul>
+          <div class="sdk-meta">
+            <span class="pill"><b>module</b> clients/go</span>
+            <span class="pill">TCP</span><span class="pill">TLS</span><span class="pill">Unix</span>
+            <span class="pill">pool</span><span class="pill">cgo embed</span><span class="pill">managed</span>
+          </div>
+        </div>
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">go — the full v1.8 surface in one pass</span></div>
+<pre>import kuttidb "github.com/kuttidb/kuttidb/clients/go"
+
+c, err := kuttidb.New("127.0.0.1:7379", 4) // pooled
+if err != nil { log.Fatal(err) }
+defer c.Close()
+_, _ = c.Health()
+_ = c.Put("greeting", []byte("hello"))
+_ = c.PutWithTTL("brief", []byte("v"), 30*time.Second)
+_ = c.PutMany(map[string][]byte{"a": []byte("1")})
+
+_ = c.QueueDeclare("jobs", kuttidb.QueueOptions{Durable: true, MaxDepth: 100})
+_, _ = c.QueuePublish("jobs", []byte("payload"), 0)
+d, _ := c.QueueConsume("jobs", 30*time.Second)
+_, _ = c.QueueAck("jobs", d.DeliveryTag)
+
+_ = c.ExchangeDeclare("events", kuttidb.ExchangeOptions{Type: kuttidb.ExchangeTopic, Durable: true})
+_ = c.ExchangeBind("events", "jobs", "order.*")
+routes, _ := c.ExchangePublish("events", "order.new", []byte("event"), 0)
+
+// one durable commit: cache write + message delivery
+r, _ := c.PutAndEnqueue("k", []byte("v"), "jobs", 0)
+_ = r.TransactionID
+
+// anti-stampede loading and stale-while-revalidate
+_, _ = c.GetOrLoad("hot", func() ([]byte, error) { return []byte("x"), nil },
+                   30*time.Second, 5*time.Second, 10*time.Second)
+_ = c.PutSWR("k", []byte("fresh"), 30*time.Second, time.Minute, 0)
+_, _ = c.GetOrRefresh("k", 5*time.Second)
+
+_ = c.StreamDeclare("orders", kuttidb.StreamOptions{Partitions: 2})
+pos, _ := c.StreamAppend("orders", []byte("record"), []byte("user-1"), nil)
+_ = c.StreamCommit("orders", "workers", uint32(pos.Partition), pos.Offset)</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <p class="sdk-note">The pool shares connections across goroutines; connection-bound state (deliveries, leases, group membership) rides a dedicated connection.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================== JAVA -->
+    <div class="sdk-panel" data-sdk="java" id="sdk-java" role="tabpanel" aria-labelledby="tab-java" hidden>
+      <div class="panel-grid">
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">xml — install (Maven Central)</span></div>
+<pre>&lt;dependency&gt;
+  &lt;groupId&gt;io.github.kuttidb&lt;/groupId&gt;
+  &lt;artifactId&gt;kuttidb-client&lt;/artifactId&gt;
+  &lt;version&gt;0.0.8-beta&lt;/version&gt;
+&lt;/dependency&gt;
+<span class="cm">// Gradle: implementation("io.github.kuttidb:kuttidb-client:0.0.8-beta")</span></pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <ul class="cap-list">
+            <li><b>Cache</b> — put/get/delete, TTL, eviction</li>
+            <li><b>KV batches</b> — putMany / getMany / putManyTTL</li>
+            <li><b>Stats, health &amp; capabilities</b></li>
+            <li><b>Durable queues</b> — dead-letter, named consumers</li>
+            <li><b>Queue batches &amp; inventory</b></li>
+            <li><b>Exchanges</b> — direct / fanout / topic, alternates</li>
+            <li><b>Atomic cache + messaging</b> — one commit id</li>
+            <li><b>Single-flight &amp; SWR</b> loading</li>
+            <li><b>Partitioned streams</b> — groups, keyed fetch</li>
+            <li><b>Built-in pool</b> + dedicated state connection</li>
+            <li><b>Managed lifecycle</b> — connectManaged() unix/tcp</li>
+            <li><b>AUTH + TLS</b> — hostname &amp; IP verification</li>
+          </ul>
+          <div class="sdk-meta">
+            <span class="pill"><b>Maven</b> kuttidb-client</span>
+            <span class="pill">Java 17+</span><span class="pill">TCP</span><span class="pill">TLS</span>
+            <span class="pill">Unix</span><span class="pill">pool</span><span class="pill">managed</span>
+          </div>
+        </div>
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">java — the full v1.8 surface in one pass</span></div>
+<pre>import io.github.kuttidb.client.*;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+try (KuttiDBClient db = new KuttiDBClient("127.0.0.1", 7379)) {
+    db.health();
+    db.put("greeting", "hello".getBytes(StandardCharsets.UTF_8), 60_000);
+    db.putMany(Map.of("a", "1".getBytes(StandardCharsets.UTF_8)));
+
+    db.queueDeclare("jobs",
+            new KuttiDBClient.QueueOptions().durable(true).maxDepth(100));
+    db.queuePublish("jobs", "payload".getBytes(StandardCharsets.UTF_8));
+    KuttiDBClient.QueueDelivery d = db.queueConsume("jobs", 30_000);
+    db.queueAck("jobs", d.deliveryTag);
+
+    db.exchangeDeclare("events", new KuttiDBClient.ExchangeOptions()
+            .type(KuttiDBClient.ExchangeType.TOPIC).durable(true));
+    db.exchangeBind("events", "jobs", "order.*");
+    db.exchangePublish("events", "order.new",
+            "event".getBytes(StandardCharsets.UTF_8));
+
+    // one durable commit: cache write + message delivery
+    KuttiDBClient.AtomicResult r = db.putAndEnqueue("k",
+            "v".getBytes(StandardCharsets.UTF_8), "jobs", 0);
+    assert r.transactionId &gt; 0;
+
+    // anti-stampede loading and stale-while-revalidate
+    byte[] v = db.getOrLoad("hot",
+            () -&gt; "expensive".getBytes(StandardCharsets.UTF_8),
+            30_000, 5_000, 10_000);
+    db.putSWR("k", "fresh".getBytes(StandardCharsets.UTF_8),
+              30_000, 60_000, 0);
+    db.getOrRefresh("k", 5_000);
+
+    db.streamDeclare("orders", new KuttiDBClient.StreamOptions().partitions(2));
+    KuttiDBClient.StreamPosition p = db.streamAppend("orders",
+            "record".getBytes(StandardCharsets.UTF_8),
+            "user-1".getBytes(StandardCharsets.UTF_8), null);
+    db.streamCommit("orders", "workers", (int) p.partition, p.offset);
+}</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <p class="sdk-note">Thread-safe pooled client (<code>io.github.kuttidb.client</code>); misses return <code>null</code>/<code>false</code>/zero and unroutable publishes report zero routes.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================== RUST -->
+    <div class="sdk-panel" data-sdk="rust" id="sdk-rust" role="tabpanel" aria-labelledby="tab-rust" hidden>
+      <div class="panel-grid">
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">sh — install (crates.io)</span></div>
+<pre>$ cargo add kuttidb</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <ul class="cap-list">
+            <li><b>Cache</b> — put/get/delete, TTL, eviction</li>
+            <li><b>KV batches</b> — put_many / get_many</li>
+            <li><b>Stats, health &amp; capabilities</b></li>
+            <li><b>Durable queues</b> — dead-letter, named consumers</li>
+            <li><b>Queue batches &amp; inventory</b></li>
+            <li><b>Exchanges</b> — direct / fanout / topic, alternates</li>
+            <li><b>Atomic cache + messaging</b> — one commit id</li>
+            <li><b>Single-flight &amp; SWR</b> loading</li>
+            <li><b>Partitioned streams</b> — groups, keyed fetch</li>
+            <li><b>Pool</b> — verified TLS, Rustls-backed</li>
+            <li><b>Managed lifecycle</b> — connect_managed()</li>
+            <li><b>AUTH + TLS</b></li>
+          </ul>
+          <div class="sdk-meta">
+            <span class="pill"><b>crates.io</b> kuttidb</span>
+            <span class="pill">TCP</span><span class="pill">TLS</span>
+            <span class="pill">Pool</span><span class="pill">managed</span>
+          </div>
+        </div>
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">rust — the full v1.8 surface in one pass</span></div>
+<pre>use std::time::Duration;
+use kuttidb::{Client, ExchangeOptions, ExchangeType, QueueOptions, StreamOptions};
+
+let mut c = Client::connect("127.0.0.1:7379")?;
+c.health()?;
+c.put("greeting", b"hello", Some(Duration::from_secs(60)))?;
+c.put_many(&amp;[("a", b"1".as_slice()), ("b", b"2")])?;
+
+c.queue_declare("jobs", QueueOptions {
+    durable: true, max_depth: 100, ..Default::default()
+})?;
+c.queue_publish("jobs", b"payload", None)?;
+let d = c.queue_consume("jobs", Duration::from_secs(30))?.unwrap();
+c.queue_ack("jobs", d.delivery_tag)?;
+
+c.exchange_declare("events", ExchangeOptions {
+    exchange_type: ExchangeType::Topic, ..Default::default()
+})?;
+c.exchange_bind("events", "jobs", "order.*")?;
+c.exchange_publish("events", "order.new", b"event", None)?;
+
+// one durable commit: cache write + message delivery
+let r = c.put_and_enqueue("k", b"v", "jobs", None)?;
+assert!(r.transaction_id &gt; 0);
+
+// anti-stampede loading and stale-while-revalidate
+let _ = c.get_or_load("hot", || Ok(Some(b"expensive".to_vec())),
+                      Some(Duration::from_secs(30)),
+                      Duration::from_secs(5), Duration::from_secs(10))?;
+c.put_swr("k", b"fresh", Duration::from_secs(30),
+          Duration::from_secs(60), None)?;
+let _ = c.get_or_refresh("k", Duration::from_secs(5))?;
+
+c.stream_declare("orders", StreamOptions {
+    partitions: 2, ..Default::default()
+})?;
+let pos = c.stream_append("orders", b"record", b"user-1", None)?;
+c.stream_commit("orders", "workers", pos.partition as u32, pos.offset)?;</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <p class="sdk-note">Errors are <code>Result</code> everywhere; a <code>Pool</code> hands out exclusive <code>&amp;mut Client</code> access via <code>with()</code>.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ C/C++ -->
+    <div class="sdk-panel" data-sdk="c" id="sdk-c" role="tabpanel" aria-labelledby="tab-c" hidden>
+      <div class="panel-grid">
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">sh — build the embed library</span></div>
+<pre>$ make libkuttidb_embed.dylib   <span class="cm"># .so on Linux</span>
+$ cc app.c -Isrc -L. -lkuttidb_embed -o app</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <ul class="cap-list">
+            <li><b>Shared-memory embed</b> — zero syscalls per op</li>
+            <li><b>ASLR-safe CEMBv3</b> mapping</li>
+            <li><b>Process-local handle</b> — never persisted</li>
+            <li><b>WAL-preserving writes</b> under flock</li>
+            <li><b>Cross-process shard locks</b> — owner recovery</li>
+            <li><b>TTL sweep &amp; eviction</b> shared with the server</li>
+            <li class="no">Queues / exchanges / streams — use the socket clients</li>
+          </ul>
+          <div class="sdk-meta">
+            <span class="pill"><b>in repo</b> libkuttidb_embed.dylib / .so</span>
+            <span class="pill">same host</span><span class="pill">CEMBv3</span>
+          </div>
+        </div>
+        <div>
+          <div class="codeblock">
+            <div class="codewin">
+              <div class="codewin-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">c — attach to the server's embed region</span></div>
+<pre>#include "kuttidb.h"
+#include "embed.h"
+
+KuttiEmbed *ec = kuttidb_embed_open("/var/lib/kuttidb/db.embed");
+KuttiDB *db = kuttidb_embed_cache(ec);
+
+kuttidb_embed_put(ec, "greeting", 8, "hello", 5, 0);
+
+KuttiVec out = {0};
+kuttidb_get_into(db, "greeting", 8, &amp;out);  <span class="cm">/* out.data, out.len */</span>
+
+kuttidb_embed_close(ec);</pre>
+            </div>
+            <button class="copybtn" data-copy="1">COPY</button>
+          </div>
+          <p class="sdk-note">Start the server with an embed region path (`./kuttidb 7379 wal 100 unix 512 /path/db.embed`) and every attached process maps the same live table. See <a href="https://github.com/kuttidb/kuttidb/blob/main/docs/design/PROTOCOL.md#embedded-shared-memory-mode" style="color:var(--orange);">the protocol doc</a>.</p>
+        </div>
+      </div>
+    </div>
+
   </div>
 </section>
 
@@ -848,6 +1355,8 @@ $ ./kuttidb 7379 -</pre>
       <nav class="foot-links">
         <a href="#features">Features</a>
         <a href="#quickstart">Quick start</a>
+        <a href="#clients">Clients</a>
+        <a href="#sdk">SDKs</a>
         <a href="#benchmarks">Benchmarks</a>
         <a href="#docs">Docs</a>
         <a href="https://github.com/kuttidb/kuttidb">GitHub</a>
@@ -889,6 +1398,27 @@ $ ./kuttidb 7379 -</pre>
   } else {
     document.querySelectorAll('.reveal').forEach(function (el) { el.classList.add('in'); });
   }
+
+  // client capability tabs — progressive enhancement; first tab shows without JS
+  (function () {
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.sdk-tab'));
+    if (!tabs.length) return;
+    var panels = Array.prototype.slice.call(document.querySelectorAll('.sdk-panel'));
+    function select(name) {
+      tabs.forEach(function (t) { t.setAttribute('aria-selected', t.dataset.sdk === name ? 'true' : 'false'); });
+      panels.forEach(function (p) { p.hidden = p.dataset.sdk !== name; });
+    }
+    tabs.forEach(function (t) {
+      t.addEventListener('click', function () { select(t.dataset.sdk); });
+      t.addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        var all = tabs, i = all.indexOf(t), next = e.key === 'ArrowRight' ? (i + 1) % all.length : (i - 1 + all.length) % all.length;
+        all[next].focus(); select(all[next].dataset.sdk); e.preventDefault();
+      });
+    });
+    var h = location.hash.match(/^#sdk-([a-z]+)$/);
+    if (h && document.getElementById('sdk-' + h[1])) select(h[1]);
+  })();
 
   // close mobile menu after navigating
   document.querySelectorAll('.nav-links a').forEach(function (a) {
