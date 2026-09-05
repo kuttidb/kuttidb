@@ -73,6 +73,11 @@ launcher.
 Build and run:
 
 ```sh
+# option A: prebuilt binary (macOS arm64/x86_64, Linux x86_64/arm64)
+curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
+kuttidb 7379 kuttidb.wal
+
+# option B: build from source
 make            # builds kuttidb, kuttidb-bench, and the embedded library
 ./kuttidb 7379 kuttidb.wal
 ```
@@ -188,6 +193,7 @@ Prometheus metrics listener (`--metrics-bind 127.0.0.1:9099`). Multi-architectur
 | [BENCHMARKS.md](docs/operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [MIGRATION.md](docs/guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |
 | [CLIENT_PUBLISHING.md](docs/operations/CLIENT_PUBLISHING.md) | Publishing the client SDKs to PyPI, npm, crates.io, and Go |
+| [SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md](docs/plans/SINGLE_NODE_SAAS_IMPROVEMENT_INSTRUCTION.md) | Agent assignment: bounded resources, mixed workloads, disk-backed messaging, and single-server SaaS performance |
 | [openapi/management-v1.yaml](openapi/management-v1.yaml) | Versioned Management API contract |
 
 ## Testing and benchmarks

@@ -8,9 +8,18 @@ This guide uses Python because the included client makes the examples short.
 The same server also works with the Go, Java, Rust, and Node.js clients in
 [`clients/`](../../clients/).
 
-## 1. Build and run it
+## 1. Install and run it
 
-From the project directory:
+**Option A — prebuilt binary (no toolchain needed).** The installer detects
+your platform (macOS arm64/x86_64, Linux x86_64/arm64), downloads the latest
+release, and verifies its checksum:
+
+```sh
+curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
+kuttidb 7379 kuttidb.wal
+```
+
+**Option B — build from source.** From the project directory:
 
 ```sh
 make

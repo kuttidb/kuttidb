@@ -789,26 +789,29 @@ db.<span class="fn">queue_browse</span>(<span class="st">"orders.created"</span>
 <section class="section" id="quickstart">
   <div class="wrap">
     <p class="kicker reveal">Quick start</p>
-    <h2 class="reveal">From git clone to durable queue in three commands.</h2>
+    <h2 class="reveal">From curl to durable queue in three commands.</h2>
     <p class="section-lede reveal" style="margin-bottom:46px;">
-      One executable, one configuration, one data directory. The WAL file is the local recovery log —
+      One executable, one configuration, one data directory. The installer picks the right binary
+      for your platform from GitHub Releases (macOS arm64/x86_64, Linux x86_64/arm64) and verifies
+      its checksum — no build tools needed. The WAL file is the local recovery log —
       keep it and your durable queue and stream data survive the restart.
     </p>
     <div class="codeblock reveal" style="max-width:760px;">
       <div class="codewin">
         <div class="codewin-bar">
           <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-          <span class="title">sh — build &amp; run</span>
+          <span class="title">sh — install &amp; run</span>
         </div>
-<pre><span class="cm"># build kuttidb, the bench tool, and the embedded library</span>
-$ make
+<pre><span class="cm"># install the official prebuilt binary (sha256-verified)</span>
+$ curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
+<span class="ok">kuttidb installed ✓ — kuttidb, kuttidb-cli, kuttidb-bench in ~/.local/bin</span>
 
 <span class="cm"># start listening on 127.0.0.1:7379 with a durable WAL</span>
-$ ./kuttidb 7379 kuttidb.wal
+$ kuttidb 7379 kuttidb.wal
 <span class="ok">kuttidb: listening on 127.0.0.1:7379 — warm out of the oven 🥖</span>
 
-<span class="cm"># throwaway experiment instead? WAL to stdout:</span>
-$ ./kuttidb 7379 -</pre>
+<span class="cm"># building from source instead? clone the repo, then `make`.
+# throwaway experiment? WAL to stdout: ./kuttidb 7379 -</span></pre>
       </div>
       <button class="copybtn" data-copy="1">COPY</button>
     </div>

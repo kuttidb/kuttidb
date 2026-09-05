@@ -166,6 +166,9 @@ jobs:
           body: |
             Official binaries for KuttiDB ${{ github.ref_name }}.
 
+            Install in one line (macOS arm64/x86_64, Linux x86_64/arm64):
+            `curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash`
+
             Verify a download: `sha256sum -c SHASUMS256.txt`
 
             Platform notes: the Linux builds need glibc 2.35+ and OpenSSL 3
