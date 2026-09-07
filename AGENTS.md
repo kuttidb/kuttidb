@@ -16,7 +16,10 @@ The root keeps exactly three markdown-visible files:
 - `LICENSE` — not markdown, listed for completeness
 
 Anything else — guides, references, specs, implementation plans, working
-instructions, notes — goes under `docs/` in the matching subfolder.
+instructions, notes — goes under `docs/` in the matching subfolder. One
+exception: the agent skill `.agents/skills/kuttidb/SKILL.md` is an
+agent-invocation artifact, not project documentation; it is governed by the
+skill-sync rule below and must not be moved into `docs/`.
 
 ### Where new documents go
 
@@ -54,6 +57,35 @@ If a document spans categories, pick the primary audience: operators →
    not the root, not `docs/` directly, and never in commit messages alone.
    The whole `docs/plans/` folder is gitignored: it stays on each
    contributor's machine and is never published or linked from other docs.
+
+## Agent skill sync (mandatory)
+
+`.agents/skills/kuttidb/SKILL.md` is the repository's agent skill. Agents load
+it before starting the server, writing client code, configuring deployments,
+or calling the Management API, so it must describe the current state of the
+system — never a past one.
+
+1. Whenever you implement a new feature or change any behavior the skill
+   describes — server CLI flags or defaults, wire protocol or STATS output,
+   client SDK methods or configuration, managed local mode (`kuttidb ensure`),
+   metrics or Management API resources and conventions, Docker/compose setup,
+   or test commands — update the skill **in the same pull request**. Skill
+   sync is part of the definition of done, on the same level as running
+   `make test`.
+2. Verify every claim you add against the implementation before writing it:
+   flags in `src/server.c` and `src/managed_launcher.c`, SDK surfaces in
+   `clients/`, the Management API in `src/admin_http.c` and
+   `openapi/management-v1.yaml`. Never copy examples forward from stale docs
+   or memory.
+3. Keep the skill's YAML frontmatter valid and accurate: `name` stays
+   `kuttidb`, and `description` must still name the situations that should
+   trigger agents to invoke the skill.
+4. The skill references documentation by repo-root path. When documents move
+   or are renamed, fix the skill's links in the same change (see rule 5
+   above).
+5. Do not expand the skill into a second documentation tree: it stays a
+   compact operational reference for agents and points to `docs/` for depth.
+   If a topic needs full prose, document it in `docs/` and link to it.
 
 ## Build and test
 
