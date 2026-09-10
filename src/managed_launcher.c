@@ -272,7 +272,8 @@ int managed_launcher_maybe_run(int argc, char **argv) {
         endpoint = is_unix ? probe_unix(socket_path) : probe_tcp(&tcp_addr);
         if (endpoint == 1) { cooldown_clear(data_dir); close(lock_fd); if (json) emit_json("existing", instance_id, listen, 0, log_path); return 0; }
         if (monotonic_ms() >= deadline) { close(lock_fd); return ENSURE_TIMEOUT; }
-        struct timespec pause = {0, 20 * 1000 * 1000}; nanosleep(&pause, NULL);
+        struct timespec pause = {0, 20 * 1000 * 1000};
+        while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {}
     }
     endpoint = is_unix ? probe_unix(socket_path) : probe_tcp(&tcp_addr);
     if (endpoint == 1) { cooldown_clear(data_dir); close(lock_fd); if (json) emit_json("existing", instance_id, listen, 0, log_path); return 0; }
@@ -308,14 +309,37 @@ launch_child: ;
     }
     close(ready[1]);
     char result[64] = {0};
-    struct pollfd pfd = {.fd = ready[0], .events = POLLIN};
-    int remaining = (int)(deadline - monotonic_ms());
-    int poll_rc = poll(&pfd, 1, remaining > 0 ? remaining : 0);
-    ssize_t n = poll_rc > 0 ? read(ready[0], result, sizeof result - 1) : -1;
+    ssize_t n = -1;
+    int poll_rc = 0;
+    for (;;) {
+        long long ms_left = deadline - monotonic_ms();
+        if (ms_left <= 0) { poll_rc = 0; break; }
+        struct pollfd pfd = {.fd = ready[0], .events = POLLIN};
+        poll_rc = poll(&pfd, 1, ms_left > 3600000 ? 3600000 : (int)ms_left);
+        if (poll_rc < 0 && errno == EINTR) continue;
+        break;
+    }
+    if (poll_rc > 0) {
+        n = read(ready[0], result, sizeof result - 1);
+        if (n < 0 && errno == EINTR) n = read(ready[0], result, sizeof result - 1);
+    }
     close(ready[0]);
     if (n > 0 && strncmp(result, "READY 1", 7) == 0) { cooldown_clear(data_dir); close(lock_fd); if (json) emit_json("started", instance_id, listen, pid, log_path); return 0; }
+    /* The idle-shutdown hand-off is racy by design: a predecessor unlinks
+     * its socket before releasing persistence locks, so a successor forked
+     * into that window exits 73. On a loaded host that exit can land just
+     * after a single WNOHANG check, which previously turned a retriable
+     * hand-off into a cooldown-poisoning startup failure. Wait for the
+     * child up to the deadline before classifying the outcome. */
     int status = 0;
-    pid_t reaped = waitpid(pid, &status, WNOHANG);
+    pid_t reaped = 0;
+    for (;;) {
+        reaped = waitpid(pid, &status, WNOHANG);
+        if (reaped == pid || reaped < 0) break;
+        if (monotonic_ms() >= deadline) break;
+        struct timespec pause = {0, 20 * 1000 * 1000};
+        while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {}
+    }
     if (reaped == pid && WIFEXITED(status) && WEXITSTATUS(status) == 73 &&
         monotonic_ms() < deadline) {
         endpoint = is_unix ? probe_unix(socket_path) : probe_tcp(&tcp_addr);
@@ -327,7 +351,7 @@ launch_child: ;
         }
         if (endpoint == 0) {
             struct timespec pause = {0, 20 * 1000 * 1000};
-            nanosleep(&pause, NULL);
+            while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {}
             goto launch_child;
         }
     }

@@ -390,10 +390,16 @@ class ManagedServerConfigurationError(KuttiDBError):
 
 
 class ManagedServerStartupError(KuttiDBError):
-    def __init__(self, category: str, log_path: str | None = None):
+    def __init__(self, category: str, log_path: str | None = None,
+                 detail: str | None = None):
         self.category, self.log_path = category, log_path
-        super().__init__(f"managed KuttiDB startup failed: {category}" +
-                         (f" (log: {log_path})" if log_path else ""))
+        self.detail = detail
+        message = f"managed KuttiDB startup failed: {category}"
+        if log_path:
+            message += f" (log: {log_path})"
+        if detail:
+            message += f" [{detail[:1500]}]"
+        super().__init__(message)
 
 
 class ManagedServerStartupTimeout(ManagedServerStartupError):
@@ -505,6 +511,45 @@ class ServerParams:
             raise ManagedServerConfigurationError("admin_bind requires admin_token_file and admin_audit_log")
         if not isinstance(self.admin_allow_origins, tuple) or any(not isinstance(v, str) or not v for v in self.admin_allow_origins):
             raise ManagedServerConfigurationError("admin_allow_origins must be a tuple of non-empty origins")
+
+
+def _describe_ensure_failure(data_dir: str,
+                             completed: subprocess.CompletedProcess[bytes] | None = None) -> str | None:
+    """Build a bounded, best-effort diagnostic for a failed `ensure` launch.
+
+    Captures the launcher's exit code/stderr plus the tails of
+    `kuttidb.log` and `.startup-failure`. Never raises: diagnostics must
+    not mask the original startup failure.
+    """
+    parts: list[str] = []
+    if completed is not None:
+        try:
+            parts.append(f"ensure exit {completed.returncode}")
+            stderr = completed.stderr.decode("utf-8", "replace").strip()[:1024] \
+                if completed.stderr else ""
+            if stderr:
+                parts.append(f"ensure stderr: {stderr}")
+            stdout = completed.stdout.decode("utf-8", "replace").strip()[:512] \
+                if completed.stdout else ""
+            if stdout:
+                parts.append(f"ensure stdout: {stdout}")
+        except Exception:
+            pass
+    for name, limit in (("kuttidb.log", 2048), (".startup-failure", 512)):
+        try:
+            path = os.path.join(data_dir, name)
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - limit), os.SEEK_SET)
+                tail = handle.read(limit).decode("utf-8", "replace").strip()
+            if tail:
+                parts.append(f"{name} tail: {tail[-limit:]}")
+        except Exception:
+            continue
+    if not parts:
+        return None
+    return "; ".join(parts)[:2000]
 
 
 def _read_instance_id(data_dir: str) -> str | None:
@@ -677,9 +722,12 @@ class KuttiDBClient:
             completed = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
                                        timeout=server.startup_timeout + 1, check=False)
         except subprocess.TimeoutExpired as error:
-            raise ManagedServerStartupTimeout("timeout") from error
+            raise ManagedServerStartupTimeout(
+                "timeout", os.path.join(server.data_dir, "kuttidb.log"),
+                _describe_ensure_failure(server.data_dir)) from error
         except OSError as error:
-            raise ManagedServerStartupError("executable") from error
+            raise ManagedServerStartupError(
+                "executable", None, str(error)[:512]) from error
         stdout = completed.stdout[:8192]
         if completed.returncode:
             categories = {
@@ -690,18 +738,22 @@ class KuttiDBClient:
             if category == "configuration":
                 raise ManagedServerConfigurationError("managed launcher rejected the configuration")
             exc = ManagedServerStartupTimeout if category == "timeout" else ManagedServerStartupError
-            raise exc(category, os.path.join(server.data_dir, "kuttidb.log"))
+            raise exc(category, os.path.join(server.data_dir, "kuttidb.log"),
+                      _describe_ensure_failure(server.data_dir, completed))
         try:
             response = json.loads(stdout.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ManagedServerStartupError("invalid_launcher_response") from error
+            raise ManagedServerStartupError(
+                "invalid_launcher_response", None,
+                _describe_ensure_failure(server.data_dir, completed)) from error
         if (completed.returncode != 0 or not isinstance(response, dict) or
                 response.get("status") not in {"started", "existing", "starting"} or
                 not isinstance(response.get("instance_id"), str) or
                 len(response["instance_id"]) != 32):
             category = "timeout" if completed.returncode == 68 else "startup"
             exc = ManagedServerStartupTimeout if category == "timeout" else ManagedServerStartupError
-            raise exc(category, response.get("log") if isinstance(response, dict) else None)
+            raise exc(category, response.get("log") if isinstance(response, dict) else None,
+                      _describe_ensure_failure(server.data_dir, completed))
         return response
 
     def _verify_managed_identity(self, expected: str | None) -> None:

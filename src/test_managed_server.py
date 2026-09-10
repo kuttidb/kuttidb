@@ -200,6 +200,22 @@ def main() -> None:
                 pass
         assert queue_wal.is_file() and stream_wal.is_file()
         print("managed server integration tests passed")
+    except BaseException:
+        # A flaky hand-off failure is undiagnosable after the temp dir is
+        # removed, so dump the launcher-relevant tails before cleanup. This
+        # runs only on failure; the passing path stays quiet.
+        for probe in (root, root / "bad-startup", root / "tcp", root / "advanced"):
+            for name in ("kuttidb.log", ".startup-failure"):
+                path = probe / name
+                try:
+                    if not path.is_file():
+                        continue
+                    data = path.read_bytes()[-2048:]
+                    print(f"DIAG {probe.name}/{name} ({len(data)}B tail): "
+                          f"{data.decode('utf-8', 'replace')!r}", flush=True)
+                except OSError:
+                    continue
+        raise
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
