@@ -21,4 +21,27 @@ if [ -n "${KUTTIDB_METRICS_TOKEN_SOURCE:-}" ]; then
     chmod 0600 "$KUTTIDB_METRICS_TOKEN_DEST"
 fi
 
+# Compose exposes the completion engine as a deliberate opt-in.  Preserve
+# explicit command arguments so that `docker run ... --job-completion` and
+# the environment switch can safely be used together.
+case "${KUTTIDB_JOB_COMPLETION:-0}" in
+    0|"") ;;
+    1)
+        has_job_completion=0
+        for arg in "$@"; do
+            if [ "$arg" = "--job-completion" ]; then
+                has_job_completion=1
+                break
+            fi
+        done
+        if [ "$has_job_completion" -eq 0 ]; then
+            set -- "$@" --job-completion
+        fi
+        ;;
+    *)
+        echo "KUTTIDB_JOB_COMPLETION must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
+
 exec /usr/local/bin/kuttidb "$@"

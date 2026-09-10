@@ -75,6 +75,11 @@ All paths begin with `/api/admin/v1`.
 | `POST /queues/{queue_id}/deliveries:ack-batch`, `POST /queues/{queue_id}/deliveries:nack-batch` | Atomically apply ACK or NACK to 1–50 active delivery IDs from one Queue and opaque owner cohort; every requested ID receives an outcome |
 | `GET/POST /queue-consumers`, `GET/DELETE /queue-consumers/{consumer_id}`, `POST /queue-consumers/{consumer_id}/deliveries` | Inspect, register, explicitly delete, or safely consume through a durable Queue consumer without exposing its native owner token |
 | `POST /atomic-operations` | Execute a tagged, native all-or-nothing Keyspace-plus-Queue/Routing operation |
+| `GET /keyspaces/durable`, `GET /keyspaces/durable/entries`, `GET/PUT/DELETE /keyspaces/durable/entries/{entry_id}` | The fixed, non-evictable `durable` Keyspace (atomic job completion feature): bounded metadata inventory, binary value envelope with state version/last commit id/ETag, version-checked direct PUT (`If-None-Match: *` or `If-Match`, `Idempotency-Key`), and DELETE requiring the exact state ETag plus `X-KuttiDB-Confirm` |
+| `POST /job-completions` | Submit one atomic completion (state PUT + input ACK + optional output + receipt) with `Idempotency-Key` = `operation_id`; HTTP 200 for first success and matched replay, `replayed` distinguishes them |
+| `GET /job-completions`, `GET /job-completions/{operation_id}` | Bounded inventory of retained completion receipts and single-receipt lookup; 404 means "no retained receipt", never "never executed"; lookup never requires the old delivery proof |
+| `GET /durable-operations/{operation_id}` | Look up a retained direct state-mutation receipt (`state_put`/`state_delete`) in the shared operation-id ledger |
+| `GET /keyspaces/durable/entries/{entry_id}` (above) and `POST /queue-consumers/{consumer_id}/deliveries` with `{"mode":"completion"}` | Completion-capable consumption: stable input metadata plus an opaque, one-use delivery proof; ordinary (modeless) requests keep their existing behavior |
 | `GET/POST /streams` | Stream inventory and durable Stream declaration |
 | `GET/PATCH/DELETE /streams/{stream_id}` | Inspect a Stream; conditionally replace both durable retention ceilings; or queue a confirmed conditional durable deletion job |
 | `GET /streams/{stream_id}/partitions` | Snapshot each partition's earliest retained and next offsets without reading record bodies |
@@ -170,6 +175,44 @@ destructive: it removes ready, delayed, and in-flight messages. Send both the
 exact ETag in `If-Match` and the opaque Queue identifier in
 `X-KuttiDB-Confirm`; the server checks the revision inside the native purge
 operation and returns `412 precondition_failed` if the Queue changed.
+
+## Atomic job completion
+
+With `--job-completion` on the server, the API exposes the durable keyspace
+and the completion surface. Conventions that differ from the default
+Keyspace:
+
+- **Ids and versions are lossless.** 64-bit identity, version, and timestamp
+  fields are decimal strings; binary resource ids are `b64u:` (URL-safe,
+  unpadded); payloads are standard Base64 inside
+  `{"encoding":"base64","data":...}` envelopes.
+- **Idempotency is durable, not process-local.** Completion submission and
+  direct state PUT/DELETE require an `Idempotency-Key` header equal to the
+  request's `operation_id`; the server routes it to the core receipt ledger
+  (the same one native clients use), bypassing the old in-memory response
+  cache. A matched retry of the identical semantic request returns HTTP 200
+  with the original immutable result and `replayed: true`. A mismatch
+  between the header and the body id is 400 `idempotency_key_mismatch`;
+  reusing a retained id for a different request is 409 `idempotency_conflict`.
+- **Preconditions reflect core semantics.** `If-None-Match: *` maps to
+  create-only and `If-Match: "s-<version>"` to an exact CAS check inside the
+  core transaction (never a racy preliminary check): missing preconditions
+  are 428, stale ones 412. DELETE additionally requires
+  `X-KuttiDB-Confirm: durable-state-delete`.
+- **Receipt lookup is proof-free.** `GET /job-completions/{operation_id}`
+  and `/durable-operations/{operation_id}` work after restarts without the
+  expired delivery proof. 404 means no *retained* receipt — it is never
+  evidence that an operation never executed, and 410 is never manufactured.
+- **Error mapping:** 400 validation / idempotency_key_mismatch, 409
+  idempotency_conflict / delivery_expired / delivery_not_owned, 412
+  state_version_conflict, 413 request_too_large, 429 resource_exhausted,
+  503 unsupported_feature / persistence_unavailable / operation_in_doubt
+  (with `"outcome": "unknown"` — the commit may still have happened).
+  Errors carry `{"error":{"code","message"[,"outcome"]}}`.
+- **Delivery proofs stay opaque.** The completion-capable delivery mode
+  returns a one-use proof bound to the live attempt; it is never persisted
+  in receipts, never logged, and never valid for any other message. Audit
+  entries carry bounded metadata only.
 
 ## Stream truncation
 

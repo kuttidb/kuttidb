@@ -13,6 +13,29 @@ and the runtime stage is `alpine:3.21` with a dedicated `kuttidb` user
   them to a `0600` private path under the data directory before exec, because
   the server intentionally rejects group/other-readable auth files.
 
+## Atomic job completion in containers
+
+The image supports the full completion surface, including `TLS=0` builds (no
+weak randomness fallback: proofs come from urandom). With Compose, opt in by
+setting `KUTTIDB_JOB_COMPLETION=1`; the entrypoint adds `--job-completion`
+exactly once. For a custom `docker run` command, pass `--job-completion`
+directly (and optionally the `--job-*` budget flags — defaults in
+[DEPLOYMENT.md](DEPLOYMENT.md#atomic-job-completion-sizing)):
+
+```yaml
+    command:
+      # ... existing flags ...
+      - "--queue-wal"
+      - "/var/lib/kuttidb/queue.wal"
+      - "--job-completion"
+```
+
+Keep the Queue WAL on the mounted volume (it is the commit authority for
+durable state and receipts), preserve non-root ownership, and back the
+volume up before first use. The container-recovery test
+(`src/test_container_recovery.py`) covers restart-on-volume semantics; the
+feature adds no HA claim.
+
 ## Image layout
 
 | Path | Purpose |
@@ -69,6 +92,12 @@ volume, an auth token from a file (`KUTTIDB_AUTH_TOKEN_FILE` must point at a
 
 ```sh
 KUTTIDB_AUTH_TOKEN_FILE=./token docker compose up --build
+```
+
+Enable atomic job completion in that stack with:
+
+```sh
+KUTTIDB_AUTH_TOKEN_FILE=./token KUTTIDB_JOB_COMPLETION=1 docker compose up --build
 ```
 
 The metrics scrape is bound to `127.0.0.1:9099` inside the container and

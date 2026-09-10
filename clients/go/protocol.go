@@ -1,6 +1,7 @@
 package kuttidb
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -93,6 +94,77 @@ func (c *Client) requestFrame(req []byte) (byte, []byte, error) {
 	}
 	payload := make([]byte, n)
 	if _, err = io.ReadFull(cn.c, payload); err != nil {
+		return 0, nil, err
+	}
+	keep = true
+	return head[0], payload, nil
+}
+
+// requestFrameCtx runs a framed request under a context: the connection
+// deadline is the earlier of the client timeout and the context deadline,
+// and cancelation aborts the blocked I/O by closing the connection. The
+// connection is discarded on any failure so an aborted exchange can never
+// poison the pool.
+func (c *Client) requestFrameCtx(ctx context.Context, req []byte) (byte, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
+	cn, err := c.get()
+	if err != nil {
+		return 0, nil, err
+	}
+	keep := false
+	defer func() {
+		if keep {
+			c.put(cn)
+		} else {
+			_ = cn.c.Close()
+		}
+	}()
+	deadline := time.Now().Add(c.opTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = cn.c.SetDeadline(deadline)
+	if done := ctx.Done(); done != nil {
+		abort := make(chan struct{})
+		defer close(abort)
+		go func() {
+			select {
+			case <-done:
+				_ = cn.c.Close() // abort a blocked write/read
+			case <-abort:
+			}
+		}()
+	}
+	if _, err = cn.c.Write(req); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, nil, ctxErr
+		}
+		return 0, nil, err
+	}
+	var head [5]byte
+	if err = readFull(cn, head[:]); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, nil, ctxErr
+		}
+		return 0, nil, err
+	}
+	n := binary.LittleEndian.Uint32(head[1:])
+	if n > maxValue {
+		return 0, nil, ErrResponseTooLarge
+	}
+	payload := make([]byte, n)
+	if _, err = io.ReadFull(cn.c, payload); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, nil, ctxErr
+		}
+		return 0, nil, err
+	}
+	if err = ctx.Err(); err != nil {
 		return 0, nil, err
 	}
 	keep = true

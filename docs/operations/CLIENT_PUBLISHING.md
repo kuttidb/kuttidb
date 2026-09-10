@@ -20,6 +20,22 @@ protocol, not on the server version number.
 Tag names use the manifest version string, e.g. `node-v0.0.1-beta`,
 `rust-v0.0.1-beta`, `py-v0.0.1b0` (PEP 440 spelling of the same version).
 
+The C companion (`libkuttidb_client` + `src/kuttidb_client.h`) is distributed
+inside the server release tarballs (see
+[RELEASE.md](RELEASE.md#release-artifacts)) and installed by `make install`;
+it is not a registry package. Coordinate its ABI/version notes with the
+server version in the same release: the companion and the server always ship
+from the same commit.
+
+The Python package is staged from the canonical source:
+`clients/python/prepare.py` copies `src/kuttidb_client.py` into
+`clients/python/kuttidb/` — edit the canonical file only, and verify the
+staged wheel imports the installed package (not a repository-relative path)
+before publishing. All six SDKs must expose the atomic job completion
+surface with the frozen method mapping in
+[../guides/CLIENT_FEATURE_MATRIX.md](../guides/CLIENT_FEATURE_MATRIX.md);
+a release whose SDKs disagree on the mapping is not publishable.
+
 ## Installing as a consumer
 
 ```sh

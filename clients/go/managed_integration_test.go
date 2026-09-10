@@ -1,6 +1,7 @@
 package kuttidb
 
 import (
+	"context"
 	"net"
 	"os"
 	"testing"
@@ -61,6 +62,41 @@ func TestManagedLifecycleIntegration(t *testing.T) {
 	got, err = tcpClient.Get("managed-go-tcp")
 	if err != nil || string(got) != "value" {
 		t.Fatalf("TCP Get = %q, %v", got, err)
+	}
+}
+
+// TestManagedJobCompletionIntegration exercises the --job-completion
+// allowlist propagation through NewManaged. Opt-in like the base lifecycle.
+func TestManagedJobCompletionIntegration(t *testing.T) {
+	if os.Getenv("KUTTIDB_MANAGED_INTEGRATION") != "1" {
+		t.Skip("managed integration is opt-in")
+	}
+	executable := os.Getenv("KUTTIDB_SERVER")
+	if executable == "" {
+		t.Fatal("KUTTIDB_SERVER is required for managed integration")
+	}
+	dataDir := managedDataDir(t)
+	client, err := NewManaged(ManagedOptions{
+		DataDir:        dataDir,
+		Executable:     executable,
+		IdleTimeout:    250 * time.Millisecond,
+		StartupTimeout: 5 * time.Second,
+		JobCompletion:  true,
+	})
+	if err != nil {
+		t.Fatalf("NewManaged with JobCompletion: %v", err)
+	}
+	defer client.Close()
+	caps, err := client.Capabilities()
+	if err != nil || caps.Features&FeatureJobs == 0 {
+		t.Fatalf("CAP_JOBS after managed ensure: %+v %v", caps, err)
+	}
+	if err := client.QueueDeclare("managed-jobs", QueueOptions{Durable: true}); err != nil {
+		t.Fatalf("QueueDeclare: %v", err)
+	}
+	manifest, err := client.QueueManifest(context.Background())
+	if err != nil || len(manifest) == 0 || !manifest[0].Durable {
+		t.Fatalf("QueueManifest: %+v %v", manifest, err)
 	}
 }
 

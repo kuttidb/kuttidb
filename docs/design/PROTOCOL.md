@@ -77,11 +77,42 @@ the connection state, so a client can distinguish each one:
 | Lease conflict (single-flight) | not an error: `GET_OR_CLAIM` answers state `wait` / `GET_OR_REFRESH` `holder=0` |
 
 `0x02` is deliberately fail-closed: a client must treat it as "the durable
-effect of this request did not happen" (or, for in-doubt commit windows, as
-"unknown until recovery reconciles" — see [DURABILITY.md](DURABILITY.md)).
-The status set is kept at three values so every native client maps it onto
-one exception type plus one miss type; richer condition detail belongs in
-STATS/metrics counters, which name each failure mode explicitly.
+effect of this request did not happen" — with one precision: the legacy
+atomic cache-plus-queue operations (`0x40`–`0x43`) can be **in doubt** when a
+commit window was interrupted (recovery reconciles them at startup; see
+[DURABILITY.md](DURABILITY.md)), and the atomic job completion family
+(0x70–0x77) carries an explicit typed outcome byte instead of leaving the
+ambiguity implicit. The status set is kept at three values so every native
+client maps it onto one exception type plus one miss type; richer condition
+detail belongs in STATS/metrics counters, which name each failure mode
+explicitly.
+
+### Typed error envelope (atomic job completion, opcodes 0x70–0x77 only)
+
+Legacy opcodes keep their exact framing. The job family answers failures
+with `[0x02][len:4][code:1][outcome:1][detail...]` so clients can
+distinguish conflicts, stale deliveries, capacity, unavailable storage, and
+unknown outcomes without string parsing:
+
+| code | name | meaning | safe client behavior |
+|---|---|---|---|
+| 1 | `unsupported_feature` | feature absent or disabled | upgrade/enable; never emulate with separate writes |
+| 2 | `validation_failed` | rejected before any commit attempt | correct the input |
+| 3 | `request_too_large` | aggregate op bound exceeded | reduce the request |
+| 4 | `idempotency_conflict` | operation id reused for a different request | stop; never regenerate the id |
+| 5 | `state_version_conflict` | CAS rejected | re-read state; decide deliberately |
+| 6 | `delivery_expired` | visibility lease expired before commit | obtain a current delivery |
+| 7 | `delivery_not_owned` | proof does not match the live delivery | obtain a valid attempt; never guess |
+| 8 | `resource_exhausted` | admission refused before the record append | retry later with the same intent |
+| 9 | `operation_in_progress` | reserved (bounded in-progress responses) | bounded wait or lookup |
+| 10 | `operation_in_doubt` | commit outcome unknown | same-id lookup or exact retry only |
+| 11 | `persistence_unavailable` | storage cannot resolve/admit | treat per the outcome byte |
+| 12 | `not_found` | definite absence (e.g. unknown state key) | fresh work or lookup |
+
+`outcome`: `0` = `not_committed` (definite), `1` = `unknown` (a possibly
+committed append could not be resolved — the engine latches failed). A
+success receipt is the only positive proof of commit; no generic false/None
+conflates conflict, absence, and unknown outcome.
 
 `klen` is `uint16`, `vlen` is `uint32`, both little-endian.
 Max key: 65535 bytes. Values: arbitrary binary, with a server-configured size
@@ -234,6 +265,30 @@ group-join response carries a membership generation after the assignment, and
 semantics are in
 [STREAMS.md](../messaging/STREAMS.md). They are native KuttiDB commands, not Kafka wire
 compatibility.
+
+## Atomic job completion (capability-gated)
+
+Opcodes `0x70`–`0x77` implement durable state (`durable` keyspace),
+completion-capable consumption, atomic completion, and receipt lookup.
+Negotiated through capability bit 16 (`CAP_JOBS`); a server without the
+feature answers every opcode in this family with the typed
+`unsupported_feature` envelope and closes nothing — clients must not emulate
+the operations with separate writes. All multi-byte fields are little-endian;
+`klen`/length fields follow the shared framing above.
+
+| Op | Name | Request (key / value) | Response body (after `[status][len:4]`) |
+|---|---|---|---|
+| `0x70` | `JOB_CONSUME` | key = queue name; value = `[consumer_len:2][consumer][visibility_ms:8]` | OK: `[store_id:16][queue_incarnation:8][message_id:8][attempts:4][redelivered:1][lease_deadline_ms:8][proof:16][payload]`; MISS when the queue has no ready message. Requires a durable queue and a registered named consumer. The proof is opaque and one-use; no owner token or delivery tag is exposed. |
+| `0x71` | `JOB_COMPLETE` | key = input queue; value = `[op_id:16][in_incarnation:8][in_msg_id:8][proof:16][state_klen:2][state_key][expected_version:8][state_vlen:4][state_value][out_present:1]` then, when `out_present=1`, `[out_qlen:2][out_queue][out_incarnation:8][out_vlen:4][out_payload]` | OK (41 bytes): `[commit_id:8][state_version:8][output_message_id:8 (0=none)][completed_at_ms:8][receipt_expires_at_ms:8][replayed:1]`. Commits the state PUT, the input ACK, the optional output publish, and the receipt together; the reply is released only after the record's fsync. A matched replay returns the identical immutable fields with `replayed=1`. |
+| `0x72` | `JOB_RECEIPT` | key empty; value = `[op_id:16]` | OK: the completion receipt shape of `0x71` (`replayed` byte always 0 on lookup); MISS = no retained receipt (not proof of non-execution). Lookup never requires the delivery proof. |
+| `0x73` | `STATE_GET` | key = state key; value empty | OK: `[version:8][last_commit_id:8][value]`; MISS when absent. |
+| `0x74` | `STATE_PUT` | key = state key; value = `[op_id:16][expected_version:8][value]` | OK (33 bytes): `[commit_id:8][state_version:8][completed_at_ms:8][receipt_expires_at_ms:8][replayed:1]`. `expected_version=0` creates only; positive must match exactly. |
+| `0x75` | `STATE_DELETE` | key = state key; value = `[op_id:16][expected_version:8]` | OK: the same 33-byte receipt shape. Positive `expected_version` required; retrying a committed delete by id returns its retained receipt. |
+| `0x76` | `DURABLE_OPERATION` | key empty; value = `[op_id:16]` | OK (33 bytes): `[kind:1 (2=state_put, 3=state_delete)][commit_id:8][state_version:8][completed_at_ms:8][receipt_expires_at_ms:8]`; MISS when no state-kind receipt is retained. |
+| `0x77` | `QUEUE_MANIFEST` | key empty; value empty | OK: `[n:2]` then `n` × `[nlen:2][name][durable:1][incarnation:8][depth:8][inflight:8][max_depth:8][revision:8]` (bounded at 256 entries). Additive discovery of stable queue identities. |
+
+Semantics, retry/fencing rules, error outcomes, durability, and record
+formats: [ATOMIC_JOB_COMPLETION.md](ATOMIC_JOB_COMPLETION.md).
 
 ## Client support matrix
 

@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "admin_http.h"
 #include "admin_json.h"
+#include "job_completion.h"
+#include "job_state.h"
 #include "kuttidb.h"
 #include "queue.h"
 #include "stream.h"
@@ -514,11 +516,11 @@ static size_t error(struct out*o,const char*code,const char*msg){put(o,"{\"error
 static size_t collection_end(struct out*o,size_t count,unsigned limit,int trunc){put(o,"],\"meta\":{\"count\":%zu,\"limit\":%u,\"next_cursor\":null,\"snapshot_revision\":%llu,\"weakly_consistent\":%s}}",count,limit,(unsigned long long)collection_snapshot_revision,trunc?"true":"false");return o->len;}
 static int limit_from(const char *path,size_t n,unsigned*out){*out=100;const char*q=memchr(path,'?',n);if(!q)return 0;size_t l=n-(size_t)(q+1-path);if(l<6||memcmp(q+1,"limit=",6)||memchr(q+7,'&',l-6))return -1;char z[12];size_t d=l-6;if(!d||d>=sizeof z)return -1;memcpy(z,q+7,d);z[d]=0;char*e;unsigned long v=strtoul(z,&e,10);if(*e||v<1||v>500)return -1;*out=(unsigned)v;return 0;}
 static uint64_t admin_mono_ms(void);
-static void render(AdminHttp*a,const char*path,size_t plen,struct out*o,int*service){unsigned limit;if(limit_from(path,plen,&limit)<0){error(o,"bad_request","The limit parameter is invalid.");return;}size_t base=plen;const char*q=memchr(path,'?',plen);if(q)base=(size_t)(q-path);AdminHttpStatus st={0};a->c.status(a->c.status_ud,&st);uint64_t active_deliveries=0,active_claims=0,active_tails=0,queued_jobs=0,running_jobs=0,now=admin_mono_ms();for(size_t i=0;i<ADMIN_DELIVERY_LIMIT;i++){if(a->deliveries[i].active)active_deliveries++;if(a->claims[i].active&&a->claims[i].deadline_ms>now)active_claims++;}pthread_mutex_lock(&a->tails_mu);active_tails=a->active_tails;pthread_mutex_unlock(&a->tails_mu);job_counts(a,&queued_jobs,&running_jobs);*service=!st.ready;
-if(base==26&&!memcmp(path,"/api/admin/v1/capabilities",26)){put(o,"{\"product\":\"KuttiDB\",\"server_version\":\"0.2.0\",\"management_api_version\":\"v1\",\"enabled_engines\":[\"keyspaces\",\"queues\",\"streams\"],\"tls_available\":%s,\"persistence\":{\"keyspaces\":%s,\"queues\":%s,\"streams\":%s},\"resources\":[\"capabilities\",\"status\",\"keyspaces\",\"queues\",\"streams\",\"consumer-groups\",\"maintenance\"]}",st.tls_available?"true":"false",st.keyspace_persistence_failed?"false":"true",st.queue_persistence_failed?"false":"true",st.stream_persistence_failed?"false":"true");return;}
-if(base==20&&!memcmp(path,"/api/admin/v1/status",20)){put(o,"{\"uptime_seconds\":%llu,\"ready\":%s,\"server_version\":\"0.2.0\",\"event_loops\":%d,\"event_backend\":\"%s\",\"connected_clients\":%llu,\"rejected_clients\":%llu,\"admin_authentication_failures\":%llu,\"durability\":\"%s\",\"keyspace\":{\"entry_count\":%llu,\"live_bytes\":%llu,\"allocated_bytes\":%llu,\"expired_count\":%llu,\"evicted_count\":%llu},\"queues\":{\"count\":%llu,\"ready_depth\":%llu,\"in_flight\":%llu,\"redelivery_count\":%llu,\"dead_letter_count\":%llu,\"persistence_healthy\":%s},\"streams\":{\"count\":%llu,\"partition_count\":%llu,\"retained_bytes\":%llu,\"group_count\":%llu,\"member_count\":%llu,\"persistence_healthy\":%s},\"management\":{\"admin_connections\":1,\"active_tails\":%llu,\"active_deliveries\":%llu,\"active_claims\":%llu,\"queued_jobs\":%llu,\"running_jobs\":%llu,\"mutation_attempts\":%llu,\"audit_failures\":%llu,\"rate_limit_rejections\":%llu,\"operation_in_doubt\":%llu},\"audit\":{\"healthy\":%s},\"persistence_healthy\":%s}",(unsigned long long)st.uptime_seconds,st.ready?"true":"false",st.event_loops,st.event_backend?st.event_backend:"unknown",(unsigned long long)st.connections,(unsigned long long)st.rejected_connections,(unsigned long long)st.auth_failures,st.durability?st.durability:"periodic",(unsigned long long)st.keyspace_entries,(unsigned long long)st.keyspace_live_bytes,(unsigned long long)st.keyspace_allocated_bytes,(unsigned long long)st.keyspace_expired,(unsigned long long)st.keyspace_evicted,(unsigned long long)st.queue_count,(unsigned long long)st.queue_ready,(unsigned long long)st.queue_inflight,(unsigned long long)st.queue_redeliveries,(unsigned long long)st.queue_deadletters,st.queue_persistence_failed?"false":"true",(unsigned long long)st.stream_count,(unsigned long long)st.stream_partitions,(unsigned long long)st.stream_retained_bytes,(unsigned long long)st.stream_groups,(unsigned long long)st.stream_members,st.stream_persistence_failed?"false":"true",(unsigned long long)active_tails,(unsigned long long)active_deliveries,(unsigned long long)active_claims,(unsigned long long)queued_jobs,(unsigned long long)running_jobs,(unsigned long long)a->mutation_attempts,(unsigned long long)a->audit_failures,(unsigned long long)a->rate_limit_rejections,(unsigned long long)a->operation_in_doubt,a->audit_failed?"false":"true",st.ready?"true":"false");return;}
+static void render(AdminHttp*a,const char*path,size_t plen,struct out*o,int*service){unsigned limit;if(limit_from(path,plen,&limit)<0){error(o,"bad_request","The limit parameter is invalid.");return;}size_t base=plen;const char*q=memchr(path,'?',plen);if(q)base=(size_t)(q-path);AdminHttpStatus st={0};a->c.status(a->c.status_ud,&st);uint64_t job_se=0,job_sb=0,job_rc=0,job_rb=0;if(a->c.jobs)job_engine_usage(a->c.jobs,&job_se,&job_sb,&job_rc,&job_rb);int job_ok=a->c.jobs&&job_engine_writable(a->c.jobs);uint64_t active_deliveries=0,active_claims=0,active_tails=0,queued_jobs=0,running_jobs=0,now=admin_mono_ms();for(size_t i=0;i<ADMIN_DELIVERY_LIMIT;i++){if(a->deliveries[i].active)active_deliveries++;if(a->claims[i].active&&a->claims[i].deadline_ms>now)active_claims++;}pthread_mutex_lock(&a->tails_mu);active_tails=a->active_tails;pthread_mutex_unlock(&a->tails_mu);job_counts(a,&queued_jobs,&running_jobs);*service=!st.ready;
+if(base==26&&!memcmp(path,"/api/admin/v1/capabilities",26)){put(o,"{\"product\":\"KuttiDB\",\"server_version\":\"0.2.0\",\"management_api_version\":\"v1\",\"enabled_engines\":[\"keyspaces\",\"queues\",\"streams\"],\"tls_available\":%s,\"persistence\":{\"keyspaces\":%s,\"queues\":%s,\"streams\":%s},\"resources\":[\"capabilities\",\"status\",\"keyspaces\",\"queues\",\"streams\",\"consumer-groups\",\"maintenance\"],\"job_completion\":{\"available\":%s,\"enabled\":%s,\"limits\":{\"state_max_bytes\":\"%llu\",\"receipts_max_bytes\":\"%llu\",\"receipts_max_count\":\"%llu\",\"receipt_retention_ms\":\"%llu\",\"max_operation_bytes\":\"%llu\"}}}",st.tls_available?"true":"false",st.keyspace_persistence_failed?"false":"true",st.queue_persistence_failed?"false":"true",st.stream_persistence_failed?"false":"true",a->c.jobs?"true":"false",job_ok?"true":"false",(unsigned long long)(a->c.jobs?job_engine_state_budget(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_receipts_budget(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_receipts_max_count(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_receipt_retention_ms(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_max_op_bytes(a->c.jobs):0));return;}
+if(base==20&&!memcmp(path,"/api/admin/v1/status",20)){put(o,"{\"uptime_seconds\":%llu,\"ready\":%s,\"server_version\":\"0.2.0\",\"event_loops\":%d,\"event_backend\":\"%s\",\"connected_clients\":%llu,\"rejected_clients\":%llu,\"admin_authentication_failures\":%llu,\"durability\":\"%s\",\"keyspace\":{\"entry_count\":%llu,\"live_bytes\":%llu,\"allocated_bytes\":%llu,\"expired_count\":%llu,\"evicted_count\":%llu},\"queues\":{\"count\":%llu,\"ready_depth\":%llu,\"in_flight\":%llu,\"redelivery_count\":%llu,\"dead_letter_count\":%llu,\"persistence_healthy\":%s},\"streams\":{\"count\":%llu,\"partition_count\":%llu,\"retained_bytes\":%llu,\"group_count\":%llu,\"member_count\":%llu,\"persistence_healthy\":%s},\"management\":{\"admin_connections\":1,\"active_tails\":%llu,\"active_deliveries\":%llu,\"active_claims\":%llu,\"queued_jobs\":%llu,\"running_jobs\":%llu,\"mutation_attempts\":%llu,\"audit_failures\":%llu,\"rate_limit_rejections\":%llu,\"operation_in_doubt\":%llu},\"audit\":{\"healthy\":%s},\"persistence_healthy\":%s,\"job_completion\":{\"enabled\":%s,\"healthy\":%s,\"state_entries\":%llu,\"state_bytes\":%llu,\"receipts\":%llu,\"receipt_bytes\":%llu}}",(unsigned long long)st.uptime_seconds,st.ready?"true":"false",st.event_loops,st.event_backend?st.event_backend:"unknown",(unsigned long long)st.connections,(unsigned long long)st.rejected_connections,(unsigned long long)st.auth_failures,st.durability?st.durability:"periodic",(unsigned long long)st.keyspace_entries,(unsigned long long)st.keyspace_live_bytes,(unsigned long long)st.keyspace_allocated_bytes,(unsigned long long)st.keyspace_expired,(unsigned long long)st.keyspace_evicted,(unsigned long long)st.queue_count,(unsigned long long)st.queue_ready,(unsigned long long)st.queue_inflight,(unsigned long long)st.queue_redeliveries,(unsigned long long)st.queue_deadletters,st.queue_persistence_failed?"false":"true",(unsigned long long)st.stream_count,(unsigned long long)st.stream_partitions,(unsigned long long)st.stream_retained_bytes,(unsigned long long)st.stream_groups,(unsigned long long)st.stream_members,st.stream_persistence_failed?"false":"true",(unsigned long long)active_tails,(unsigned long long)active_deliveries,(unsigned long long)active_claims,(unsigned long long)queued_jobs,(unsigned long long)running_jobs,(unsigned long long)a->mutation_attempts,(unsigned long long)a->audit_failures,(unsigned long long)a->rate_limit_rejections,(unsigned long long)a->operation_in_doubt,a->audit_failed?"false":"true",st.ready?"true":"false",job_ok?"true":"false",job_ok?"true":"false",(unsigned long long)job_se,(unsigned long long)job_sb,(unsigned long long)job_rc,(unsigned long long)job_rb);return;}
 if(base==25&&!memcmp(path,"/api/admin/v1/maintenance",25)){put(o,"{\"data\":[{\"engine\":\"keyspace\",\"checkpoint_available\":%s},{\"engine\":\"queue\",\"checkpoint_available\":%s},{\"engine\":\"stream\",\"checkpoint_available\":%s}],\"meta\":{\"count\":3,\"limit\":%u,\"next_cursor\":null,\"snapshot_revision\":0,\"weakly_consistent\":false}}",a->c.keyspace_checkpoint&&!st.keyspace_persistence_failed?"true":"false",!st.queue_persistence_failed?"true":"false",!st.stream_persistence_failed?"true":"false",limit);return;}
-if(base==23&&!memcmp(path,"/api/admin/v1/keyspaces",23)){put(o,"{\"data\":[{\"name\":\"default\",\"entry_count\":%llu,\"live_bytes\":%llu,\"allocated_bytes\":%llu,\"expired_count\":%llu,\"evicted_count\":%llu,\"persistence_healthy\":%s}],\"meta\":{\"count\":1,\"limit\":%u,\"truncated\":false}}",(unsigned long long)st.keyspace_entries,(unsigned long long)st.keyspace_live_bytes,(unsigned long long)st.keyspace_allocated_bytes,(unsigned long long)st.keyspace_expired,(unsigned long long)st.keyspace_evicted,st.keyspace_persistence_failed?"false":"true",limit);return;}
+if(base==23&&!memcmp(path,"/api/admin/v1/keyspaces",23)){put(o,"{\"data\":[{\"name\":\"default\",\"entry_count\":%llu,\"live_bytes\":%llu,\"allocated_bytes\":%llu,\"expired_count\":%llu,\"evicted_count\":%llu,\"persistence_healthy\":%s},",(unsigned long long)st.keyspace_entries,(unsigned long long)st.keyspace_live_bytes,(unsigned long long)st.keyspace_allocated_bytes,(unsigned long long)st.keyspace_expired,(unsigned long long)st.keyspace_evicted,st.keyspace_persistence_failed?"false":"true");if(a->c.jobs)put(o,"{\"name\":\"durable\",\"evictable\":false,\"entry_count\":%llu,\"live_bytes\":%llu,\"capacity_bytes\":\"%llu\",\"persistence_healthy\":%s,\"storage_class\":\"queue_wal\"}",(unsigned long long)job_se,(unsigned long long)job_sb,(unsigned long long)job_engine_state_budget(a->c.jobs),job_ok?"true":"false");else put(o,"{\"name\":\"durable\",\"available\":false}");put(o,"],\"meta\":{\"count\":2,\"limit\":%u,\"truncated\":false}}",limit);return;}
 if(base==20&&!memcmp(path,"/api/admin/v1/queues",20)){struct qsnap*s=calloc(1,sizeof *s);if(!s){error(o,"internal_error","The server could not complete the request.");return;}queue_foreach_stats(a->c.queues,qcb,s);put(o,"{\"data\":[");size_t n=s->n<limit?s->n:limit;for(size_t i=0;i<n;i++){if(i)put(o,",");put(o,"{");identifier_field(o,"name",&s->a[i].name);put(o,",\"ready_depth\":%llu,\"in_flight\":%llu}",(unsigned long long)s->a[i].depth,(unsigned long long)s->a[i].inflight);}collection_end(o,n,limit,s->trunc||s->n>limit);free(s);return;}
 if(base==21&&!memcmp(path,"/api/admin/v1/streams",21)){struct ssnap*s=calloc(1,sizeof *s);if(!s){error(o,"internal_error","The server could not complete the request.");return;}stream_foreach_stats(a->c.streams,scb,s);put(o,"{\"data\":[");size_t n=s->n<limit?s->n:limit;for(size_t i=0;i<n;i++){if(i)put(o,",");put(o,"{");identifier_field(o,"name",&s->a[i].name);put(o,",\"partition_count\":%u,\"retained_bytes\":%llu,\"retained_record_count\":%llu}",s->a[i].partitions,(unsigned long long)s->a[i].bytes,(unsigned long long)s->a[i].records);}collection_end(o,n,limit,s->trunc||s->n>limit);free(s);return;}
 if(base==29&&!memcmp(path,"/api/admin/v1/consumer-groups",29)){struct gsnap*s=calloc(1,sizeof *s);if(!s){error(o,"internal_error","The server could not complete the request.");return;}stream_group_foreach_stats(a->c.streams,gcb,s);put(o,"{\"data\":[");size_t n=s->n<limit?s->n:limit;for(size_t i=0;i<n;i++){if(i)put(o,",");put(o,"{");identifier_field(o,"stream",&s->a[i].stream);put(o,",");identifier_field(o,"group",&s->a[i].group);put(o,",\"generation\":%llu,\"active_member_count\":%u}",(unsigned long long)s->a[i].generation,s->a[i].members);}collection_end(o,n,limit,s->trunc||s->n>limit);free(s);return;}error(o,"not_found","The requested resource was not found.");}
@@ -1166,6 +1168,477 @@ static int json_optional_bytes(const char *body, size_t body_len, const char *fi
     return 1;
 }
 
+/* ---- atomic job completion helpers ---- */
+
+/* Scans one JSON string and returns the exact (unescaped) byte span between
+ * the quotes. Escape sequences are rejected, mirroring the Management API
+ * convention that decoded bytes stay exact and bounded. */
+static int scan_json_string(const char **inout, const char *end, AdminJsonSlice *out) {
+    const char *p = *inout;
+    if (p >= end || *p++ != '"') return -1;
+    const char *start = p;
+    while (p < end) {
+        unsigned char c = (unsigned char)*p++;
+        if (c < 0x20) return -1;
+        if (c == '\\') return -1;
+        if (c == '"') {
+            if (out) { out->data = start; out->len = (size_t)((p - 1) - start); }
+            *inout = p;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Skips one complete JSON value so nested objects can be captured as raw
+ * spans. Bodies are pre-validated by admin_json_validate; this only needs
+ * to find the value end without allocating. */
+static int json_skip_value(const char **inout, const char *end, unsigned depth) {
+    const char *p = *inout;
+    while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+    if (depth > 32 || p >= end) return -1;
+    if (*p == '"') {
+        p++;
+        int escaped = 0, closed = 0;
+        while (p < end) {
+            unsigned char c = (unsigned char)*p++;
+            if (escaped) escaped = 0;
+            else if (c == '\\') escaped = 1;
+            else if (c == '"') { closed = 1; break; }
+        }
+        if (!closed) return -1;
+        *inout = p;
+        return 0;
+    }
+    if (*p == '{' || *p == '[') {
+        char open = *p++, close = open == '{' ? '}' : ']';
+        for (;;) {
+            while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+            if (p < end && *p == close) { p++; *inout = p; return 0; }
+            if (open == '{') {
+                if (scan_json_string(&p, end, NULL)) return -1;
+                while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+                if (p >= end || *p++ != ':') return -1;
+            }
+            if (json_skip_value(&p, end, depth + 1)) return -1;
+            while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+            if (p < end && *p == close) { p++; *inout = p; return 0; }
+            if (p >= end || *p++ != ',') return -1;
+        }
+    }
+    while (p < end && !strchr(" \t\r\n,]}", *p)) p++;
+    if (p == *inout) return -1;
+    *inout = p;
+    return 0;
+}
+
+/* Locates one top-level field of an already-validated JSON object and
+ * returns the complete value span (string, number, object, array, or
+ * literal). admin_json.c deliberately exposes only typed extractors; the
+ * job-completion request carries nested objects, so the HTTP layer needs
+ * the raw value span of e.g. "state" before its own typed extraction. */
+static int json_field(const char *json, size_t len, const char *field,
+                      AdminJsonSlice *out) {
+    const char *p = json, *end = json + len;
+    size_t flen = strlen(field);
+    while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+    if (p >= end || *p++ != '{') return -1;
+    for (;;) {
+        while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+        if (p >= end || *p != '"') return -1;
+        AdminJsonSlice key;
+        if (scan_json_string(&p, end, &key)) return -1;
+        while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+        if (p >= end || *p++ != ':') return -1;
+        while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+        const char *begin = p;
+        if (json_skip_value(&p, end, 1)) return -1;
+        if (key.len == flen && !memcmp(key.data, field, flen)) {
+            out->data = begin; out->len = (size_t)(p - begin);
+            return 1;
+        }
+        while (p < end && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++;
+        if (p < end && *p == ',') { p++; continue; }
+        return 0;
+    }
+}
+
+/* Accepts a JSON number or a decimal string and yields an unsigned 64-bit
+ * value. Response-side 64-bit fields are decimal strings; request-side
+ * fields accept the documented string form and tolerate plain numbers. */
+static int json_dec_u64(const char *json, size_t len, const char *field,
+                        uint64_t *out) {
+    AdminJsonSlice value;
+    int rc = json_field(json, len, field, &value);
+    if (rc != 1) return rc;
+    char tmp[32], *endp;
+    const char *digits = value.data;
+    size_t digits_len = value.len;
+    if (digits_len && digits[0] == '"') {
+        if (digits_len < 2 || digits[digits_len - 1] != '"') return -1;
+        digits++; digits_len -= 2;
+    }
+    if (!digits_len || digits_len >= sizeof tmp || digits[0] == '-') return -1;
+    memcpy(tmp, digits, digits_len); tmp[digits_len] = 0;
+    errno = 0;
+    unsigned long long n = strtoull(tmp, &endp, 10);
+    if (errno || *endp) return -1;
+    *out = (uint64_t)n;
+    return 1;
+}
+
+/* Decodes a {"encoding":"base64","data":"..."} object (standard Base64)
+ * into out. Returns 1 on success, 0 when the field is absent, -1 when the
+ * field is present but invalid. */
+static int json_b64_object(const char *json, size_t len, const char *field,
+                           unsigned char *out, size_t cap, size_t *out_len) {
+    AdminJsonSlice object;
+    int rc = json_field(json, len, field, &object);
+    if (rc != 1) return rc;
+    AdminJsonSlice encoding, data;
+    if (admin_json_string(object.data, object.len, "encoding", &encoding) != 1 ||
+        encoding.len != 6 || memcmp(encoding.data, "base64", 6) ||
+        admin_json_string(object.data, object.len, "data", &data) != 1 ||
+        admin_base64_decode(data.data, data.len, 0, out, cap, out_len))
+        return -1;
+    return 1;
+}
+
+/* Operation ids are caller-supplied UUIDs; the canonical wire form is the
+ * lowercase hyphenated string, and the core ledger keys on the 16 raw
+ * bytes. */
+static int uuid_parse(const char *text, size_t len, unsigned char out[JOB_ID_LEN]) {
+    static const unsigned char hyphen_at[4] = {8, 13, 18, 23};
+    if (len != 36) return -1;
+    unsigned char bytes[16];
+    size_t byte_at = 0, nibbles = 0;
+    unsigned value = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+        if (byte_at < 4 && i == hyphen_at[byte_at]) { byte_at++; continue; }
+        unsigned nib;
+        if (c >= '0' && c <= '9') nib = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') nib = (unsigned)(c - 'a') + 10u;
+        else if (c >= 'A' && c <= 'F') nib = (unsigned)(c - 'A') + 10u;
+        else return -1;
+        value = (value << 4) | nib;
+        if (++nibbles % 2 == 0) bytes[(nibbles / 2) - 1] = (unsigned char)value;
+    }
+    if (nibbles != 32 || byte_at != 4) return -1;
+    memcpy(out, bytes, JOB_ID_LEN);
+    return 0;
+}
+
+static void uuid_format(const unsigned char in[JOB_ID_LEN], char out[37]) {
+    static const char hex[] = "0123456789abcdef";
+    static const unsigned hyphen_before[4] = {4, 6, 8, 10};
+    size_t at = 0;
+    for (unsigned i = 0; i < JOB_ID_LEN; i++) {
+        for (unsigned h = 0; h < 4; h++)
+            if (hyphen_before[h] == i) { out[at++] = '-'; break; }
+        out[at++] = hex[in[i] >> 4];
+        out[at++] = hex[in[i] & 15];
+    }
+    out[at] = 0;
+}
+
+/* In-doubt outcomes must tell the client that the durable effect is
+ * unknown, not merely failed. */
+static size_t error_outcome(struct out *o, const char *code, const char *msg) {
+    put(o, "{\"error\":{\"code\":\""); put(o, "%s", code);
+    put(o, "\",\"message\":\""); put(o, "%s", msg);
+    put(o, "\",\"outcome\":\"unknown\",\"request_id\":\"");
+    put(o, "%s", request_id[0] ? request_id : "00000000000000000000000000000000");
+    put(o, "\"}}");
+    return o->len;
+}
+
+/* Emits the unpadded URL-safe Base64 of raw bytes without an identifier
+ * prefix; used for the keyset cursors of the new receipt inventory. */
+static void b64u_encode(const unsigned char *s, size_t n, char *out) {
+    static const char alpha[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    size_t at = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned x = (unsigned)s[i] << 16;
+        if (i + 1 < n) x |= (unsigned)s[i + 1] << 8;
+        if (i + 2 < n) x |= (unsigned)s[i + 2];
+        out[at++] = alpha[(x >> 18) & 63];
+        out[at++] = alpha[(x >> 12) & 63];
+        if (i + 1 < n) out[at++] = alpha[(x >> 6) & 63];
+        if (i + 2 < n) out[at++] = alpha[x & 63];
+    }
+    out[at] = 0;
+}
+
+/* Typed job-core statuses map onto the Management API error contract. The
+ * mapping is total: JOB_NOT_FOUND stays a 404 (never "gone"), and in-doubt
+ * outcomes carry outcome "unknown". */
+static int job_error_reply_code(JobStatus st, const char **code,
+                                const char **message, int *unknown) {
+    *unknown = job_status_in_doubt(st);
+    switch (st) {
+    case JOB_UNSUPPORTED_FEATURE: *code = "unsupported_feature"; *message = "Atomic job completion is not enabled on this server."; return 503;
+    case JOB_VALIDATION_FAILED: *code = "validation_failed"; *message = "The request is invalid for the durable job engine."; return 400;
+    case JOB_REQUEST_TOO_LARGE: *code = "request_too_large"; *message = "The operation exceeds the configured job-completion size limit."; return 413;
+    case JOB_IDEMPOTENCY_CONFLICT: *code = "idempotency_conflict"; *message = "This operation id was already used for a different request."; return 409;
+    case JOB_STATE_VERSION_CONFLICT: *code = "precondition_failed"; *message = "The durable state changed. Refresh the entry and retry."; return 412;
+    case JOB_DELIVERY_EXPIRED: *code = "delivery_expired"; *message = "The delivery lease expired before the commit."; return 409;
+    case JOB_DELIVERY_NOT_OWNED: *code = "delivery_not_owned"; *message = "The delivery proof does not own this message delivery."; return 409;
+    case JOB_RESOURCE_EXHAUSTED: *code = "resource_exhausted"; *message = "The durable job engine is at capacity."; return 429;
+    case JOB_OPERATION_IN_DOUBT: *code = "operation_in_doubt"; *message = "The operation may have committed. Retry the exact request or query the receipt."; return 503;
+    case JOB_PERSISTENCE_UNAVAILABLE: *code = "persistence_unavailable"; *message = "The durable job engine is unavailable."; return 503;
+    case JOB_NOT_FOUND: *code = "not_found"; *message = "The requested resource was not found."; return 404;
+    default: *code = "conflict"; *message = "The requested operation could not be applied."; return 409;
+    }
+}
+
+static void job_error_reply(AdminHttp *a, int fd, void *ssl, const char *origin,
+                            JobStatus st, int no_delivery_miss) {
+    char body[512]; struct out o = {body, sizeof body, 0, 0};
+    const char *code, *message; int unknown;
+    int status = job_error_reply_code(st, &code, &message, &unknown);
+    if (no_delivery_miss && st == JOB_NOT_FOUND) code = "no_delivery";
+    size_t len = unknown ? error_outcome(&o, code, message) : error(&o, code, message);
+    const char *text = status == 400 ? "400 Bad Request" :
+                       status == 404 ? "404 Not Found" :
+                       status == 409 ? "409 Conflict" :
+                       status == 412 ? "412 Precondition Failed" :
+                       status == 413 ? "413 Payload Too Large" :
+                       status == 429 ? "429 Too Many Requests" :
+                                       "503 Service Unavailable";
+    reply(a, fd, ssl, text, body, len, 0, origin, 0);
+}
+
+/* Bounded K-smallest durable-state key selection for the entries
+ * inventory. The engine walk is unsorted, so the callback keeps the
+ * cap smallest matching keys (raw byte order) and counts everything
+ * beyond them; the handler sorts and pages the kept set. */
+typedef struct AdminDurableKey {
+    unsigned char bytes[ADMIN_NAME_MAX];
+    uint32_t len;
+    uint64_t version, commit_id;
+    uint32_t value_len;
+} AdminDurableKey;
+typedef struct AdminDurableScan {
+    AdminDurableKey *sel;
+    uint32_t cap, count, largest;
+    uint64_t overflow;
+    AdminName prefix;
+    const unsigned char *after;
+    uint32_t after_len;
+    int key_too_large;
+} AdminDurableScan;
+
+static int durable_key_less(const unsigned char *a, uint32_t alen,
+                            const unsigned char *b, uint32_t blen) {
+    uint32_t min = alen < blen ? alen : blen;
+    int cmp = min ? memcmp(a, b, min) : 0;
+    return cmp < 0 || (cmp == 0 && alen < blen);
+}
+
+static void durable_scan_cb(const char *key, uint32_t key_len, uint64_t version,
+                            uint64_t commit_id, uint32_t value_len, void *ud) {
+    AdminDurableScan *s = ud;
+    if (key_len > ADMIN_NAME_MAX) { s->key_too_large = 1; return; }
+    if (s->prefix.len && (key_len < s->prefix.len ||
+                          memcmp(key, s->prefix.bytes, s->prefix.len))) return;
+    if (s->after_len && !durable_key_less(s->after, s->after_len,
+                                          (const unsigned char *)key, key_len))
+        return;
+    if (s->count < s->cap) {
+        AdminDurableKey *k = &s->sel[s->count++];
+        k->len = key_len; memcpy(k->bytes, key, key_len);
+        k->version = version; k->commit_id = commit_id; k->value_len = value_len;
+        if (s->count == 1 || durable_key_less(s->sel[s->largest].bytes,
+                                              s->sel[s->largest].len, k->bytes, k->len))
+            s->largest = s->count - 1;
+        return;
+    }
+    s->overflow++;
+    if (!durable_key_less((const unsigned char *)key, key_len,
+                          s->sel[s->largest].bytes, s->sel[s->largest].len)) return;
+    AdminDurableKey *k = &s->sel[s->largest];
+    k->len = key_len; memcpy(k->bytes, key, key_len);
+    k->version = version; k->commit_id = commit_id; k->value_len = value_len;
+    for (uint32_t i = 0; i < s->count; i++)
+        if (durable_key_less(s->sel[s->largest].bytes, s->sel[s->largest].len,
+                             s->sel[i].bytes, s->sel[i].len))
+            s->largest = i;
+}
+
+/* Reads one path-terminal operation id: a canonical UUID string or a
+ * "b64u:"-prefixed 16-byte identifier. */
+static int path_op_id(const char *path, size_t path_len, const char *prefix,
+                      unsigned char out[JOB_ID_LEN]) {
+    static const char b64u_prefix[] = "b64u:";
+    const char *query = memchr(path, '?', path_len);
+    size_t end = query ? (size_t)(query - path) : path_len;
+    size_t prefix_len = strlen(prefix);
+    if (end <= prefix_len || memcmp(path, prefix, prefix_len) ||
+        memchr(path + prefix_len, '/', end - prefix_len)) return -1;
+    const char *id = path + prefix_len;
+    size_t id_len = end - prefix_len;
+    if (!uuid_parse(id, id_len, out)) return 0;
+    if (id_len > sizeof b64u_prefix - 1 &&
+        !memcmp(id, b64u_prefix, sizeof b64u_prefix - 1)) {
+        size_t decoded = 0;
+        if (!admin_base64_decode(id + sizeof b64u_prefix - 1,
+                                 id_len - (sizeof b64u_prefix - 1), 1, out,
+                                 JOB_ID_LEN, &decoded) &&
+            decoded == JOB_ID_LEN) {
+            static const unsigned char zero[JOB_ID_LEN];
+            if (memcmp(out, zero, JOB_ID_LEN)) return 0;
+        }
+    }
+    return -1;
+}
+
+/* Durable entries inventory grammar: limit, prefix, and cursor (a b64u
+ * entry identifier acting as the sorted keyset position). */
+static int durable_list_params(const char *path, size_t path_len, unsigned *limit,
+                               AdminName *prefix, int *prefix_supplied,
+                               AdminName *cursor, int *cursor_supplied) {
+    const char *p = memchr(path, '?', path_len), *end = path + path_len;
+    int seen_limit = 0, seen_prefix = 0, seen_cursor = 0;
+    *limit = 100; prefix->len = 0; cursor->len = 0;
+    *prefix_supplied = 0; *cursor_supplied = 0;
+    if (!p) return 0;
+    for (p++; p < end;) {
+        const char *amp = memchr(p, '&', (size_t)(end - p)), *part_end = amp ? amp : end;
+        const char *eq = memchr(p, '=', (size_t)(part_end - p));
+        if (!eq || eq == p || eq + 1 == part_end) return -1;
+        size_t key_len = (size_t)(eq - p), value_len = (size_t)(part_end - eq - 1);
+        const char *value = eq + 1;
+        if (key_len == 5 && !memcmp(p, "limit", 5) && !seen_limit++) {
+            char number[12], *number_end;
+            if (value_len >= sizeof number) return -1;
+            memcpy(number, value, value_len); number[value_len] = 0;
+            errno = 0; unsigned long parsed = strtoul(number, &number_end, 10);
+            if (errno || *number_end || !parsed || parsed > ADMIN_LIST_MAX) return -1;
+            *limit = (unsigned)parsed;
+        } else if (key_len == 6 && !memcmp(p, "prefix", 6) && !seen_prefix++) {
+            char decoded[2 * ADMIN_NAME_MAX + 8];
+            int decoded_len = query_value_decode(value, value_len, decoded, sizeof decoded);
+            if (decoded_len < 0 || decode_id(decoded, (size_t)decoded_len, prefix)) return -1;
+            *prefix_supplied = 1;
+        } else if (key_len == 6 && !memcmp(p, "cursor", 6) && !seen_cursor++) {
+            char decoded[2 * ADMIN_NAME_MAX + 8];
+            int decoded_len = query_value_decode(value, value_len, decoded, sizeof decoded);
+            if (decoded_len < 0 || decode_id(decoded, (size_t)decoded_len, cursor)) return -1;
+            *cursor_supplied = 1;
+        } else return -1;
+        p = amp ? amp + 1 : end;
+    }
+    return 0;
+}
+
+/* Completion-receipt inventory grammar: limit and a keyset cursor holding
+ * the b64u encoding of "<completed_at_ms decimal>:<32 hex op id>". Returns
+ * -1 for an invalid limit or unknown parameter and -2 for an invalid
+ * cursor, so the handler can pick the stable error code. */
+static int job_list_params(const char *path, size_t path_len, unsigned *limit,
+                           uint64_t *after_ms, unsigned char after_op[JOB_ID_LEN],
+                           int *cursor_supplied) {
+    const char *p = memchr(path, '?', path_len), *end = path + path_len;
+    int seen_limit = 0, seen_cursor = 0;
+    *limit = 100; *after_ms = 0; memset(after_op, 0, JOB_ID_LEN); *cursor_supplied = 0;
+    if (!p) return 0;
+    for (p++; p < end;) {
+        const char *amp = memchr(p, '&', (size_t)(end - p)), *part_end = amp ? amp : end;
+        const char *eq = memchr(p, '=', (size_t)(part_end - p));
+        if (!eq || eq == p || eq + 1 == part_end) return -1;
+        size_t key_len = (size_t)(eq - p), value_len = (size_t)(part_end - eq - 1);
+        const char *value = eq + 1;
+        if (key_len == 5 && !memcmp(p, "limit", 5) && !seen_limit++) {
+            char number[12], *number_end;
+            if (value_len >= sizeof number) return -1;
+            memcpy(number, value, value_len); number[value_len] = 0;
+            errno = 0; unsigned long parsed = strtoul(number, &number_end, 10);
+            if (errno || *number_end || !parsed || parsed > ADMIN_LIST_MAX) return -1;
+            *limit = (unsigned)parsed;
+        } else if (key_len == 6 && !memcmp(p, "cursor", 6) && !seen_cursor++) {
+            char decoded[128];
+            int decoded_len = query_value_decode(value, value_len, decoded, sizeof decoded);
+            if (decoded_len < 0) return -2;
+            char text[96];
+            size_t text_len = 0;
+            if (admin_base64_decode(decoded, (size_t)decoded_len, 1,
+                                    (unsigned char *)text, sizeof text - 1, &text_len))
+                return -2;
+            text[text_len] = 0;
+            char *colon = memchr(text, ':', text_len);
+            if (!colon) return -2;
+            *colon = 0;
+            errno = 0;
+            unsigned long long ms = strtoull(text, &colon, 10);
+            if (errno || *colon || colon - text == 0) return -2;
+            size_t hex_len = text_len - (size_t)(colon - text) - 1;
+            if (hex_len != 2 * JOB_ID_LEN) return -2;
+            for (size_t i = 0; i < JOB_ID_LEN; i++) {
+                unsigned hi, lo;
+                char hc = colon[1 + i * 2], lc = colon[2 + i * 2];
+                if (hc >= '0' && hc <= '9') hi = (unsigned)(hc - '0');
+                else if (hc >= 'a' && hc <= 'f') hi = (unsigned)(hc - 'a') + 10u;
+                else return -2;
+                if (lc >= '0' && lc <= '9') lo = (unsigned)(lc - '0');
+                else if (lc >= 'a' && lc <= 'f') lo = (unsigned)(lc - 'a') + 10u;
+                else return -2;
+                after_op[i] = (unsigned char)((hi << 4) | lo);
+            }
+            *after_ms = ms;
+            *cursor_supplied = 1;
+        } else return -1;
+        p = amp ? amp + 1 : end;
+    }
+    return 0;
+}
+
+/* Durable job mutations bypass the process-lifetime HTTP idempotency
+ * cache: the core receipt ledger is authoritative and must answer replays
+ * with its own `replayed` flag. Unmatched cache misses fall through. */
+static int durable_job_mutation_path(const char *method, const char *path,
+                                     size_t path_len) {
+    static const char entries_prefix[] = "/api/admin/v1/keyspaces/durable/entries/";
+    if (!strcmp(method, "PUT") || !strcmp(method, "DELETE")) {
+        size_t pl = sizeof entries_prefix - 1;
+        const char *query = memchr(path, '?', path_len);
+        size_t end = query ? (size_t)(query - path) : path_len;
+        return end > pl && !memcmp(path, entries_prefix, pl) &&
+               !memchr(path + pl, '/', end - pl);
+    }
+    return !strcmp(method, "POST") && path_len == 29 &&
+           !memcmp(path, "/api/admin/v1/job-completions", 29);
+}
+
+/* One retained receipt as the Management API inventory item: 64-bit
+ * identity/version/timestamp fields are decimal strings, never numbers. */
+static void receipt_item_json(struct out *o, const JobReceipt *r) {
+    char op[37];
+    uuid_format(r->op_id, op);
+    put(o, "{\"operation_id\":\"%s\",\"commit_id\":\"%llu\",\"state_version\":\"%llu\",\"output_message_id\":\"%llu\",\"completed_at\":\"%llu\",\"receipt_expires_at\":\"%llu\"}",
+        op, (unsigned long long)r->commit_id, (unsigned long long)r->state_version,
+        (unsigned long long)r->output_message_id,
+        (unsigned long long)r->completed_at_ms,
+        (unsigned long long)r->receipt_expires_ms);
+}
+
+typedef struct ReceiptRender {
+    struct out *o;
+    unsigned count, limit;
+    uint64_t last_ms;
+    unsigned char last_op[JOB_ID_LEN];
+} ReceiptRender;
+
+static void receipt_render_cb(const JobReceipt *r, void *ud) {
+    ReceiptRender *x = ud;
+    if (x->count >= x->limit) return;
+    if (x->count) put(x->o, ",");
+    receipt_item_json(x->o, r);
+    x->last_ms = r->completed_at_ms;
+    memcpy(x->last_op, r->op_id, JOB_ID_LEN);
+    x->count++;
+}
+
 static void mutation_reply(AdminHttp *a, int fd, void *ssl, const char *origin, const char *operation,
                            int native_rc, const char *success, int success_status) {
     char body[1024]; struct out out = {body, sizeof body, 0, 0};
@@ -1280,8 +1753,9 @@ static void handle_management(AdminHttp *a, int fd, void *ssl) {
     }
     if ((is_get || is_head) && path_len == 26 && !memcmp(path,"/api/admin/v1/capabilities",26)) {
         AdminHttpStatus capability_status={0};a->c.status(a->c.status_ud,&capability_status);
-        unsigned delivery_limit=a->session_limit<ADMIN_DELIVERY_LIMIT?a->session_limit:ADMIN_DELIVERY_LIMIT;char capabilities[4096];int n=snprintf(capabilities,sizeof capabilities,"{\"product\":\"KuttiDB\",\"server_version\":\"0.2.0\",\"management_api_contract\":\"1.0\",\"enabled_engines\":[\"keyspaces\",\"queues\",\"streams\",\"consumer-groups\",\"routing\"],\"sse\":{\"available\":true},\"audit\":{\"required\":true,\"healthy\":%s},\"operations\":{\"keyspaces\":[\"list\",\"get\",\"list_entries\",\"read_entry\",\"batch_get\",\"batch_put\",\"batch_delete\",\"put_entry\",\"delete_entry\",\"claims\",\"get_or_refresh\"],\"queues\":[\"list\",\"get\",\"create\",\"browse_messages\",\"publish\",\"publish_batch\",\"consume\",\"consume_batch\",\"get_delivery\",\"ack\",\"nack\",\"ack_batch\",\"nack_batch\",\"purge\"],\"queue_consumers\":[\"list\",\"get\",\"register\",\"delete\"],\"streams\":[\"list\",\"get\",\"create\",\"inspect_partitions\",\"append\",\"append_batch\",\"fetch\",\"tail\",\"truncate\",\"update_retention\",\"delete\"],\"consumer_groups\":[\"inspect_offsets\",\"batch_commit_offsets\",\"reset_offsets\",\"management_sessions\"],\"jobs\":[\"list\",\"get\",\"cancel\"],\"maintenance\":[\"list\",\"keyspace_checkpoint\",\"queue_checkpoint\",\"stream_checkpoint\",\"checkpoint_all\"],\"routing\":[\"list_routers\",\"get_router\",\"list_routes\",\"create_router\",\"create_route\",\"delete_route\",\"delete_router\",\"update_router\",\"publish\"],\"atomic_operations\":[\"put-and-route\",\"put-and-enqueue\",\"delete-and-route\",\"update-if-present-and-route\"]},\"routing_modes\":[\"exact\",\"broadcast\",\"pattern\"],\"idempotency\":{\"required_for\":[\"put_entry\",\"delete_entry\",\"create\",\"publish\",\"append\",\"consume\",\"ack\",\"nack\",\"claims\",\"get_or_refresh\",\"atomic_operations\",\"purge\",\"truncate\",\"stream_update\",\"stream_delete\",\"cancel\",\"checkpoint\",\"consumer_delete\",\"offset_batch_commit\",\"offset_reset\",\"group_session\"],\"persistence\":\"process-lifetime\"},\"limits\":{\"request_body_bytes\":262144,\"batch_items\":100,\"page_items\":500,\"tail_clients\":%u,\"tail_events_per_second\":%u,\"delivery_sessions\":%u,\"claim_sessions\":%u,\"jobs\":%u}}",a->audit_failed?"false":"true",a->max_tail_clients,ADMIN_TAIL_EVENTS_PER_SECOND,delivery_limit,delivery_limit,a->job_limit);
-        if(n>0&&(size_t)n<sizeof capabilities){int extra;capabilities[n-1]=0;extra=snprintf(capabilities+n-1,sizeof capabilities-(size_t)n+1,",\"durable_consumer_deliveries\":true,\"keyspace_entry_filters\":[\"prefix\",\"expires\"],\"cursors\":{\"queue_messages\":{\"opaque\":true,\"ttl_seconds\":%u,\"max_live\":%u},\"keyspace_entries\":{\"opaque\":true,\"ttl_seconds\":%u,\"max_live\":%u}},\"tls\":{\"available\":%s},\"persistence\":{\"keyspaces\":%s,\"queues\":%s,\"streams\":%s}}",ADMIN_CURSOR_TTL_SECONDS,ADMIN_CURSOR_LIMIT,ADMIN_CURSOR_TTL_SECONDS,ADMIN_CURSOR_LIMIT,capability_status.tls_available?"true":"false",capability_status.keyspace_persistence_failed?"false":"true",capability_status.queue_persistence_failed?"false":"true",capability_status.stream_persistence_failed?"false":"true");if(extra>=0)n=n-1+extra;}
+        int job_available=a->c.jobs!=NULL,job_enabled=a->c.jobs&&job_engine_writable(a->c.jobs);
+        unsigned delivery_limit=a->session_limit<ADMIN_DELIVERY_LIMIT?a->session_limit:ADMIN_DELIVERY_LIMIT;char capabilities[6144];int n=snprintf(capabilities,sizeof capabilities,"{\"product\":\"KuttiDB\",\"server_version\":\"0.2.0\",\"management_api_contract\":\"1.0\",\"enabled_engines\":[\"keyspaces\",\"queues\",\"streams\",\"consumer-groups\",\"routing\"],\"sse\":{\"available\":true},\"audit\":{\"required\":true,\"healthy\":%s},\"operations\":{\"keyspaces\":[\"list\",\"get\",\"list_entries\",\"read_entry\",\"batch_get\",\"batch_put\",\"batch_delete\",\"put_entry\",\"delete_entry\",\"claims\",\"get_or_refresh\"],\"queues\":[\"list\",\"get\",\"create\",\"browse_messages\",\"publish\",\"publish_batch\",\"consume\",\"consume_batch\",\"get_delivery\",\"ack\",\"nack\",\"ack_batch\",\"nack_batch\",\"purge\"],\"queue_consumers\":[\"list\",\"get\",\"register\",\"delete\"],\"streams\":[\"list\",\"get\",\"create\",\"inspect_partitions\",\"append\",\"append_batch\",\"fetch\",\"tail\",\"truncate\",\"update_retention\",\"delete\"],\"consumer_groups\":[\"inspect_offsets\",\"batch_commit_offsets\",\"reset_offsets\",\"management_sessions\"],\"jobs\":[\"list\",\"get\",\"cancel\"],\"maintenance\":[\"list\",\"keyspace_checkpoint\",\"queue_checkpoint\",\"stream_checkpoint\",\"checkpoint_all\"],\"routing\":[\"list_routers\",\"get_router\",\"list_routes\",\"create_router\",\"create_route\",\"delete_route\",\"delete_router\",\"update_router\",\"publish\"],\"atomic_operations\":[\"put-and-route\",\"put-and-enqueue\",\"delete-and-route\",\"update-if-present-and-route\"]},\"routing_modes\":[\"exact\",\"broadcast\",\"pattern\"],\"idempotency\":{\"required_for\":[\"put_entry\",\"delete_entry\",\"create\",\"publish\",\"append\",\"consume\",\"ack\",\"nack\",\"claims\",\"get_or_refresh\",\"atomic_operations\",\"purge\",\"truncate\",\"stream_update\",\"stream_delete\",\"cancel\",\"checkpoint\",\"consumer_delete\",\"offset_batch_commit\",\"offset_reset\",\"group_session\"],\"persistence\":\"process-lifetime\"},\"limits\":{\"request_body_bytes\":262144,\"batch_items\":100,\"page_items\":500,\"tail_clients\":%u,\"tail_events_per_second\":%u,\"delivery_sessions\":%u,\"claim_sessions\":%u,\"jobs\":%u}}",a->audit_failed?"false":"true",a->max_tail_clients,ADMIN_TAIL_EVENTS_PER_SECOND,delivery_limit,delivery_limit,a->job_limit);
+        if(n>0&&(size_t)n<sizeof capabilities){int extra;capabilities[n-1]=0;extra=snprintf(capabilities+n-1,sizeof capabilities-(size_t)n+1,",\"durable_consumer_deliveries\":true,\"keyspace_entry_filters\":[\"prefix\",\"expires\"],\"cursors\":{\"queue_messages\":{\"opaque\":true,\"ttl_seconds\":%u,\"max_live\":%u},\"keyspace_entries\":{\"opaque\":true,\"ttl_seconds\":%u,\"max_live\":%u}},\"tls\":{\"available\":%s},\"persistence\":{\"keyspaces\":%s,\"queues\":%s,\"streams\":%s},\"job_completion\":{\"available\":%s,\"enabled\":%s,\"limits\":{\"state_max_bytes\":\"%llu\",\"receipts_max_bytes\":\"%llu\",\"receipts_max_count\":\"%llu\",\"receipt_retention_ms\":\"%llu\",\"max_operation_bytes\":\"%llu\"}}}",ADMIN_CURSOR_TTL_SECONDS,ADMIN_CURSOR_LIMIT,ADMIN_CURSOR_TTL_SECONDS,ADMIN_CURSOR_LIMIT,capability_status.tls_available?"true":"false",capability_status.keyspace_persistence_failed?"false":"true",capability_status.queue_persistence_failed?"false":"true",capability_status.stream_persistence_failed?"false":"true",job_available?"true":"false",job_enabled?"true":"false",(unsigned long long)(a->c.jobs?job_engine_state_budget(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_receipts_budget(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_receipts_max_count(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_receipt_retention_ms(a->c.jobs):0),(unsigned long long)(a->c.jobs?job_engine_max_op_bytes(a->c.jobs):0));if(extra>=0)n=n-1+extra;}
         if(n<0||(size_t)n>=sizeof capabilities){free(body);return;}reply(a,fd,ssl,"200 OK",capabilities,(size_t)n,is_head,cors,0);free(body);return;
     }
     { const char *query=memchr(path,'?',path_len);size_t bare=query?(size_t)(query-path):path_len;
@@ -1483,6 +1957,96 @@ static void handle_management(AdminHttp *a, int fd, void *ssl) {
      if((is_get||is_head)&&path_id_action(path,path_len,"/api/admin/v1/routing/routers/","/routes",&router_name)==0){unsigned limit=100;if(limit_from(path,path_len,&limit)){char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"bad_request","The limit parameter is invalid."),is_head,cors,0);free(body);return;}AdminRouteSnapshot snapshot={0};uint32_t routes=0;int found=exchange_foreach_route(a->c.queues,(const char*)router_name.bytes,router_name.len,route_cb,&snapshot,&routes);if(found!=1){char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested router was not found."),is_head,cors,0);free(body);return;}char *result=malloc(ADMIN_BODY_MAX);if(!result){free(body);return;}struct out encoded={result,ADMIN_BODY_MAX,0,0};put(&encoded,"{\"data\":[");uint32_t returned=snapshot.count<limit?snapshot.count:limit;for(uint32_t i=0;i<returned;i++){if(i)put(&encoded,",");put(&encoded,"{");route_id_field(&encoded,&snapshot.routes[i]);put(&encoded,",\"queue\":{");identifier_field(&encoded,"name",&snapshot.routes[i].queue);put(&encoded,"},\"routing_key\":{");identifier_field(&encoded,"value",&snapshot.routes[i].key);put(&encoded,"}}");}collection_end(&encoded,returned,limit,snapshot.truncated||snapshot.count>returned);reply(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0);free(result);free(body);return;}
      if((is_get||is_head)&&path_id_after(path,path_len,"/api/admin/v1/routing/routers/",&router_name)==0){AdminRouterSnapshot snapshot={0};exchange_foreach_stats(a->c.queues,router_cb,&snapshot);for(uint32_t i=0;i<snapshot.count;i++)if(snapshot.routers[i].name.len==router_name.len&&!memcmp(snapshot.routers[i].name.bytes,router_name.bytes,router_name.len)){AdminRouter*r=&snapshot.routers[i];const char*mode=r->type==EXCHANGE_DIRECT?"exact":r->type==EXCHANGE_FANOUT?"broadcast":"pattern";char result[2048],extra[64];struct out encoded={result,sizeof result,0,0};put(&encoded,"{\"data\":{");identifier_field(&encoded,"name",&r->name);put(&encoded,",\"mode\":\"%s\",\"durable\":%s,\"route_count\":%u,\"revision\":%llu,\"publish_attempt_count\":%llu,\"unroutable_count\":%llu,\"metrics_scope\":\"process_lifetime\"}}",mode,r->durable?"true":"false",r->routes,(unsigned long long)r->revision,(unsigned long long)r->published,(unsigned long long)r->unroutable);snprintf(extra,sizeof extra,"ETag: \"r-%llu\"\r\n",(unsigned long long)r->revision);reply_extra(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0,extra);free(body);return;}char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested router was not found."),is_head,cors,0);free(body);return;}
     }
+    /* ---- atomic job completion: durable keyspace and receipt resources.
+     * Reads call the shared core directly; every response keeps 64-bit
+     * identity/version fields as decimal strings. ---- */
+    { const char *query=memchr(path,'?',path_len);size_t bare=query?(size_t)(query-path):path_len;
+      if ((is_get || is_head) && bare==31 && !memcmp(path,"/api/admin/v1/keyspaces/durable",31)) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0);free(body);return; }
+        uint64_t se=0,sb=0,rc2=0,rb2=0;job_engine_usage(a->c.jobs,&se,&sb,&rc2,&rb2);
+        char result[512];struct out encoded={result,sizeof result,0,0};
+        put(&encoded,"{\"data\":{\"name\":\"durable\",\"evictable\":false,\"entry_count\":%llu,\"live_bytes\":%llu,\"capacity_bytes\":\"%llu\",\"persistence_healthy\":%s,\"storage_class\":\"queue_wal\"}}",(unsigned long long)se,(unsigned long long)sb,(unsigned long long)job_engine_state_budget(a->c.jobs),job_engine_writable(a->c.jobs)?"true":"false");
+        reply(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0);free(body);return;
+      }
+      if ((is_get || is_head) && bare==39 && !memcmp(path,"/api/admin/v1/keyspaces/durable/entries",39)) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0);free(body);return; }
+        unsigned limit;AdminName prefix,cursor_key;int prefix_supplied,cursor_supplied;
+        if (durable_list_params(path,path_len,&limit,&prefix,&prefix_supplied,&cursor_key,&cursor_supplied)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","limit, prefix, or cursor is invalid."),is_head,cors,0);free(body);return; }
+        AdminDurableScan scan;memset(&scan,0,sizeof scan);
+        scan.sel=calloc((size_t)limit+1,sizeof(AdminDurableKey));
+        if (!scan.sel) { free(body);return; }
+        scan.cap=(uint32_t)limit+1;scan.prefix=prefix;
+        if (cursor_supplied) { scan.after=cursor_key.bytes;scan.after_len=cursor_key.len; }
+        job_state_foreach(a->c.jobs,durable_scan_cb,&scan,UINT32_MAX,NULL);
+        if (scan.key_too_large) { free(scan.sel);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"503 Service Unavailable",b,error(&o,"engine_unavailable","A bounded durable-state scan is unavailable."),is_head,cors,0);free(body);return; }
+        for (uint32_t i=1;i<scan.count;i++) { AdminDurableKey k=scan.sel[i];uint32_t j=i;while(j>0&&durable_key_less(k.bytes,k.len,scan.sel[j-1].bytes,scan.sel[j-1].len)){scan.sel[j]=scan.sel[j-1];j--;}scan.sel[j]=k; }
+        char *result=malloc(ADMIN_BODY_MAX);if(!result){free(scan.sel);free(body);return;}
+        struct out encoded={result,ADMIN_BODY_MAX,0,0};
+        uint32_t returned=scan.count<(uint32_t)limit?scan.count:(uint32_t)limit;
+        put(&encoded,"{\"data\":[");
+        for(uint32_t i=0;i<returned;i++){if(i)put(&encoded,",");put(&encoded,"{\"entry_id\":");json_b64url_id(&encoded,scan.sel[i].bytes,scan.sel[i].len);put(&encoded,",\"key_bytes\":%u,\"version\":\"%llu\",\"last_commit_id\":\"%llu\",\"value_size\":%u}",scan.sel[i].len,(unsigned long long)scan.sel[i].version,(unsigned long long)scan.sel[i].commit_id,scan.sel[i].value_len);}
+        int more=(scan.count>(uint32_t)limit)||scan.overflow>0;
+        put(&encoded,"],\"meta\":{\"count\":%u,\"limit\":%u,\"next_cursor\":",returned,limit);
+        if(more&&returned){char cursor_b64[4*(ADMIN_NAME_MAX/3)+8];b64u_encode(scan.sel[returned-1].bytes,scan.sel[returned-1].len,cursor_b64);put(&encoded,"\"b64u:%s\"",cursor_b64);}
+        else put(&encoded,"null");
+        put(&encoded,",\"weakly_consistent\":false}}");
+        if(encoded.full){free(result);free(scan.sel);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"500 Internal Server Error",b,error(&o,"internal_error","The server could not complete the request."),is_head,cors,0);free(body);return;}
+        free(scan.sel);reply(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0);free(result);free(body);return;
+      }
+      AdminName durable_entry;
+      if ((is_get || is_head) && path_id_after(path,path_len,"/api/admin/v1/keyspaces/durable/entries/",&durable_entry)==0) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0);free(body);return; }
+        JobStateValue durable_value={0};
+        JobStatus st=job_state_get(a->c.jobs,(const char *)durable_entry.bytes,durable_entry.len,&durable_value);
+        if (st!=JOB_OK) { char b[256];struct out o={b,sizeof b,0,0};if(st==JOB_NOT_FOUND)reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0);else reply(a,fd,ssl,"503 Service Unavailable",b,error(&o,"engine_unavailable","The durable state engine is unavailable."),is_head,cors,0);free(body);return; }
+        if ((size_t)durable_value.len*2+1024>ADMIN_BODY_MAX) { free(durable_value.value);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"413 Payload Too Large",b,error(&o,"request_too_large","The durable state value exceeds the response limit."),is_head,cors,0);free(body);return; }
+        size_t cap=(size_t)durable_value.len*2+1024;char *result=malloc(cap);
+        if(!result){free(durable_value.value);free(body);return;}
+        char etag[64];struct out encoded={result,cap,0,0};
+        put(&encoded,"{\"entry_id\":");json_b64url_id(&encoded,durable_entry.bytes,durable_entry.len);
+        put(&encoded,",\"key\":");json_b64url_id(&encoded,durable_entry.bytes,durable_entry.len);
+        put(&encoded,",\"value\":{\"encoding\":\"base64\",\"data\":");json_b64(&encoded,(const unsigned char *)durable_value.value,durable_value.len);
+        put(&encoded,"},\"version\":\"%llu\",\"last_commit_id\":\"%llu\"}",(unsigned long long)durable_value.version,(unsigned long long)durable_value.last_commit_id);
+        snprintf(etag,sizeof etag,"ETag: \"s-%llu\"\r\n",(unsigned long long)durable_value.version);
+        free(durable_value.value);
+        reply_extra(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0,etag);free(result);free(body);return;
+      }
+      if ((is_get || is_head) && bare==29 && !memcmp(path,"/api/admin/v1/job-completions",29)) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0);free(body);return; }
+        unsigned limit;uint64_t after_ms=0;unsigned char after_op[JOB_ID_LEN];int cursor_supplied;
+        int params=job_list_params(path,path_len,&limit,&after_ms,after_op,&cursor_supplied);
+        if (params) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,params<-1?"cursor_invalid":"bad_request",params<-1?"The cursor is invalid or malformed.":"The limit parameter is invalid."),is_head,cors,0);free(body);return; }
+        char *result=malloc(ADMIN_BODY_MAX);if(!result){free(body);return;}
+        struct out encoded={result,ADMIN_BODY_MAX,0,0};
+        put(&encoded,"{\"data\":[");
+        ReceiptRender render_ctx={&encoded,0,limit,0,{0,0}};
+        uint64_t total=job_receipt_foreach(a->c.jobs,JOB_KIND_COMPLETION,after_ms,cursor_supplied?after_op:NULL,receipt_render_cb,&render_ctx,(uint32_t)limit+1);
+        put(&encoded,"],\"meta\":{\"count\":%u,\"limit\":%u,\"next_cursor\":",render_ctx.count,limit);
+        if(total>render_ctx.count&&render_ctx.count){char cursor_text[64],cursor_b64[96];snprintf(cursor_text,sizeof cursor_text,"%llu:",(unsigned long long)render_ctx.last_ms);for(unsigned i=0;i<JOB_ID_LEN;i++)snprintf(cursor_text+strlen(cursor_text),3,"%02x",render_ctx.last_op[i]);b64u_encode((const unsigned char *)cursor_text,strlen(cursor_text),cursor_b64);put(&encoded,"\"%s\"",cursor_b64);}
+        else put(&encoded,"null");
+        put(&encoded,",\"weakly_consistent\":false}}");
+        if(encoded.full){free(result);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"500 Internal Server Error",b,error(&o,"internal_error","The server could not complete the request."),is_head,cors,0);free(body);return;}
+        reply(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0);free(result);free(body);return;
+      }
+      unsigned char lookup_op[JOB_ID_LEN];
+      if ((is_get || is_head) && path_op_id(path,path_len,"/api/admin/v1/job-completions/",lookup_op)==0) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0);free(body);return; }
+        JobReceipt receipt;JobStatus st=job_receipt_lookup(a->c.jobs,lookup_op,&receipt);
+        if (st!=JOB_OK||receipt.kind!=JOB_KIND_COMPLETION) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","No retained receipt exists for this operation id."),is_head,cors,0);free(body);return; }
+        char result[1024];struct out encoded={result,sizeof result,0,0};
+        receipt_item_json(&encoded,&receipt);
+        reply(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0);free(body);return;
+      }
+      if ((is_get || is_head) && path_op_id(path,path_len,"/api/admin/v1/durable-operations/",lookup_op)==0) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0);free(body);return; }
+        JobReceipt receipt;JobStatus st=job_receipt_lookup(a->c.jobs,lookup_op,&receipt);
+        if (st!=JOB_OK||(receipt.kind!=JOB_KIND_STATE_PUT&&receipt.kind!=JOB_KIND_STATE_DELETE)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","No retained receipt exists for this operation id."),is_head,cors,0);free(body);return; }
+        char result[1024];struct out encoded={result,sizeof result,0,0};
+        char op[37];uuid_format(receipt.op_id,op);
+        put(&encoded,"{\"operation_id\":\"%s\",\"kind\":\"%s\",\"commit_id\":\"%llu\",\"state_version\":\"%llu\",\"completed_at\":\"%llu\",\"receipt_expires_at\":\"%llu\"}",op,receipt.kind==JOB_KIND_STATE_PUT?"state_put":"state_delete",(unsigned long long)receipt.commit_id,(unsigned long long)receipt.state_version,(unsigned long long)receipt.completed_at_ms,(unsigned long long)receipt.receipt_expires_ms);
+        reply(a,fd,ssl,"200 OK",result,encoded.len,is_head,cors,0);free(body);return;
+      }
+    }
     if ((is_get || is_head) && !route_ok(path,path_len)) { char b[256]; struct out o={b,sizeof b,0,0}; reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested resource was not found."),is_head,cors,0); free(body); return; }
     { unsigned ignored_limit; if ((is_get || is_head) && limit_from(path,path_len,&ignored_limit)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"bad_request","The limit parameter is invalid."),is_head,cors,0);free(body);return;} }
     if ((is_get || is_head) && !content_len) { char *result=malloc(ADMIN_BODY_MAX); if(!result){free(body);return;} struct out out={result,ADMIN_BODY_MAX,0,0};int unavailable=0;render(a,path,path_len,&out,&unavailable);reply(a,fd,ssl,unavailable?"503 Service Unavailable":"200 OK",result,out.len,is_head,cors,0);free(result);free(body);return; }
@@ -1492,9 +2056,10 @@ static void handle_management(AdminHttp *a, int fd, void *ssl) {
     size_t idem_len=0; const char *idem=header(headers,header_len,"idempotency-key",&idem_len);
     if (!idem || !idem_len || idem_len > 128) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"428 Precondition Required",b,error(&o,"precondition_required","Idempotency-Key is required for this operation."),0,cors,0);free(body);return; }
     audit_idempotency_hash=1469598103934665603ULL;for(size_t i=0;i<idem_len;i++){audit_idempotency_hash^=(unsigned char)idem[i];audit_idempotency_hash*=1099511628211ULL;}
-    uint64_t fingerprint=request_fingerprint(method,path,body,content_len);const char *cached=NULL;size_t cached_len=0;int cached_status=0;int cached_rc=idempotency_lookup(a,idem,idem_len,fingerprint,&cached,&cached_len,&cached_status);
-    if(cached_rc<0){char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"409 Conflict",b,error(&o,"idempotency_conflict","This Idempotency-Key was used for a different request."),0,cors,0);free(body);return;}if(cached_rc>0){reply(a,fd,ssl,http_status(cached_status),cached,cached_len,0,cors,0);free(body);return;}
+    uint64_t fingerprint=request_fingerprint(method,path,body,content_len);const char *cached=NULL;size_t cached_len=0;int cached_status=0;int durable_no_cache=durable_job_mutation_path(method,path,path_len);int cached_rc=idempotency_lookup(a,idem,idem_len,fingerprint,&cached,&cached_len,&cached_status);
+    if(cached_rc<0){char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"409 Conflict",b,error(&o,"idempotency_conflict","This Idempotency-Key was used for a different request."),0,cors,0);free(body);return;}if(cached_rc>0&&!durable_no_cache){reply(a,fd,ssl,http_status(cached_status),cached,cached_len,0,cors,0);free(body);return;}
     AdminJsonSlice name, mode, queue_id, alternate, atomic_kind, atomic_key, atomic_target, batch_items[100]; AdminName target={0}, target2={0}; AdminRoute route_id={0}; QueueMessage delivered={0}; AdminDelivery *delivery=NULL; AdminGroupSession *group_session=NULL; uint32_t *session_parts=NULL,session_assigned=0; uint64_t session_generation=0; unsigned char *payload=NULL, atomic_routing_key[ROUTING_KEY_MAX]; const void *batch_payloads[100], *stream_key=NULL; StreamAppendInput stream_batch[100]; StreamAppendResult stream_batch_results[100]; StreamCommitInput offset_batch[100]; uint32_t batch_lens[100],batch_count=0,group_offset_count=0; size_t batch_item_count=0,payload_len=0,stream_key_len=0,atomic_routing_key_len=0,if_match_len=0,confirm_len=0; uint64_t n1=0,n2=0,age=0,generated_id=0,generated_partition=0,generated_offset=0,transaction_id=0,routed_count=0,expected_generation=0,expected_revision=0; int64_t offset_delta=0; uint32_t group_partition=0; unsigned router_mode=EXCHANGE_DIRECT,atomic_operation=0; StreamOffsetResetStrategy reset_strategy=STREAM_OFFSET_RESET_EARLIEST; int durable=0,deleted=0; int rc=-1, action=0; char success[4096]; size_t success_len=0; int success_status=200; const char *operation=NULL;
+    JobCompletionRequest job_req; JobCompletionResult job_result; JobMutationReceipt job_mutation; unsigned char job_op[JOB_ID_LEN]; unsigned char job_proof[JOB_ID_LEN]; unsigned char job_store_id[JOB_ID_LEN];
     AdminDelivery *delivery_batch[50]; uint64_t delivery_tags[50], delivery_owner=0; int batch_nack=0;
     QueueMessage delivered_batch[50]={{0}}; uint32_t delivered_batch_count=0;
     AdminName key_batch[100]; uint64_t key_ttls[100]; uint32_t batch_applied=0,batch_deleted=0;
@@ -1631,6 +2196,84 @@ static void handle_management(AdminHttp *a, int fd, void *ssl) {
         operation="routing.router.update";action=45;success_len=(size_t)snprintf(success,sizeof success,"{\"data\":{\"updated\":true,\"durability\":\"known\"}}");
     } else if (!strcmp(method,"POST") && path_len==29 && !memcmp(path,"/api/admin/v1/queue-consumers",29) && admin_json_string(body,content_len,"name",&name)==1 && name.len && name.len<=QUEUE_NAME_MAX) {
         operation="queue.consumer.create";action=13;success_len=(size_t)snprintf(success,sizeof success,"{\"data\":{\"name\":\"%.*s\"}}",(int)name.len,name.data);success_status=201;
+    } else if (!strcmp(method,"POST") && path_id_action(path,path_len,"/api/admin/v1/queue-consumers/","/deliveries",&target)==0 && admin_json_string(body,content_len,"mode",&name)==1 &&
+               !(name.len==9&&!memcmp(name.data,"standard",9)) && !(name.len==10&&!memcmp(name.data,"completion",10))) {
+        char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","mode must be standard or completion."),0,cors,0);free(body);return;
+    } else if (!strcmp(method,"POST") && path_id_action(path,path_len,"/api/admin/v1/queue-consumers/","/deliveries",&target)==0 && admin_json_string(body,content_len,"mode",&name)==1 && name.len==10 && !memcmp(name.data,"completion",10)) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"503 Service Unavailable",b,error(&o,"unsupported_feature","Atomic job completion is not enabled on this server."),0,cors,0);free(body);return; }
+        if (admin_json_string(body,content_len,"queue_id",&queue_id)!=1 || decode_id(queue_id.data,queue_id.len,&target2)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","queue_id is required for a completion delivery."),0,cors,0);free(body);return; }
+        int visibility_present=admin_json_u64(body,content_len,"visibility_ms",&n1);if(!visibility_present)n1=30000;
+        if(visibility_present<0||n1<100||n1>60000){char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","visibility_ms is invalid."),0,cors,0);free(body);return;}
+        uint64_t consumer_owner=0;
+        if (queue_consumer_lookup(a->c.queues,(const char *)target.bytes,target.len,&consumer_owner)!=1) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested Queue consumer was not found."),0,cors,0);free(body);return; }
+        if (queue_revision(a->c.queues,(const char *)target2.bytes,target2.len,&consumer_owner)!=1) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"404 Not Found",b,error(&o,"not_found","The requested Queue was not found."),0,cors,0);free(body);return; }
+        operation="queue.consumer.completion_delivery";action=50;success_len=(size_t)snprintf(success,sizeof success,"{\"data\":null}");success_status=200;
+    } else if (!strcmp(method,"POST") && path_len==29 && !memcmp(path,"/api/admin/v1/job-completions",29)) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"503 Service Unavailable",b,error(&o,"unsupported_feature","Atomic job completion is not enabled on this server."),0,cors,0);free(body);return; }
+        unsigned char body_op[JOB_ID_LEN], check_op[JOB_ID_LEN];
+        AdminJsonSlice op_slice,input_slice,state_slice,out_slice,key_slice,proof_slice,value_name;
+        if (admin_json_string(body,content_len,"operation_id",&op_slice)!=1 || uuid_parse(op_slice.data,op_slice.len,body_op)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","operation_id must be a UUID."),0,cors,0);free(body);return; }
+        if (idem_len!=36 || uuid_parse(idem,idem_len,check_op) || memcmp(check_op,body_op,JOB_ID_LEN)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"idempotency_key_mismatch","Idempotency-Key must equal operation_id."),0,cors,0);free(body);return; }
+        if (json_field(body,content_len,"input",&input_slice)!=1 || json_field(body,content_len,"state",&state_slice)!=1) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","input and state are required."),0,cors,0);free(body);return; }
+        if (admin_json_string(input_slice.data,input_slice.len,"queue",&value_name)!=1 || !value_name.len || value_name.len>QUEUE_NAME_MAX) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","input.queue is invalid."),0,cors,0);free(body);return; }
+        uint64_t input_incarnation=0,input_message_id=0;
+        if (json_dec_u64(input_slice.data,input_slice.len,"queue_incarnation",&input_incarnation)!=1 || json_dec_u64(input_slice.data,input_slice.len,"message_id",&input_message_id)!=1) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","input identity fields are invalid."),0,cors,0);free(body);return; }
+        size_t proof_len=0;
+        if (admin_json_string(input_slice.data,input_slice.len,"delivery_proof",&proof_slice)!=1 ||
+            admin_base64_decode(proof_slice.data,proof_slice.len,0,job_proof,JOB_ID_LEN,&proof_len) || proof_len!=JOB_ID_LEN) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","delivery_proof must be 16 Base64 bytes."),0,cors,0);free(body);return; }
+        if (admin_json_string(state_slice.data,state_slice.len,"key",&key_slice)!=1 || key_slice.len<=5 || memcmp(key_slice.data,"b64u:",5)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","state.key must be a b64u identifier."),0,cors,0);free(body);return; }
+        if ((payload=malloc(content_len+JOB_ID_LEN))==NULL) { free(body);return; }
+        size_t used=0,state_key_len=0,state_value_len=0,out_value_len=0;
+        if (admin_base64_decode(key_slice.data+5,key_slice.len-5,1,payload,content_len+JOB_ID_LEN,&state_key_len) || !state_key_len || state_key_len>65535) { free(payload);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","state.key is invalid."),0,cors,0);free(body);return; }
+        used+=state_key_len;
+        uint64_t expected_version=0;
+        if (json_dec_u64(state_slice.data,state_slice.len,"expected_version",&expected_version)!=1 ||
+            json_b64_object(state_slice.data,state_slice.len,"value",payload+used,content_len+JOB_ID_LEN-used,&state_value_len)!=1) { free(payload);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","state.expected_version or state.value is invalid."),0,cors,0);free(body);return; }
+        used+=state_value_len;
+        int has_output=0;uint64_t output_incarnation=0;AdminJsonSlice out_queue_slice={0};
+        int out_rc=json_field(body,content_len,"outgoing",&out_slice);
+        if (out_rc<0) { free(payload);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","outgoing is invalid."),0,cors,0);free(body);return; }
+        if (out_rc==1 && !(out_slice.len==4 && !memcmp(out_slice.data,"null",4))) {
+            if (admin_json_string(out_slice.data,out_slice.len,"queue",&out_queue_slice)!=1 || !out_queue_slice.len || out_queue_slice.len>QUEUE_NAME_MAX ||
+                json_dec_u64(out_slice.data,out_slice.len,"queue_incarnation",&output_incarnation)!=1 || !output_incarnation ||
+                json_b64_object(out_slice.data,out_slice.len,"value",payload+used,content_len+JOB_ID_LEN-used,&out_value_len)!=1) { free(payload);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","outgoing.queue, outgoing.queue_incarnation, or outgoing.value is invalid."),0,cors,0);free(body);return; }
+            has_output=1;used+=out_value_len;
+        }
+        memset(&job_req,0,sizeof job_req);
+        job_req.input_queue=value_name.data;job_req.input_queue_len=(uint32_t)value_name.len;
+        job_req.input_incarnation=input_incarnation;job_req.input_message_id=input_message_id;
+        job_req.proof=job_proof;
+        job_req.state_key=(const char *)payload;job_req.state_key_len=(uint32_t)state_key_len;
+        job_req.expected_version=expected_version;
+        job_req.state_value=payload+state_key_len;job_req.state_value_len=(uint32_t)state_value_len;
+        job_req.has_output=has_output;
+        job_req.output_queue=has_output?out_queue_slice.data:NULL;
+        job_req.output_queue_len=has_output?(uint32_t)out_queue_slice.len:0;
+        job_req.output_incarnation=has_output?output_incarnation:0;
+        job_req.output_value=has_output?payload+state_key_len+state_value_len:NULL;
+        job_req.output_value_len=has_output?(uint32_t)out_value_len:0;
+        memcpy(job_req.op_id,body_op,JOB_ID_LEN);
+        operation="job.completion.submit";action=51;success_len=(size_t)snprintf(success,sizeof success,"{\"status\":\"committed\"}");success_status=200;
+    } else if ((!strcmp(method,"PUT") || !strcmp(method,"DELETE")) && path_id_after(path,path_len,"/api/admin/v1/keyspaces/durable/entries/",&target)==0) {
+        if (!a->c.jobs) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"503 Service Unavailable",b,error(&o,"unsupported_feature","Atomic job completion is not enabled on this server."),0,cors,0);free(body);return; }
+        int is_put=!strcmp(method,"PUT");
+        size_t if_none_len=0;
+        const char *if_match=header(headers,header_len,"if-match",&if_match_len),*if_none=header(headers,header_len,"if-none-match",&if_none_len),*confirm=header(headers,header_len,"x-kuttidb-confirm",&confirm_len);
+        if (is_put) {
+            int have_match=if_match&&if_match_len&&stream_etag(if_match,if_match_len,&expected_revision)==0;
+            int have_none=if_none&&if_none_len==1&&if_none[0]=='*';
+            if (have_match&&have_none) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","Use either If-Match or If-None-Match, not both."),0,cors,0);free(body);return; }
+            if (!have_match&&!have_none) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"428 Precondition Required",b,error(&o,"precondition_required","If-None-Match: * or If-Match with the current entry version is required."),0,cors,0);free(body);return; }
+            if (have_none) expected_revision=0;
+            if ((payload=malloc(content_len+JOB_ID_LEN))==NULL || json_b64_object(body,content_len,"value",payload,content_len+JOB_ID_LEN,&payload_len)!=1) { free(payload);char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","value must be a {\"encoding\":\"base64\",\"data\":...} object."),0,cors,0);free(body);return; }
+            operation="durable.state.put";action=48;
+        } else {
+            if (!if_match||!if_match_len||stream_etag(if_match,if_match_len,&expected_revision)||!confirm||
+                confirm_len!=sizeof "durable-state-delete"-1||memcmp(confirm,"durable-state-delete",confirm_len)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"428 Precondition Required",b,error(&o,"precondition_required","Current If-Match and X-KuttiDB-Confirm: durable-state-delete are required."),0,cors,0);free(body);return; }
+            operation="durable.state.delete";action=49;
+        }
+        if (uuid_parse(idem,idem_len,job_op)) { char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"400 Bad Request",b,error(&o,"validation_failed","Idempotency-Key must be a UUID and becomes the operation id."),0,cors,0);free(body);return; }
+        success_len=(size_t)snprintf(success,sizeof success,"{\"data\":null}");success_status=200;
     } else if (!strcmp(method,"POST") && path_id_action(path,path_len,"/api/admin/v1/queue-consumers/","/deliveries",&target)==0 && admin_json_string(body,content_len,"queue_id",&queue_id)==1 && decode_id(queue_id.data,queue_id.len,&target2)==0) {
         if (!(delivery=delivery_slot(a))) { a->rate_limit_rejections++;char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"429 Too Many Requests",b,error(&o,"resource_exhausted","The delivery registry is at capacity."),0,cors,0);free(body);return; }
         int visibility_present=admin_json_u64(body,content_len,"visibility_ms",&n1);if(!visibility_present)n1=30000;
@@ -1774,6 +2417,55 @@ static void handle_management(AdminHttp *a, int fd, void *ssl) {
     else if (action == 39) { rc=a->c.keyspace_claim_release((const char *)claim->key.bytes,claim->key.len,claim->owner);if(rc==1){claim->active=0;claim->expired=1;rc=0;} }
     else if (action == 40) { rc=a->c.keyspace_claim_acquire((const char *)claim->key.bytes,claim->key.len,claim->owner,n1);if(rc==1){claim->deadline_ms=admin_mono_ms()+n1;claim->active=1;claim->expired=0;rc=0;}else rc=-1; }
     else if (action == 41) { int got=queue_consume_for_consumer(a->c.queues,(const char *)target2.bytes,target2.len,(const char *)target.bytes,target.len,n1,&delivered);if(got==1){memcpy(delivery->queue.bytes,target2.bytes,target2.len);delivery->queue.len=target2.len;delivery->message_id=delivered.id;delivery->tag=delivered.delivery_tag;delivery->owner=delivery_owner;delivery->deadline_ms=admin_mono_ms()+n1;delivery->active=1;delivery->expired=0;rc=0;struct out encoded={success,sizeof success,0,0};put(&encoded,"{\"data\":{\"delivery_id\":\"");put(&encoded,"%s",delivery->id);put(&encoded,"\",\"message_id\":%llu,\"body\":{\"encoding\":\"base64\",\"data\":",(unsigned long long)delivered.id);json_b64(&encoded,delivered.data,delivered.len);put(&encoded,",\"size\":%u,\"content_type\":\"application/octet-stream\"}}}",delivered.len);success_len=encoded.len;}else rc=-1; }
+    else if (action == 48) rc=(int)job_state_put(a->c.jobs,(const char *)target.bytes,target.len,payload,(uint32_t)payload_len,expected_revision,job_op,&job_mutation);
+    else if (action == 49) rc=(int)job_state_delete(a->c.jobs,(const char *)target.bytes,target.len,expected_revision,job_op,&job_mutation);
+    else if (action == 50) {
+        JobDelivery job_delivery;memset(&job_delivery,0,sizeof job_delivery);
+        rc=(int)job_consume(a->c.jobs,(const char *)target2.bytes,target2.len,(const char *)target.bytes,target.len,n1,&job_delivery);
+        if (rc==JOB_OK) {
+            struct out encoded={success,sizeof success,0,0};
+            put(&encoded,"{\"delivery\":{\"store_id\":");json_b64url_id(&encoded,job_delivery.store_id,JOB_ID_LEN);
+            put(&encoded,",\"queue\":");json_string(&encoded,(const unsigned char *)job_delivery.queue,job_delivery.queue_len);
+            put(&encoded,",\"queue_incarnation\":\"%llu\",\"message_id\":\"%llu\",\"attempts\":%u,\"redelivered\":%s,\"lease_deadline_ms\":\"%llu\",\"proof\":",(unsigned long long)job_delivery.queue_incarnation,(unsigned long long)job_delivery.message_id,job_delivery.attempts,job_delivery.redelivered?"true":"false",(unsigned long long)job_delivery.lease_deadline_ms);
+            json_b64(&encoded,job_delivery.proof,JOB_ID_LEN);
+            put(&encoded,"},\"input\":{\"queue_id\":");json_b64url_id(&encoded,target2.bytes,target2.len);
+            put(&encoded,",\"queue_incarnation\":\"%llu\",\"message_id\":\"%llu\"}}",(unsigned long long)job_delivery.queue_incarnation,(unsigned long long)job_delivery.message_id);
+            if(encoded.full)rc=-1;else success_len=encoded.len;
+        }
+        job_delivery_free(&job_delivery);
+    }
+    else if (action == 51) rc=(int)job_complete(a->c.jobs,&job_req,&job_result);
+    /* Typed durable job outcomes never fall into the generic conflict path:
+     * JOB_NOT_FOUND stays a 404, in-doubt reports outcome unknown, and
+     * success bypasses the process-local idempotency cache so replays are
+     * answered by the core receipt ledger. */
+    if ((action==48||action==49||action==51) && rc!=(int)JOB_OK) { (void)audit_event(a,operation,"failed");free(payload);job_error_reply(a,fd,ssl,cors,(JobStatus)rc,0);free(body);return; }
+    if (action==50 && rc!=(int)JOB_OK) { (void)audit_event(a,operation,"failed");free(payload);job_error_reply(a,fd,ssl,cors,(JobStatus)rc,1);free(body);return; }
+    if (action==48||action==49||action==51) {
+        if (audit_event(a,operation,"completed")) { a->operation_in_doubt++;char b[256];struct out o={b,sizeof b,0,0};free(payload);reply(a,fd,ssl,"500 Internal Server Error",b,error_outcome(&o,"operation_in_doubt","The operation may have completed. Refresh before retrying."),0,cors,0);free(body);return; }
+        struct out encoded={success,sizeof success,0,0};
+        if (action==51) {
+            char op_str[37];uuid_format(job_req.op_id,op_str);
+            put(&encoded,"{\"status\":\"committed\",\"operation_id\":\"%s\",\"storage_id\":",op_str);
+            if (job_engine_store_id(a->c.jobs,job_store_id)) json_b64url_id(&encoded,job_store_id,JOB_ID_LEN); else put(&encoded,"null");
+            put(&encoded,",\"commit_id\":\"%llu\",\"input\":{\"queue\":",(unsigned long long)job_result.commit_id);
+            json_string(&encoded,(const unsigned char *)job_req.input_queue,job_req.input_queue_len);
+            put(&encoded,",\"queue_incarnation\":\"%llu\",\"message_id\":\"%llu\",\"acknowledged\":true},\"state\":{\"key\":",(unsigned long long)job_req.input_incarnation,(unsigned long long)job_req.input_message_id);
+            json_b64url_id(&encoded,(const unsigned char *)job_req.state_key,job_req.state_key_len);
+            put(&encoded,",\"version\":\"%llu\"},\"output\":",(unsigned long long)job_result.state_version);
+            if (job_result.output_message_id) { put(&encoded,"{\"queue\":");json_string(&encoded,(const unsigned char *)job_req.output_queue,job_req.output_queue_len);put(&encoded,",\"queue_incarnation\":\"%llu\",\"message_id\":\"%llu\"}",(unsigned long long)job_req.output_incarnation,(unsigned long long)job_result.output_message_id); }
+            else put(&encoded,"null");
+            put(&encoded,",\"completed_at\":\"%llu\",\"receipt_expires_at\":\"%llu\",\"replayed\":%s}",(unsigned long long)job_result.completed_at_ms,(unsigned long long)job_result.receipt_expires_ms,job_result.replayed?"true":"false");
+            success_len=encoded.len;
+        } else {
+            char op_str[37];uuid_format(job_op,op_str);
+            put(&encoded,"{\"operation_id\":\"%s\",\"commit_id\":\"%llu\",\"state_version\":\"%llu\",\"completed_at\":\"%llu\",\"receipt_expires_at\":\"%llu\",\"replayed\":%s}",op_str,(unsigned long long)job_mutation.commit_id,(unsigned long long)job_mutation.state_version,(unsigned long long)job_mutation.completed_at_ms,(unsigned long long)job_mutation.receipt_expires_ms,job_mutation.replayed?"true":"false");
+            success_len=encoded.len;
+        }
+        if (action==51) { reply(a,fd,ssl,"200 OK",success,success_len,0,cors,0);free(payload);free(body);return; }
+        char etag[64];snprintf(etag,sizeof etag,"ETag: \"s-%llu\"\r\n",(unsigned long long)job_mutation.state_version);
+        reply_extra(a,fd,ssl,"200 OK",success,success_len,0,cors,0,etag);free(payload);free(body);return;
+    }
     if (action == 3 && rc == 0) success_len=(size_t)snprintf(success,sizeof success,"{\"data\":{\"message_id\":%llu,\"durability\":\"known\"}}",(unsigned long long)generated_id);
     if (action == 4 && rc == 0) success_len=(size_t)snprintf(success,sizeof success,"{\"data\":{\"partition\":%llu,\"offset\":%llu,\"durability\":\"known\"}}",(unsigned long long)generated_partition,(unsigned long long)generated_offset);
     if (action == 7 && rc == 0) success_len=(size_t)snprintf(success,sizeof success,"{\"data\":{\"routed_queue_count\":%llu,\"outcome\":\"%s\"}}",(unsigned long long)generated_id,generated_id?"routed":"unroutable");
@@ -1835,7 +2527,7 @@ static void handle_management(AdminHttp *a, int fd, void *ssl) {
     if(rc==0 && audit_event(a,operation,"completed")){a->operation_in_doubt++;char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"500 Internal Server Error",b,error(&o,"operation_in_doubt","The operation may have completed. Refresh before retrying."),0,cors,0);free(session_parts);queue_message_free(&delivered);for(uint32_t i=0;i<delivered_batch_count;i++)queue_message_free(&delivered_batch[i]);free(payload);free(body);return;}
     if((action==35||action==36)&&rc&&batch_applied){(void)audit_event(a,operation,"failed");a->operation_in_doubt++;char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"500 Internal Server Error",b,error(&o,"operation_in_doubt","The non-atomic batch may be partially applied. Refresh before retrying."),0,cors,0);free(session_parts);queue_message_free(&delivered);for(uint32_t i=0;i<delivered_batch_count;i++)queue_message_free(&delivered_batch[i]);free(payload);free(body);return;}
     if(rc){(void)audit_event(a,operation,"failed");char b[256];struct out o={b,sizeof b,0,0};reply(a,fd,ssl,"409 Conflict",b,error(&o,"conflict","The requested operation could not be applied."),0,cors,0);free(session_parts);queue_message_free(&delivered);for(uint32_t i=0;i<delivered_batch_count;i++)queue_message_free(&delivered_batch[i]);free(payload);free(body);return;}
-    idempotency_store(a,idem,idem_len,fingerprint,success,success_len,success_status);reply(a,fd,ssl,http_status(success_status),success,success_len,0,cors,0);free(session_parts);queue_message_free(&delivered);for(uint32_t i=0;i<delivered_batch_count;i++)queue_message_free(&delivered_batch[i]);free(payload);free(body);
+    if(action!=48&&action!=49&&action!=51)idempotency_store(a,idem,idem_len,fingerprint,success,success_len,success_status);reply(a,fd,ssl,http_status(success_status),success,success_len,0,cors,0);free(session_parts);queue_message_free(&delivered);for(uint32_t i=0;i<delivered_batch_count;i++)queue_message_free(&delivered_batch[i]);free(payload);free(body);
 }
 
 /* Kept reachable while the remaining resource handlers are migrated from the

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -291,5 +293,19 @@ func main() {
 	}
 
 	stats, _ := c.Stats()
+
+	// Atomic job completion: without --job-completion the server answers
+	// the typed unsupported_feature envelope; never a silent fallback.
+	if caps.Features&kuttidb.FeatureJobs == 0 {
+		if _, err := c.JobConsume(context.Background(), "go-jobs", "go-worker", time.Second); err == nil {
+			log.Fatal("job consume should fail without --job-completion")
+		} else {
+			var jobErr *kuttidb.JobError
+			if !errors.As(err, &jobErr) || jobErr.Code != kuttidb.JobCodeUnsupportedFeature {
+				log.Fatalf("job consume without feature: %v", err)
+			}
+		}
+	}
+
 	fmt.Printf("GO CLIENT OK — stats: %s\n", stats)
 }

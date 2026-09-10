@@ -21,6 +21,8 @@ use std::time::Duration;
 
 mod features;
 pub use features::*;
+mod job;
+pub use job::*;
 
 pub const BATCH_SIZE: usize = 256;
 const MAX_KEY: usize = (1 << 16) - 1;
@@ -51,6 +53,9 @@ pub enum Error {
     Authentication,
     ResponseTooLarge,
     Managed(String),
+    /// Typed atomic-job-completion failure (opcodes 0x70–0x77): the typed
+    /// wire envelope `[status 0x02][len:4][code:1][outcome:1][detail]`.
+    Job(JobError),
 }
 
 impl std::fmt::Display for Error {
@@ -65,6 +70,17 @@ impl std::fmt::Display for Error {
             Error::Authentication => write!(f, "authentication failed"),
             Error::ResponseTooLarge => write!(f, "response too large"),
             Error::Managed(message) => write!(f, "managed server: {message}"),
+            Error::Job(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl Error {
+    /// The typed atomic-job-completion failure, if this error is one.
+    pub fn as_job(&self) -> Option<&JobError> {
+        match self {
+            Error::Job(error) => Some(error),
+            _ => None,
         }
     }
 }
@@ -140,6 +156,65 @@ pub struct ManagedOptions {
     pub idle_timeout: Duration,
     pub startup_timeout: Duration,
     pub auth_token: Option<Vec<u8>>,
+    /// Enable the atomic job completion engine (server flag `--job-completion`,
+    /// capability bit `CAP_JOBS`). Requires a durable Queue WAL, which managed
+    /// mode provides under the data directory.
+    pub job_completion: bool,
+    /// Durable-state memory budget in MiB (rejects growth, never evicts).
+    pub job_state_max_memory_mb: Option<u32>,
+    /// Receipt ledger memory budget in MiB (entry+index+digest bytes).
+    pub job_receipts_max_memory_mb: Option<u32>,
+    /// Additional ceiling on retained receipts.
+    pub job_receipts_max_count: Option<u64>,
+    /// Per-receipt retention deadline in ms, assigned at commit
+    /// (minimum 1000).
+    pub job_receipt_retention_ms: Option<u64>,
+    /// Aggregate canonical completion bound in bytes.
+    pub job_completion_max_bytes: Option<u64>,
+}
+
+/// Atomic job completion settings for a managed instance, mirrored onto
+/// `kuttidb ensure` flags (`docs/plans/ATOMIC_JOB_COMPLETION_DESIGN.md` §10).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ManagedJobOptions {
+    pub job_completion: bool,
+    pub job_state_max_memory_mb: Option<u32>,
+    pub job_receipts_max_memory_mb: Option<u32>,
+    pub job_receipts_max_count: Option<u64>,
+    pub job_receipt_retention_ms: Option<u64>,
+    pub job_completion_max_bytes: Option<u64>,
+}
+
+impl From<&ManagedOptions> for ManagedJobOptions {
+    fn from(options: &ManagedOptions) -> Self {
+        ManagedJobOptions {
+            job_completion: options.job_completion,
+            job_state_max_memory_mb: options.job_state_max_memory_mb,
+            job_receipts_max_memory_mb: options.job_receipts_max_memory_mb,
+            job_receipts_max_count: options.job_receipts_max_count,
+            job_receipt_retention_ms: options.job_receipt_retention_ms,
+            job_completion_max_bytes: options.job_completion_max_bytes,
+        }
+    }
+}
+
+impl Default for ManagedOptions {
+    fn default() -> Self {
+        ManagedOptions {
+            data_dir: PathBuf::new(),
+            executable: None,
+            transport: ManagedTransport::default(),
+            idle_timeout: Duration::from_secs(60),
+            startup_timeout: Duration::from_secs(10),
+            auth_token: None,
+            job_completion: false,
+            job_state_max_memory_mb: None,
+            job_receipts_max_memory_mb: None,
+            job_receipts_max_count: None,
+            job_receipt_retention_ms: None,
+            job_completion_max_bytes: None,
+        }
+    }
 }
 
 fn ttl_ms_u32(ttl: Option<Duration>) -> u32 {
@@ -326,21 +401,48 @@ impl Client {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("kuttidb"))
             });
+            let mut args = vec![
+                "ensure".to_owned(),
+                "--data-dir".to_owned(),
+                data_dir
+                    .to_str()
+                    .ok_or_else(|| Error::Managed("non-utf8 data_dir".into()))?
+                    .to_owned(),
+                "--listen".to_owned(),
+                endpoint.clone(),
+                "--idle-timeout-ms".to_owned(),
+                options.idle_timeout.as_millis().max(1).to_string(),
+                "--startup-timeout-ms".to_owned(),
+                options.startup_timeout.as_millis().max(1).to_string(),
+                "--json".to_owned(),
+            ];
+            // Atomic job completion settings; the launcher allowlist forwards
+            // them verbatim and the server validates the ranges.
+            if options.job_completion {
+                args.push("--job-completion".to_owned());
+            }
+            if let Some(mb) = options.job_state_max_memory_mb {
+                args.push("--job-state-max-memory-mb".to_owned());
+                args.push(mb.to_string());
+            }
+            if let Some(mb) = options.job_receipts_max_memory_mb {
+                args.push("--job-receipts-max-memory-mb".to_owned());
+                args.push(mb.to_string());
+            }
+            if let Some(count) = options.job_receipts_max_count {
+                args.push("--job-receipts-max-count".to_owned());
+                args.push(count.to_string());
+            }
+            if let Some(ms) = options.job_receipt_retention_ms {
+                args.push("--job-receipt-retention-ms".to_owned());
+                args.push(ms.to_string());
+            }
+            if let Some(bytes) = options.job_completion_max_bytes {
+                args.push("--job-completion-max-bytes".to_owned());
+                args.push(bytes.to_string());
+            }
             let output = Command::new(executable)
-                .args([
-                    "ensure",
-                    "--data-dir",
-                    data_dir
-                        .to_str()
-                        .ok_or_else(|| Error::Managed("non-utf8 data_dir".into()))?,
-                    "--listen",
-                    &endpoint,
-                    "--idle-timeout-ms",
-                    &options.idle_timeout.as_millis().max(1).to_string(),
-                    "--startup-timeout-ms",
-                    &options.startup_timeout.as_millis().max(1).to_string(),
-                    "--json",
-                ])
+                .args(&args)
                 .output()
                 .map_err(Error::Io)?;
             if !output.status.success() {
@@ -667,6 +769,7 @@ pub struct Pool {
     tls_server_name: Option<String>,
     managed_dir: Option<PathBuf>,
     managed_transport: Option<ManagedTransport>,
+    managed_job: Option<ManagedJobOptions>,
     idle: Mutex<Vec<Client>>,
     max: usize,
 }
@@ -731,6 +834,7 @@ impl Pool {
             tls_server_name: Some(server_name.to_owned()),
             managed_dir: None,
             managed_transport: None,
+            managed_job: None,
             idle: Mutex::new(idle),
             max: count,
         })
@@ -751,6 +855,7 @@ impl Pool {
             tls_server_name: None,
             managed_dir: None,
             managed_transport: None,
+            managed_job: None,
             idle: Mutex::new(idle),
             max: size.max(1),
         })
@@ -768,6 +873,7 @@ impl Pool {
                 .join(&options.data_dir)
         };
         let auth_token = options.auth_token.clone();
+        let managed_job = ManagedJobOptions::from(&options);
         let mut idle = Vec::with_capacity(count);
         for _ in 0..count {
             idle.push(Client::connect_managed(ManagedOptions {
@@ -777,6 +883,12 @@ impl Pool {
                 idle_timeout: options.idle_timeout,
                 startup_timeout: options.startup_timeout,
                 auth_token: auth_token.clone(),
+                job_completion: options.job_completion,
+                job_state_max_memory_mb: options.job_state_max_memory_mb,
+                job_receipts_max_memory_mb: options.job_receipts_max_memory_mb,
+                job_receipts_max_count: options.job_receipts_max_count,
+                job_receipt_retention_ms: options.job_receipt_retention_ms,
+                job_completion_max_bytes: options.job_completion_max_bytes,
             })?);
         }
         Ok(Pool {
@@ -786,6 +898,7 @@ impl Pool {
             tls_server_name: None,
             managed_dir: Some(data_dir),
             managed_transport: Some(options.transport.clone()),
+            managed_job: Some(managed_job),
             idle: Mutex::new(idle),
             max: count,
         })
@@ -814,28 +927,36 @@ impl Pool {
             ),
             None => match &self.auth_token {
                 Some(token) => match &self.managed_dir {
-                    Some(dir) => Client::connect_managed(ManagedOptions {
-                        data_dir: dir.clone(),
-                        executable: None,
-                        transport: self.managed_transport.clone().unwrap_or_default(),
-                        idle_timeout: Duration::from_secs(60),
-                        startup_timeout: Duration::from_secs(10),
-                        auth_token: Some(token.clone()),
-                    }),
+                    Some(dir) => Client::connect_managed(self.managed_options(
+                        dir.clone(),
+                        Some(token.clone()),
+                    )),
                     None => Client::connect_authenticated(&self.addr, token),
                 },
                 None => match &self.managed_dir {
-                    Some(dir) => Client::connect_managed(ManagedOptions {
-                        data_dir: dir.clone(),
-                        executable: None,
-                        transport: self.managed_transport.clone().unwrap_or_default(),
-                        idle_timeout: Duration::from_secs(60),
-                        startup_timeout: Duration::from_secs(10),
-                        auth_token: None,
-                    }),
+                    Some(dir) => Client::connect_managed(self.managed_options(dir.clone(), None)),
                     None => Client::connect(&self.addr),
                 },
             },
+        }
+    }
+
+    /// Managed reconnect options carrying the pool's original job settings.
+    fn managed_options(&self, data_dir: PathBuf, auth_token: Option<Vec<u8>>) -> ManagedOptions {
+        let job = self.managed_job.unwrap_or_default();
+        ManagedOptions {
+            data_dir,
+            executable: None,
+            transport: self.managed_transport.clone().unwrap_or_default(),
+            idle_timeout: Duration::from_secs(60),
+            startup_timeout: Duration::from_secs(10),
+            auth_token,
+            job_completion: job.job_completion,
+            job_state_max_memory_mb: job.job_state_max_memory_mb,
+            job_receipts_max_memory_mb: job.job_receipts_max_memory_mb,
+            job_receipts_max_count: job.job_receipts_max_count,
+            job_receipt_retention_ms: job.job_receipt_retention_ms,
+            job_completion_max_bytes: job.job_completion_max_bytes,
         }
     }
 

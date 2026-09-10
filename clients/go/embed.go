@@ -27,6 +27,15 @@ import (
 )
 
 // EmbedDB is a handle to a shared-memory cache region.
+//
+// Durable work (atomic job completion) is NOT available through shared
+// memory: the embed ABI is cache-only and has no queue delivery/commit
+// coordinator. Open a normal network Client (kuttidb.New / NewManaged)
+// pointed at the same server instance for job_consume/job_complete/state_*
+// operations — never attempt to synthesize a completion by writing through
+// the region and sending a separate ACK. Verify the instance identity when
+// combining both paths in one process (ServerInfo) so cache and durable
+// work cannot end up on different servers.
 type EmbedDB struct {
 	ec *C.KuttiEmbed
 	c  *C.KuttiDB

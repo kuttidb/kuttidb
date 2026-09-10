@@ -51,6 +51,14 @@ const (
 	opStreamGroupList         = 0x6a
 	opStreamCommitBatch       = 0x6b
 	opStreamFetchKeys         = 0x6c
+	opJobConsume              = 0x70
+	opJobComplete             = 0x71
+	opJobReceipt              = 0x72
+	opStateGet                = 0x73
+	opStatePut                = 0x74
+	opStateDelete             = 0x75
+	opDurableOperation        = 0x76
+	opQueueManifest           = 0x77
 )
 
 const (
@@ -70,6 +78,7 @@ const (
 	FeatureStreamCommitBatch
 	FeatureStreamKeys
 	FeatureServerInfo
+	FeatureJobs
 )
 
 type Capabilities struct {

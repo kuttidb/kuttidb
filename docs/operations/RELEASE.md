@@ -8,6 +8,30 @@ Client SDK packages (PyPI, npm, crates.io, the Go module) are released
 separately with their own language-prefixed tag scheme — see
 [CLIENT_PUBLISHING.md](CLIENT_PUBLISHING.md).
 
+## Release gates (atomic job completion)
+
+A release that ships atomic job completion must record, per target platform
+(Linux glibc x86_64/arm64, macOS x86_64/arm64, Alpine/musl container):
+
+- `make test` (core + `job_state_test` + `job_completion_test` +
+  `job_crash_test_jobfailpoints` + protocol/SDK suites) and
+  `ctest` in a Release CMake build (`-UNDEBUG` protection is wired for the
+  job tests).
+- The crash/recovery matrix runs natively per architecture; cross compilation
+  is build evidence only, not crash/recovery evidence. If a runner is
+  missing, leave that matrix cell explicitly unverified in the release notes.
+- TLS ON and TLS OFF builds both execute the job suites (failpoints are
+  test-only and never compiled into production binaries).
+- Client suites: Python (`test_job_client.py`), C/C++ (`job_client_test`,
+  `job_client_cpp_test`), Go (`go test -run TestJobCompletion`), Java
+  (`JobSmoke`), Rust (`cargo test --test job_completion`), Node
+  (`job_smoke.js`). Packaged-distribution checks import the installed
+  packages, not repository-relative sources.
+- Minimum compatible versions: the feature requires server protocol ≥ 1.8
+  (capability bit 16) and the matching first SDK release that ships the job
+  surface; older released packages do not contain it — state this in the
+  notes rather than implying otherwise.
+
 ## Release cycle
 
 KuttiDB is pre-1.0 and uses `MAJOR.MINOR.PATCH` with optional pre-release
@@ -87,10 +111,15 @@ Every tarball `kuttidb-<version>-<os>-<arch>.tar.gz` contains:
 | `kuttidb-bench` | Benchmark client |
 | `libkuttidb_embed.so` / `.dylib` | Embedded library for SDK managed mode |
 | `kuttidb-cli` | Python CLI client (needs `python3` at runtime) |
+| `libkuttidb_client.so` / `.dylib` | Public C companion client for atomic job completion |
+| `kuttidb_client.h` | Public C header for the companion (ownership, timeouts, typed errors) |
 | `README.md`, `LICENSE` | Pointers and license terms |
 
 Install: extract and copy `kuttidb` (and optionally `kuttidb-cli`) somewhere
-on `PATH`. See [GETTING_STARTED.md](../guides/GETTING_STARTED.md).
+on `PATH`; the C companion installs as
+`libkuttidb_client.so`/`.dylib` + `kuttidb_client.h` (see
+[CLIENT_PUBLISHING.md](CLIENT_PUBLISHING.md)). See
+[GETTING_STARTED.md](../guides/GETTING_STARTED.md).
 
 ## Hotfixes
 

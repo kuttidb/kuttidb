@@ -192,6 +192,13 @@ int managed_launcher_maybe_run(int argc, char **argv) {
     int json = 0;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--json") == 0) { json = 1; continue; }
+        /* Boolean enablement flag: no value, forwarded verbatim. */
+        if (strcmp(argv[i], "--job-completion") == 0) {
+            if (forward_count + 1 > sizeof forward / sizeof forward[0])
+                return ENSURE_BAD_CONFIG;
+            forward[forward_count++] = argv[i];
+            continue;
+        }
         if (strcmp(argv[i], "--data-dir") == 0 || strcmp(argv[i], "--listen") == 0 ||
             strcmp(argv[i], "--idle-timeout-ms") == 0 || strcmp(argv[i], "--startup-timeout-ms") == 0 ||
             strcmp(argv[i], "--startup-orphan-timeout-ms") == 0 ||
@@ -206,13 +213,27 @@ int managed_launcher_maybe_run(int argc, char **argv) {
             strcmp(argv[i], "--admin-allow-origin") == 0 || strcmp(argv[i], "--admin-tls-cert") == 0 ||
             strcmp(argv[i], "--admin-tls-key") == 0 || strcmp(argv[i], "--admin-audit-log") == 0 ||
             strcmp(argv[i], "--admin-max-clients") == 0 || strcmp(argv[i], "--admin-max-tail-clients") == 0 ||
-            strcmp(argv[i], "--admin-session-limit") == 0 || strcmp(argv[i], "--admin-job-limit") == 0) {
+            strcmp(argv[i], "--admin-session-limit") == 0 || strcmp(argv[i], "--admin-job-limit") == 0 ||
+            strcmp(argv[i], "--job-state-max-memory-mb") == 0 ||
+            strcmp(argv[i], "--job-receipts-max-memory-mb") == 0 ||
+            strcmp(argv[i], "--job-receipts-max-count") == 0 ||
+            strcmp(argv[i], "--job-receipt-retention-ms") == 0 ||
+            strcmp(argv[i], "--job-completion-max-bytes") == 0) {
             if (++i >= argc) return ENSURE_BAD_CONFIG;
             const char *flag = argv[i - 1];
             const char *v = argv[i];
             if (strcmp(flag, "--data-dir") == 0) data_dir = v;
             else if (strcmp(flag, "--listen") == 0) listen = v;
             else if (strcmp(flag, "--durability") == 0) { if (strcmp(v, "periodic") && strcmp(v, "always")) return ENSURE_BAD_CONFIG; }
+            else if (strcmp(flag, "--job-state-max-memory-mb") == 0 ||
+                     strcmp(flag, "--job-receipts-max-memory-mb") == 0 ||
+                     strcmp(flag, "--job-receipts-max-count") == 0 ||
+                     strcmp(flag, "--job-receipt-retention-ms") == 0 ||
+                     strcmp(flag, "--job-completion-max-bytes") == 0) {
+                /* Ranges are re-validated by the server; here only reject
+                 * obviously non-numeric values so config drift fails fast. */
+                if (!v[0]) return ENSURE_BAD_CONFIG;
+            }
             else if (strcmp(flag, "--idle-timeout-ms") == 0 || strcmp(flag, "--startup-timeout-ms") == 0 || strcmp(flag, "--startup-orphan-timeout-ms") == 0) {
                 if (parse_ms(v, strcmp(flag, "--idle-timeout-ms") == 0 ? &idle_ms : strcmp(flag, "--startup-timeout-ms") == 0 ? &startup_ms : &orphan_ms) < 0) return ENSURE_BAD_CONFIG;
             } else {

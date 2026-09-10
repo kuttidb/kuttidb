@@ -30,6 +30,8 @@
 #include "embed.h"
 #include "platform.h"
 #include "queue.h"
+#include "job_state.h"
+#include "job_completion.h"
 #include "stream.h"
 #include "admin_http.h"
 #include "instance_lock.h"
@@ -95,11 +97,21 @@
 #define STREAM_COMMIT_BATCH 0x6b
 #define STREAM_FETCH_KEYS 0x6c
 #define STREAM_OP_MAX STREAM_FETCH_KEYS
+/* Atomic job completion (capability-gated; docs/design/PROTOCOL.md). */
+#define JOB_CONSUME_OP 0x70
+#define JOB_COMPLETE_OP 0x71
+#define JOB_RECEIPT_OP 0x72
+#define STATE_GET_OP 0x73
+#define STATE_PUT_OP 0x74
+#define STATE_DELETE_OP 0x75
+#define DURABLE_OPERATION_OP 0x76
+#define QUEUE_MANIFEST_OP 0x77
+#define JOB_OP_MAX QUEUE_MANIFEST_OP
 #define HEALTH 0x09
 #define CAPABILITIES 0x0a
 #define PUT_SWR 0x0b
 #define PROTOCOL_MAJOR 1u
-#define PROTOCOL_MINOR 7u
+#define PROTOCOL_MINOR 8u
 #define CAP_CACHE        (1ull << 0)
 #define CAP_QUEUES       (1ull << 1)
 #define CAP_EXCHANGES    (1ull << 2)
@@ -116,6 +128,7 @@
 #define CAP_STREAM_COMMIT_BATCH (1ull << 13)
 #define CAP_STREAM_KEYS (1ull << 14)
 #define CAP_SERVER_INFO (1ull << 15)
+#define CAP_JOBS (1ull << 16)
 #define SERVER_INFO 0x0c
 /* Protocol batch-operation entry cap shared by 0x2d/0x2e/0x2f/0x6b. */
 #define PROTO_BATCH_MAX 256u
@@ -188,6 +201,9 @@
 static KuttiDB *g_cache;
 static QueueStore *g_queues;
 static StreamStore *g_streams;
+static JobEngine *g_jobs;                 /* atomic job completion engine */
+static JobEngineConfig g_job_cfg;
+static int g_jobs_requested = 0;
 static volatile sig_atomic_t g_stop = 0;
 static char g_wal_path[512];
 static int g_wal_fd = -1;
@@ -966,6 +982,11 @@ static void *maintenance_thread(void *arg) {
         queue_reap(g_queues);
         queue_checkpoint_maybe(g_queues);
         stream_reap(g_streams);
+        if (g_jobs) {
+            /* Bounded incremental receipt + proof GC: never an unbounded
+             * scan; capacity pressure still rejects instead of evicting. */
+            job_receipt_gc(g_jobs, (uint64_t)time(NULL) * 1000);
+        }
         if (g_wal_fd < 0) continue;
         if (wal_flush() < 0) atomic_store(&g_wal_failed, 1);
         if (g_fsync_ms > 0 && fsync(g_wal_fd) < 0)
@@ -1210,6 +1231,75 @@ static void resp_stream_append(Conn *c, int rc, uint64_t partition, uint64_t off
     put_u64le(p + 13, offset); c->out.len += 21;
 }
 
+/* Bounded Queue-manifest encoder shared by QUEUE_MANIFEST (0x77). */
+typedef struct ManifestBuf {
+    KuttiVec vec;
+    uint32_t count;
+} ManifestBuf;
+
+static void manifest_emit(const QueueManifestEntry *entry, void *ud) {
+    ManifestBuf *m = ud;
+    if (m->count >= 256) return;
+    /* [nlen:2][name][durable:1][incarnation:8][depth:8][inflight:8]
+     * [max_depth:8][revision:8] = 43 + name bytes. */
+    if (kuttidb_vec_reserve(&m->vec, 43 + entry->name_len) < 0)
+        return;
+    unsigned char *q = (unsigned char *)m->vec.data + m->vec.len;
+    put_u16le(q, entry->name_len);
+    memcpy(q + 2, entry->name, entry->name_len);
+    q[2 + entry->name_len] = entry->durable ? 1 : 0;
+    q += 3 + entry->name_len;
+    put_u64le(q, entry->incarnation);
+    put_u64le(q + 8, entry->depth);
+    put_u64le(q + 16, entry->inflight);
+    put_u64le(q + 24, entry->max_depth);
+    put_u64le(q + 32, entry->revision);
+    m->vec.len += 43 + entry->name_len;
+    m->count++;
+}
+
+/* ---- atomic job completion responses ----
+ *
+ * Typed error envelope for the new opcodes only:
+ *   [0x02][len:4][code:1][outcome:1][detail]
+ * code: JobStatus numeric value; outcome: 0 not_committed, 1 unknown.
+ * Legacy opcodes keep their existing framing untouched. */
+static void resp_job_error(Conn *c, int status, const char *detail,
+                           uint32_t detail_len) {
+    if (detail_len > 128) detail_len = 128;
+    if (kuttidb_vec_reserve(&c->out, 7 + detail_len) < 0) { c->eof = 1; return; }
+    unsigned char *p = (unsigned char *)c->out.data + c->out.len;
+    p[0] = 0x02;
+    put_u32le(p + 1, 2 + detail_len);
+    p[5] = (unsigned char)status;
+    p[6] = (unsigned char)(job_status_in_doubt((JobStatus)status) ? 1 : 0);
+    if (detail_len) memcpy(p + 7, detail, detail_len);
+    c->out.len += 7 + detail_len;
+}
+
+/* Direct state-mutation receipt body (33 bytes):
+ * [commit:8][version:8][completed_at:8][receipt_expires_at:8][replayed:1].
+ * Direct mutations produce no output message, so unlike the completion
+ * response there is no output field. */
+static void resp_job_mutation(Conn *c, const JobMutationReceipt *r) {
+    if (kuttidb_vec_reserve(&c->out, 5 + 33) < 0) { c->eof = 1; return; }
+    unsigned char *p = (unsigned char *)c->out.data + c->out.len;
+    p[0] = 0x00;
+    put_u32le(p + 1, 33);
+    put_u64le(p + 5, r->commit_id);
+    put_u64le(p + 13, r->state_version);
+    put_u64le(p + 21, r->completed_at_ms);
+    put_u64le(p + 29, r->receipt_expires_ms);
+    p[37] = r->replayed ? 1 : 0;
+    c->out.len += 38;
+}
+
+static void resp_job_status(Conn *c, JobStatus st, const char *detail) {
+    if (st == JOB_OK) { resp_status(c, 0x00); return; }
+    if (st == JOB_NOT_FOUND) { resp_status(c, 0x01); return; }
+    resp_job_error(c, st, detail, detail ? (uint32_t)strlen(detail) : 0);
+}
+
 static void resp_capabilities(Conn *c) {
     if (kuttidb_vec_reserve(&c->out, 17) < 0) { c->eof = 1; return; }
     unsigned char *p = (unsigned char *)c->out.data + c->out.len;
@@ -1218,6 +1308,7 @@ static void resp_capabilities(Conn *c) {
                     CAP_STREAM_GEN | CAP_QUEUE_CONSUMERS | CAP_ATOMIC_UPDATE |
                     CAP_SWR | CAP_QUEUE_BATCHES | CAP_STREAM_COMMIT_BATCH |
                     CAP_STREAM_KEYS | CAP_SERVER_INFO;
+    if (g_jobs && job_engine_writable(g_jobs)) caps |= CAP_JOBS;
     p[0] = 0x00; put_u32le(p + 1, 12); put_u16le(p + 5, PROTOCOL_MAJOR);
     put_u16le(p + 7, PROTOCOL_MINOR); put_u64le(p + 9, caps);
     c->out.len += 17;
@@ -2582,6 +2673,306 @@ static void conn_process(Loop *L, Conn *c) {
                 continue;
             }
 
+            if (op >= JOB_CONSUME_OP && op <= JOB_OP_MAX) {
+                /* Atomic job completion family. Capability-gated: without
+                 * the feature the server answers the typed
+                 * unsupported_feature envelope and never emulates the
+                 * operation with separate writes. */
+                size_t need = 7 + (size_t)klen + vlen;
+                if (vlen > g_max_val) { c->eof = 1; break; }
+                if (avail < need) break;
+                const char *queue_name = base + 7;
+                const unsigned char *arg =
+                    (const unsigned char *)queue_name + klen;
+                if (!g_jobs || !job_engine_writable(g_jobs)) {
+                    resp_job_error(c, JOB_UNSUPPORTED_FEATURE,
+                                   "enable --job-completion", 23);
+                    c->in_pos += need;
+                    continue;
+                }
+                if (op == JOB_CONSUME_OP) {
+                    /* key = Queue, value = [consumer_len:2][consumer]
+                     * [visibility_ms:8]; response below. */
+                    uint32_t clen = 0;
+                    uint64_t visibility = 0;
+                    int parsed = 0;
+                    uint64_t owner = 0;
+                    if (klen && klen <= QUEUE_NAME_MAX && vlen >= 10) {
+                        clen = get_u16le(arg);
+                        if (clen && vlen == 10u + clen) {
+                            visibility = get_u64le(arg + 2 + clen);
+                            parsed = queue_consumer_lookup(
+                                g_queues, (const char *)arg + 2, clen,
+                                &owner) == 1;
+                        }
+                    }
+                    if (!parsed) {
+                        resp_job_error(c, JOB_VALIDATION_FAILED, NULL, 0);
+                    } else if (c->queue_prefetch &&
+                               queue_owner_inflight(g_queues, owner) >=
+                                   c->queue_prefetch) {
+                        resp_status(c, 0x01);
+                    } else {
+                        JobDelivery delivery;
+                        JobStatus st = job_consume(g_jobs, queue_name, klen,
+                                                   (const char *)arg + 2,
+                                                   clen, visibility,
+                                                   &delivery);
+                        if (st == JOB_OK) {
+                            size_t body = 61 + delivery.len;
+                            if (kuttidb_vec_reserve(&c->out, 5 + body) < 0) {
+                                c->eof = 1;
+                            } else {
+                                unsigned char *q =
+                                    (unsigned char *)c->out.data + c->out.len;
+                                q[0] = 0x00;
+                                put_u32le(q + 1, (uint32_t)body);
+                                memcpy(q + 5, delivery.store_id, 16);
+                                put_u64le(q + 21, delivery.queue_incarnation);
+                                put_u64le(q + 29, delivery.message_id);
+                                put_u32le(q + 37, delivery.attempts);
+                                q[41] = delivery.redelivered ? 1 : 0;
+                                put_u64le(q + 42, delivery.lease_deadline_ms);
+                                memcpy(q + 50, delivery.proof, 16);
+                                if (delivery.len)
+                                    memcpy(q + 66, delivery.data, delivery.len);
+                                c->out.len += 5 + body;
+                            }
+                            job_delivery_free(&delivery);
+                        } else {
+                            resp_job_status(c, st, NULL);
+                        }
+                    }
+                    c->in_pos += need;
+                    continue;
+                }
+                if (op == JOB_COMPLETE_OP) {
+                    /* key = input Queue; value =
+                     * [op_id:16][in_incarnation:8][in_msg_id:8][proof:16]
+                     * [state_klen:2][state_key][expected_version:8]
+                     * [state_vlen:4][state_value][out_present:1]
+                     * [out_qlen:2][out_queue][out_incarnation:8]
+                     * [out_vlen:4][out_payload] */
+                    /* op_id(16) in_incarnation(8) in_msg_id(8) proof(16)
+                     * state_klen(2) expected(8) state_vlen(4) present(1). */
+                    const size_t fixed = 63;
+                    JobCompletionRequest req;
+                    memset(&req, 0, sizeof req);
+                    int parsed = 0;
+                    do {
+                        if (!klen || klen > QUEUE_NAME_MAX || vlen < fixed)
+                            break;
+                        const unsigned char *q = arg;
+                        memcpy(req.op_id, q, 16); q += 16;
+                        req.input_incarnation = get_u64le(q); q += 8;
+                        req.input_message_id = get_u64le(q); q += 8;
+                        req.proof = q; q += 16;
+                        uint32_t sklen = get_u16le(q); q += 2;
+                        if (sklen > 65535 || (size_t)(q - arg) + sklen + 12 > vlen)
+                            break;
+                        req.state_key = (const char *)q; q += sklen;
+                        req.expected_version = get_u64le(q); q += 8;
+                        uint32_t svlen = get_u32le(q); q += 4;
+                        if ((size_t)(q - arg) + svlen > vlen) break;
+                        req.state_value = q; q += svlen;
+                        req.state_key_len = sklen;
+                        req.state_value_len = svlen;
+                        req.input_queue = queue_name;
+                        req.input_queue_len = klen;
+                        if (q == (const unsigned char *)arg + vlen) {
+                            parsed = 1; /* no output */
+                            break;
+                        }
+                        if ((size_t)(q - arg) + 1 > vlen) break;
+                        uint32_t out_present = *q; q += 1;
+                        if (out_present > 1) break;
+                        req.has_output = (int)out_present;
+                        if (!out_present) {
+                            if (q == (const unsigned char *)arg + vlen) parsed = 1;
+                            break;
+                        }
+                        if ((size_t)(q - arg) + 2 > vlen) break;
+                        uint32_t oqlen = get_u16le(q); q += 2;
+                        if (!oqlen || oqlen > QUEUE_NAME_MAX ||
+                            (size_t)(q - arg) + oqlen + 12 > vlen)
+                            break;
+                        req.output_queue = (const char *)q; q += oqlen;
+                        req.output_incarnation = get_u64le(q); q += 8;
+                        uint32_t ovlen = get_u32le(q); q += 4;
+                        if ((size_t)(q - arg) + ovlen != vlen) break;
+                        req.output_value = q;
+                        req.output_value_len = ovlen;
+                        req.output_queue_len = oqlen;
+                        parsed = 1;
+                    } while (0);
+                    if (!parsed) {
+                        resp_job_error(c, JOB_VALIDATION_FAILED, NULL, 0);
+                    } else {
+                        JobCompletionResult result;
+                        JobStatus st = job_complete(g_jobs, &req, &result);
+                        if (st == JOB_OK) {
+                            if (kuttidb_vec_reserve(&c->out, 5 + 41) < 0) {
+                                c->eof = 1;
+                            } else {
+                                unsigned char *q =
+                                    (unsigned char *)c->out.data + c->out.len;
+                                q[0] = 0x00;
+                                put_u32le(q + 1, 41);
+                                put_u64le(q + 5, result.commit_id);
+                                put_u64le(q + 13, result.state_version);
+                                put_u64le(q + 21, result.output_message_id);
+                                put_u64le(q + 29, result.completed_at_ms);
+                                put_u64le(q + 37, result.receipt_expires_ms);
+                                q[45] = result.replayed ? 1 : 0;
+                                c->out.len += 46;
+                            }
+                        } else {
+                            resp_job_status(c, st, NULL);
+                        }
+                    }
+                    c->in_pos += need;
+                    continue;
+                }
+                if (op == STATE_PUT_OP || op == STATE_DELETE_OP) {
+                    /* key = state key; value = [op_id:16][expected_version:8]
+                     * [value] (value absent for delete). */
+                    if (!klen || klen > 65535 || vlen < 24) {
+                        resp_job_error(c, JOB_VALIDATION_FAILED, NULL, 0);
+                    } else {
+                        unsigned char op_id[16];
+                        memcpy(op_id, arg, 16);
+                        uint64_t expected = get_u64le(arg + 16);
+                        JobMutationReceipt receipt;
+                        JobStatus st =
+                            op == STATE_PUT_OP
+                                ? job_state_put(g_jobs, queue_name, klen,
+                                                arg + 24, vlen - 24, expected,
+                                                op_id, &receipt)
+                                : (vlen == 24
+                                       ? job_state_delete(g_jobs, queue_name,
+                                                          klen, expected,
+                                                          op_id, &receipt)
+                                       : JOB_VALIDATION_FAILED);
+                        if (st == JOB_OK)
+                            resp_job_mutation(c, &receipt);
+                        else
+                            resp_job_status(c, st, NULL);
+                    }
+                    c->in_pos += need;
+                    continue;
+                }
+                if (op == STATE_GET_OP) {
+                    if (!klen || klen > 65535 || vlen != 0) {
+                        resp_job_error(c, JOB_VALIDATION_FAILED, NULL, 0);
+                    } else {
+                        JobStateValue value;
+                        JobStatus st = job_state_get(g_jobs, queue_name, klen,
+                                                     &value);
+                        if (st == JOB_OK) {
+                            if (kuttidb_vec_reserve(&c->out, 21 + value.len) < 0) {
+                                c->eof = 1;
+                            } else {
+                                unsigned char *q =
+                                    (unsigned char *)c->out.data + c->out.len;
+                                q[0] = 0x00;
+                                put_u32le(q + 1, 16 + value.len);
+                                put_u64le(q + 5, value.version);
+                                put_u64le(q + 13, value.last_commit_id);
+                                if (value.len)
+                                    memcpy(q + 21, value.value, value.len);
+                                c->out.len += 21 + value.len;
+                            }
+                            free(value.value);
+                        } else {
+                            resp_job_status(c, st, NULL);
+                        }
+                    }
+                    c->in_pos += need;
+                    continue;
+                }
+                if (op == JOB_RECEIPT_OP || op == DURABLE_OPERATION_OP) {
+                    /* key unused; value = [op_id:16]. */
+                    if (klen != 0 || vlen != 16) {
+                        resp_job_error(c, JOB_VALIDATION_FAILED, NULL, 0);
+                    } else {
+                        JobReceipt receipt;
+                        JobStatus st = job_receipt_lookup(g_jobs, arg,
+                                                          &receipt);
+                        if (st != JOB_OK) {
+                            resp_job_status(c, st, NULL);
+                        } else if (op == JOB_RECEIPT_OP) {
+                            if (receipt.kind != JOB_KIND_COMPLETION) {
+                                resp_status(c, 0x01);
+                            } else if (kuttidb_vec_reserve(&c->out, 5 + 41) >= 0) {
+                                unsigned char *q =
+                                    (unsigned char *)c->out.data + c->out.len;
+                                q[0] = 0x00;
+                                put_u32le(q + 1, 41);
+                                put_u64le(q + 5, receipt.commit_id);
+                                put_u64le(q + 13, receipt.state_version);
+                                put_u64le(q + 21, receipt.output_message_id);
+                                put_u64le(q + 29, receipt.completed_at_ms);
+                                put_u64le(q + 37, receipt.receipt_expires_ms);
+                                q[45] = 0; /* lookup: original receipt */
+                                c->out.len += 46;
+                            } else {
+                                c->eof = 1;
+                            }
+                        } else {
+                            if (receipt.kind == JOB_KIND_COMPLETION) {
+                                resp_status(c, 0x01);
+                            } else if (kuttidb_vec_reserve(&c->out, 5 + 33) >= 0) {
+                                unsigned char *q =
+                                    (unsigned char *)c->out.data + c->out.len;
+                                q[0] = 0x00;
+                                put_u32le(q + 1, 33);
+                                q[5] = receipt.kind;
+                                put_u64le(q + 6, receipt.commit_id);
+                                put_u64le(q + 14, receipt.state_version);
+                                put_u64le(q + 22, receipt.completed_at_ms);
+                                put_u64le(q + 30, receipt.receipt_expires_ms);
+                                c->out.len += 38;
+                            } else {
+                                c->eof = 1;
+                            }
+                        }
+                    }
+                    c->in_pos += need;
+                    continue;
+                }
+                /* QUEUE_MANIFEST_OP */
+                if (klen != 0 || vlen != 0) {
+                    resp_job_error(c, JOB_VALIDATION_FAILED, NULL, 0);
+                    c->in_pos += need;
+                    continue;
+                }
+                {
+                    /* Bounded manifest: [OK][n:2] with
+                     * [nlen:2][name][durable:1][incarnation:8][depth:8]
+                     * [inflight:8][max_depth:8][revision:8] per Queue. */
+                    ManifestBuf mb;
+                    memset(&mb, 0, sizeof mb);
+                    queue_manifest_foreach(g_queues, manifest_emit, &mb, 256);
+                    if (mb.count > 256 ||
+                        kuttidb_vec_reserve(&c->out, 7 + mb.vec.len) < 0) {
+                        free(mb.vec.data);
+                        c->eof = 1;
+                    } else {
+                        unsigned char *q =
+                            (unsigned char *)c->out.data + c->out.len;
+                        q[0] = 0x00;
+                        put_u32le(q + 1, 2 + mb.vec.len);
+                        q[5] = (unsigned char)(mb.count & 0xff);
+                        q[6] = (unsigned char)(mb.count >> 8);
+                        memcpy(q + 7, mb.vec.data, mb.vec.len);
+                        c->out.len += 7 + mb.vec.len;
+                    }
+                    free(mb.vec.data);
+                    c->in_pos += need;
+                    continue;
+                }
+            }
+
             if (op >= ATOMIC_PUT_PUBLISH && op <= ATOMIC_UPDATE_EMIT) {
                 if (vlen > g_max_val || !klen) { c->eof = 1; break; }
                 size_t need = 7 + (size_t)klen + vlen;
@@ -3311,7 +3702,8 @@ static void conn_process(Loop *L, Conn *c) {
                  * configured persistence engines remain writable. */
                 int failed = atomic_load(&g_wal_failed) ||
                     queue_persistence_failed(g_queues) ||
-                    stream_persistence_failed(g_streams);
+                    stream_persistence_failed(g_streams) ||
+                    (g_jobs && !job_engine_writable(g_jobs));
                 resp_status(c, failed ? 0x02 : 0x00);
             } else if (op == CAPABILITIES) {
                 if (get_u16le((const unsigned char *)val) != PROTOCOL_MAJOR)
@@ -3369,12 +3761,37 @@ static void conn_process(Loop *L, Conn *c) {
                 if (g_has_instance_id)
                     snprintf(identity_suffix, sizeof identity_suffix,
                              ",\"instance_id\":\"%s\"", g_instance_id);
+                char job_suffix[640] = "";
+                if (g_jobs) {
+                    JobCounters jcnt;
+                    job_engine_counters(g_jobs, &jcnt);
+                    uint64_t jse2 = 0, jsb2 = 0, jrc2 = 0, jrb2 = 0;
+                    job_engine_usage(g_jobs, &jse2, &jsb2, &jrc2, &jrb2);
+                    snprintf(job_suffix, sizeof job_suffix,
+                             ",\"job_enabled\":%d,\"job_state_entries\":%llu,"
+                             "\"job_state_bytes\":%llu,\"job_receipts\":%llu,"
+                             "\"job_receipt_bytes\":%llu,\"job_completions\":%llu,"
+                             "\"job_completions_replayed\":%llu,"
+                             "\"job_id_conflicts\":%llu,\"job_state_conflicts\":%llu,"
+                             "\"job_delivery_rejects\":%llu,\"job_receipt_gc\":%llu,"
+                             "\"job_wal_failed\":%d",
+                             job_engine_writable(g_jobs) ? 1 : 0,
+                             (unsigned long long)jse2, (unsigned long long)jsb2,
+                             (unsigned long long)jrc2, (unsigned long long)jrb2,
+                             (unsigned long long)jcnt.completions,
+                             (unsigned long long)jcnt.replays,
+                             (unsigned long long)jcnt.id_conflicts,
+                             (unsigned long long)jcnt.state_conflicts,
+                             (unsigned long long)jcnt.delivery_rejects,
+                             (unsigned long long)jcnt.receipt_gc,
+                             job_engine_writable(g_jobs) ? 0 : 1);
+                }
                 n += snprintf(st + n, sizeof st - (size_t)n,
                               ",\"claims\":%llu,\"singleflight_waiters\":%llu,"
                               "\"negatives\":%llu,\"stale_entries\":%llu,"
                               "\"stale_serves\":%llu,\"refresh_serves\":%llu,"
                               "\"lifecycle\":\"%s\",\"lifecycle_state\":\"%s\","
-                              "\"managed_connections\":%u,\"managed_idle_remaining_ms\":%llu%s}",
+                              "\"managed_connections\":%u,\"managed_idle_remaining_ms\":%llu%s",
                               (unsigned long long)sf_claims,
                               (unsigned long long)sf_waiters,
                               (unsigned long long)sf_neg,
@@ -3386,6 +3803,12 @@ static void conn_process(Loop *L, Conn *c) {
                               managed_lifecycle_connections(&g_lifecycle),
                               (unsigned long long)managed_lifecycle_deadline_remaining_ms(&g_lifecycle),
                               identity_suffix);
+                if (job_suffix[0]) {
+                    int jn = snprintf(st + n, sizeof st - (size_t)n, "%s",
+                                      job_suffix);
+                    if (jn > 0) n += jn;
+                }
+                n += snprintf(st + n, sizeof st - (size_t)n, "}");
                 if (n < 0) { c->eof = 1; break; }
                 if (n >= (int)sizeof st) n = (int)sizeof st - 1;
                 if (kuttidb_vec_reserve(&c->out, 5 + (size_t)n) < 0) { c->eof = 1; break; }
@@ -4230,6 +4653,63 @@ static size_t metrics_render(char *buf, size_t cap) {
          "kuttidb_refresh_serves %llu\n",
          (unsigned long long)atomic_load(&g_refresh_serves));
 
+    if (g_jobs) {
+        JobCounters jc;
+        job_engine_counters(g_jobs, &jc);
+        uint64_t jse = 0, jsb = 0, jrc = 0, jrb = 0;
+        job_engine_usage(g_jobs, &jse, &jsb, &jrc, &jrb);
+        mput(&m,
+             "# HELP kuttidb_job_completions_total Successful atomic completions since startup.\n"
+             "# TYPE kuttidb_job_completions_total counter\n"
+             "kuttidb_job_completions_total %llu\n",
+             (unsigned long long)jc.completions);
+        mput(&m,
+             "# HELP kuttidb_job_replays_total Matched same-intent retries since startup.\n"
+             "# TYPE kuttidb_job_replays_total counter\n"
+             "kuttidb_job_replays_total %llu\n", (unsigned long long)jc.replays);
+        mput(&m,
+             "# HELP kuttidb_job_id_conflicts_total Retained ids reused for different requests.\n"
+             "# TYPE kuttidb_job_id_conflicts_total counter\n"
+             "kuttidb_job_id_conflicts_total %llu\n",
+             (unsigned long long)jc.id_conflicts);
+        mput(&m,
+             "# HELP kuttidb_job_state_conflicts_total Version-checked state rejections.\n"
+             "# TYPE kuttidb_job_state_conflicts_total counter\n"
+             "kuttidb_job_state_conflicts_total %llu\n",
+             (unsigned long long)jc.state_conflicts);
+        mput(&m,
+             "# HELP kuttidb_job_delivery_rejected_total Stale or unowned delivery rejections.\n"
+             "# TYPE kuttidb_job_delivery_rejected_total counter\n"
+             "kuttidb_job_delivery_rejected_total %llu\n",
+             (unsigned long long)jc.delivery_rejects);
+        mput(&m,
+             "# HELP kuttidb_job_receipt_gc_total Receipts forgotten after their deadline.\n"
+             "# TYPE kuttidb_job_receipt_gc_total counter\n"
+             "kuttidb_job_receipt_gc_total %llu\n",
+             (unsigned long long)jc.receipt_gc);
+        mput(&m,
+             "# HELP kuttidb_job_state_entries Durable-state entries (non-evictable).\n"
+             "# TYPE kuttidb_job_state_entries gauge\n"
+             "kuttidb_job_state_entries %llu\n", (unsigned long long)jse);
+        mput(&m,
+             "# HELP kuttidb_job_state_bytes Durable-state bytes including indexes.\n"
+             "# TYPE kuttidb_job_state_bytes gauge\n"
+             "kuttidb_job_state_bytes %llu\n", (unsigned long long)jsb);
+        mput(&m,
+             "# HELP kuttidb_job_receipts Retained completion/mutation receipts.\n"
+             "# TYPE kuttidb_job_receipts gauge\n"
+             "kuttidb_job_receipts %llu\n", (unsigned long long)jrc);
+        mput(&m,
+             "# HELP kuttidb_job_receipt_bytes Retained receipt bytes including indexes.\n"
+             "# TYPE kuttidb_job_receipt_bytes gauge\n"
+             "kuttidb_job_receipt_bytes %llu\n", (unsigned long long)jrb);
+        mput(&m,
+             "# HELP kuttidb_job_wal_failed Whether the job engine latched a persistence failure.\n"
+             "# TYPE kuttidb_job_wal_failed gauge\n"
+             "kuttidb_job_wal_failed %d\n",
+             g_jobs && job_engine_writable(g_jobs) ? 0 : 1);
+    }
+
     /* Labeled per-queue and per-topic series, bounded so one scrape can
      * neither grow without limit nor produce a partial line. */
     mput(&m,
@@ -4342,7 +4822,8 @@ static void metrics_handle(int fd) {
          * configured persistence engine remains writable. */
         int ready = !(atomic_load(&g_wal_failed) ||
                       queue_persistence_failed(g_queues) ||
-                      stream_persistence_failed(g_streams));
+                      stream_persistence_failed(g_streams) ||
+                      (g_jobs && !job_engine_writable(g_jobs)));
         if (ready) http_send(fd, "200 OK", NULL, "ready\n", 6);
         else http_send(fd, "503 Service Unavailable", NULL, "not ready\n", 10);
         return;
@@ -4473,6 +4954,9 @@ static void usage(const char *prog) {
         "       [--data-dir ABS_PATH --listen unix:ABS_PATH|tcp:127.x.x.x:PORT]\n"
         "       [--lifecycle standalone|managed-idle --idle-timeout-ms N]\n"
         "       [--max-batch-mb N] [--max-clients N] [--queue-wal PATH|-] [--stream-wal PATH|-]\n"
+        "       [--job-completion [--job-state-max-memory-mb N]\n"
+        "        [--job-receipts-max-memory-mb N] [--job-receipts-max-count N]\n"
+        "        [--job-receipt-retention-ms N] [--job-completion-max-bytes N]]\n"
         "       [--metrics-bind IPv4:PORT [--metrics-token-file PATH]]\n"
         "       [--admin-bind IPv4:PORT --admin-token-file PATH --admin-audit-log PATH\n"
         "        [--admin-allow-origin ORIGIN] [--admin-tls-cert PATH --admin-tls-key PATH]\n"
@@ -4510,6 +4994,7 @@ int main(int argc, char **argv) {
         const char *a = argv[i];
         if (strcmp(a, "--help") == 0) { usage(argv[0]); return 0; }
         if (strcmp(a, "--no-tcp") == 0) { no_tcp = 1; continue; }
+        if (strcmp(a, "--job-completion") == 0) { g_jobs_requested = 1; continue; }
         if (strcmp(a, "--features") == 0) {
 #ifdef HAVE_OPENSSL
             puts("tls=openssl");
@@ -4535,7 +5020,12 @@ int main(int argc, char **argv) {
             strcmp(a, "--admin-allow-origin") == 0 || strcmp(a, "--admin-tls-cert") == 0 || strcmp(a, "--admin-tls-key") == 0 ||
             strcmp(a, "--admin-audit-log") == 0 || strcmp(a, "--admin-max-clients") == 0 ||
             strcmp(a, "--admin-max-tail-clients") == 0 || strcmp(a, "--admin-session-limit") == 0 ||
-            strcmp(a, "--admin-job-limit") == 0 || strcmp(a, "--fsync-ms") == 0) {
+            strcmp(a, "--admin-job-limit") == 0 || strcmp(a, "--fsync-ms") == 0 ||
+            strcmp(a, "--job-state-max-memory-mb") == 0 ||
+            strcmp(a, "--job-receipts-max-memory-mb") == 0 ||
+            strcmp(a, "--job-receipts-max-count") == 0 ||
+            strcmp(a, "--job-receipt-retention-ms") == 0 ||
+            strcmp(a, "--job-completion-max-bytes") == 0) {
             if (++i >= argc) { usage(argv[0]); return 2; }
             const char *v = argv[i];
             unsigned long long n;
@@ -4568,6 +5058,27 @@ int main(int argc, char **argv) {
             else if (parse_ull(v, &n) < 0 || n == 0) {
                 fprintf(stderr, "invalid value for %s: %s\n", a, v);
                 return 2;
+            } else if (strcmp(a, "--job-state-max-memory-mb") == 0) {
+                if (n > 65536) { fprintf(stderr, "job state memory must be 1..65536 MiB\n"); return 2; }
+                g_job_cfg.state_max_bytes = n << 20;
+            } else if (strcmp(a, "--job-receipts-max-memory-mb") == 0) {
+                if (n > 65536) { fprintf(stderr, "job receipt memory must be 1..65536 MiB\n"); return 2; }
+                g_job_cfg.receipts_max_bytes = n << 20;
+            } else if (strcmp(a, "--job-receipts-max-count") == 0) {
+                if (n > 100000000ull) { fprintf(stderr, "job receipt count must be 1..100000000\n"); return 2; }
+                g_job_cfg.receipts_max_count = n;
+            } else if (strcmp(a, "--job-receipt-retention-ms") == 0) {
+                if (n < 1000 || n > 315360000000ull) {
+                    fprintf(stderr, "job receipt retention must be 1000..315360000000 ms\n");
+                    return 2;
+                }
+                g_job_cfg.receipt_retention_ms = n;
+            } else if (strcmp(a, "--job-completion-max-bytes") == 0) {
+                if (n < 1024 || n > 67108864ull) {
+                    fprintf(stderr, "job completion size must be 1024..67108864 bytes\n");
+                    return 2;
+                }
+                g_job_cfg.max_op_bytes = n;
             } else if (strcmp(a, "--max-value-mb") == 0) {
                 if (n > (ABS_MAX_VAL >> 20)) { fprintf(stderr, "max value exceeds 1024 MiB\n"); return 2; }
                 g_max_val = (uint32_t)(n << 20);
@@ -4805,8 +5316,74 @@ int main(int argc, char **argv) {
         g_tx_nonce = nonce;
     }
 
-    g_queues = queue_store_open(queue_path);
-    if (!g_queues) { fprintf(stderr, "queue store open failed\n"); return 1; }
+    if (g_jobs_requested && !queue_path) {
+        fprintf(stderr,
+                "--job-completion requires a durable Queue WAL (pass a path "
+                "or drop the '-' disable)\n");
+        return 2;
+    }
+    if (g_jobs_requested) {
+        g_jobs = job_engine_create(&g_job_cfg);
+        if (!g_jobs) { fprintf(stderr, "job engine create failed\n"); return 1; }
+    }
+    int queue_open_error = QUEUE_OPEN_OK;
+    if (g_jobs) {
+        QueueJobReplayHooks hooks = job_engine_replay_hooks(g_jobs);
+        g_queues = queue_store_open_ex(queue_path, 1, &hooks,
+                                       &queue_open_error);
+    } else {
+        g_queues = queue_store_open_ex(queue_path, 0, NULL,
+                                       &queue_open_error);
+    }
+    if (!g_queues) {
+        if (queue_open_error == QUEUE_OPEN_JOB_DISABLED) {
+            fprintf(stderr,
+                    "queue WAL contains atomic job completion records; "
+                    "restart with --job-completion (back up the data "
+                    "directory first)\n");
+        } else if (queue_open_error == QUEUE_OPEN_JOB_FORMAT) {
+            fprintf(stderr,
+                    "queue WAL contains an unsupported job record format; "
+                    "upgrade KuttiDB (no data was modified)\n");
+        } else {
+            fprintf(stderr, "queue store open failed\n");
+        }
+        job_engine_destroy(g_jobs);
+        return 1;
+    }
+    if (g_jobs) {
+        JobStatus attached = job_engine_attach(g_jobs, g_queues);
+        if (attached != JOB_OK) {
+            fprintf(stderr, "job engine attach failed: %s\n",
+                    job_status_name(attached));
+            queue_store_close(g_queues);
+            job_engine_destroy(g_jobs);
+            return 1;
+        }
+        /* A lowered budget must never erase retained data: refuse rather
+         * than drop committed state or receipts. */
+        JobEngineConfig effective;
+        job_engine_config_get(g_jobs, &effective);
+        uint64_t se = 0, sb = 0, rc2 = 0, rb = 0;
+        job_engine_usage(g_jobs, &se, &sb, &rc2, &rb);
+        if (sb > effective.state_max_bytes ||
+            rb > effective.receipts_max_bytes ||
+            rc2 > effective.receipts_max_count) {
+            fprintf(stderr,
+                    "job budgets below retained data (state %llu/%llu bytes, "
+                    "receipts %llu/%llu bytes, %llu/%llu count); raise "
+                    "--job-state-max-memory-mb / --job-receipts-* and restart\n",
+                    (unsigned long long)sb,
+                    (unsigned long long)effective.state_max_bytes,
+                    (unsigned long long)rb,
+                    (unsigned long long)effective.receipts_max_bytes,
+                    (unsigned long long)rc2,
+                    (unsigned long long)effective.receipts_max_count);
+            queue_store_close(g_queues);
+            job_engine_destroy(g_jobs);
+            return 1;
+        }
+    }
     g_streams = stream_store_open(stream_path);
     if (!g_streams) {
         fprintf(stderr, "stream store open failed\n");
@@ -4839,6 +5416,7 @@ int main(int argc, char **argv) {
         ac.max_tail_clients = admin_max_tail_clients; ac.session_limit = admin_session_limit;
         ac.job_limit = admin_job_limit;
         ac.keyspace = g_cache; ac.queues = g_queues; ac.streams = g_streams;
+        ac.jobs = g_jobs;
         ac.status = admin_status; ac.auth_failure = admin_auth_failure; ac.keyspace_put = persist_put; ac.keyspace_delete = persist_delete; ac.keyspace_claim_acquire = admin_keyspace_claim_acquire; ac.keyspace_claim_complete = admin_keyspace_claim_complete; ac.keyspace_claim_release = admin_keyspace_claim_release; ac.keyspace_checkpoint = admin_keyspace_checkpoint; ac.atomic_execute = admin_atomic_execute;
         g_admin_http = admin_http_create(&ac);
         if (!g_admin_http || admin_http_start(g_admin_http) < 0) {
@@ -4932,6 +5510,8 @@ int main(int argc, char **argv) {
     sf_shutdown();
     stream_store_close(g_streams);
     queue_store_close(g_queues);
+    job_engine_destroy(g_jobs);
+    g_jobs = NULL;
 
     if (persist && g_wal_fd >= 0) {
         do_snapshot();

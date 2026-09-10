@@ -7,7 +7,8 @@
   const notes = {
     cache: 'A value when you need it. An expiry when you don’t.',
     queue: 'Acknowledge after processing. Unfinished work can be redelivered.',
-    stream: 'Reading doesn’t remove an event. Come back to the same offset.'
+    stream: 'Reading doesn’t remove an event. Come back to the same offset.',
+    complete: 'One commit: the result, the ACK, the next message, and a retryable receipt.'
   };
   // Highlight text nodes only. Snippets never become executable markup.
   function highlight(target, code) {

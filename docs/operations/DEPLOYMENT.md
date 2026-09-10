@@ -59,6 +59,28 @@ kubectl apply -f deploy/kubernetes/durable-single-node.yaml
 Both manifests run as the image's non-root UID, drop Linux capabilities, and use
 a read-only root filesystem.
 
+## Atomic job completion sizing
+
+Enable with `--job-completion` (requires a durable Queue WAL). Budgets are
+per-engine supplements to the cache/queue limits:
+
+| Flag | Default | Sizing guidance |
+|---|---|---|
+| `--job-state-max-memory-mb` | 64 | Resident `durable` keyspace + index bytes. Reaching it rejects new state growth (`resource_exhausted`) — it never evicts. Size for your working set of correctness-critical results. |
+| `--job-receipts-max-memory-mb` / `--job-receipts-max-count` | 64 MiB / 100000 | The retry window's receipt ledger. Rejection — never eviction — under pressure. |
+| `--job-receipt-retention-ms` | 86400000 | How long a completion id can be replayed. Set above your maximum outage/retry window; changing it never shortens stored deadlines. |
+| `--job-completion-max-bytes` | 131072 | Aggregate bound per operation (keys, metadata, state + output payload). |
+
+Operations notes: backups must include the Queue WAL (it is the commit
+authority for durable state and receipts — the same cold/warm backup
+procedures above apply unchanged). Receipts are retained for their stored
+absolute deadline; restarts never reset retention. A WAL containing job
+records refuses to open with the feature disabled — keep the flag in the
+deployment configuration once enabled. Readiness includes the job engine's
+health; capacity pressure is visible in STATS
+(`job_state_bytes`/`job_receipt_bytes` vs their configured budgets) and does
+not flip readiness. Container `TLS=0` builds support the full feature.
+
 ## Metrics and authenticated probes
 
 `--metrics-bind IPv4:PORT` serves a minimal Prometheus endpoint with

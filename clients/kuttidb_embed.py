@@ -37,6 +37,16 @@ def _load_lib():
 
 
 class KuttiEmbed:
+    """Zero-copy shared-memory cache client (CEMBv3 ABI).
+
+    Cache operations only (put/get/delete/count/memusage): this region has
+    no queue delivery or commit coordinator. Atomic job completion is a
+    server-coordinated operation — use LocalKuttiDB.jobs_companion() (or a
+    normal KuttiDBClient to the same server) for durable work; never attempt
+    to synthesize a completion by writing through the region and sending a
+    separate ACK.
+    """
+
     def __init__(self, path):
         self.lib = _load_lib()
         lib = self.lib

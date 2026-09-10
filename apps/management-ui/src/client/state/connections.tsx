@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { admin, ApiError, capabilitiesSchema, type Capabilities } from "@/lib/api";
+import { clearAllPending, clearPendingDelivery } from "@/lib/job-intent-store";
 
 export type ConnectionProfile = {
   id: string;
@@ -56,7 +57,7 @@ function saveProfiles(profiles: ConnectionProfile[]): void {
   localStorage.setItem(profileKey, JSON.stringify(safe));
 }
 
-type ConnectionState = {
+export type ConnectionState = {
   profiles: ConnectionProfile[];
   live: Map<string, LiveConnection>;
   capabilities: Map<string, Capabilities>;
@@ -70,7 +71,8 @@ type ConnectionState = {
   mutationsBlocked: (profileId: string) => boolean;
 };
 
-const ConnectionContext = createContext<ConnectionState | null>(null);
+/** Exported for behavior tests: views render inside a provider stub. */
+export const ConnectionContext = createContext<ConnectionState | null>(null);
 
 export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const [profiles, setProfiles] = useState<ConnectionProfile[]>(loadProfiles);
@@ -145,6 +147,9 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
 
   const disconnect = useCallback<ConnectionState["disconnect"]>(async (profileId) => {
     await fetch(`/ui-api/connections/${encodeURIComponent(profileId)}`, { method: "DELETE", credentials: "same-origin" });
+    // Private pending state (held delivery proofs, unresolved intents) never
+    // outlives its connection.
+    clearPendingDelivery(profileId);
     setLive((current) => {
       const next = new Map(current);
       next.delete(profileId);
@@ -163,6 +168,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
 
   const lockAll = useCallback<ConnectionState["lockAll"]>(async () => {
     await fetch("/ui-api/lock", { method: "POST", credentials: "same-origin" });
+    clearAllPending();
     setLive(new Map());
   }, []);
 

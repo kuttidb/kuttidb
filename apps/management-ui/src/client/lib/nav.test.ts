@@ -64,4 +64,11 @@ describe("isNavActive", () => {
     const active = Object.values(NAV_BASES).filter((base) => isNavActive(base, route));
     expect(active).toEqual([NAV_BASES.maintenance]);
   });
+
+  it("keeps Keyspace active on its Durable state detail route", () => {
+    // The `durable` keyspace destination is a detail of the Keyspace item, so
+    // the nav entry stays active — no separate exclusive entry is added.
+    expect(isNavActive(NAV_BASES.keyspace, segments("keyspace", "durable"))).toBe(true);
+    expect(isNavActive(NAV_BASES.queues, segments("keyspace", "durable"))).toBe(false);
+  });
 });

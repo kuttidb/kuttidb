@@ -10,13 +10,14 @@ import tempfile
 import urllib.parse
 import time
 import sys
+import uuid
 
 PORT = 7418
 TOKEN = b"separate-admin-token"
 SERVER = os.environ.get("KUTTIDB_SERVER", "./kuttidb")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
-from kuttidb_client import KuttiDBClient
+from kuttidb_client import KuttiDBClient, JobCompletionIntent
 SERVER_FEATURES = subprocess.run([SERVER, "--features"], capture_output=True,
                                  text=True, check=True, timeout=5).stdout
 TLS_AVAILABLE = "admin-tls=openssl" in SERVER_FEATURES
@@ -65,9 +66,10 @@ for route, methods in required_mutations.items():
 with open(os.path.join(ROOT, "src", "admin_http.c"), encoding="utf-8") as f:
     dispatcher_source = f.read()
 for route_prefix in (
-        "/api/admin/v1/keyspaces/default/entries", "/api/admin/v1/queues/",
-        "/api/admin/v1/streams/", "/api/admin/v1/routing/routers",
+        "/api/admin/v1/keyspaces/default/entries", "/api/admin/v1/keyspaces/durable",
+        "/api/admin/v1/queues/", "/api/admin/v1/streams/", "/api/admin/v1/routing/routers",
         "/api/admin/v1/queue-consumers", "/api/admin/v1/atomic-operations",
+        "/api/admin/v1/job-completions", "/api/admin/v1/durable-operations",
         "/api/admin/v1/maintenance"):
     assert route_prefix in dispatcher_source, route_prefix
 
@@ -75,9 +77,11 @@ stable_error_codes = {
     "bad_request", "unauthorized", "forbidden_origin", "not_found",
     "method_not_allowed", "request_too_large", "unsupported_media_type",
     "validation_failed", "resource_exhausted", "rate_limited", "conflict",
-    "idempotency_conflict", "precondition_required", "precondition_failed",
-    "persistence_unavailable", "engine_unavailable", "audit_unavailable",
-    "delivery_expired", "operation_in_doubt", "internal_error",
+    "idempotency_conflict", "idempotency_key_mismatch", "precondition_required",
+    "precondition_failed", "persistence_unavailable", "engine_unavailable",
+    "audit_unavailable", "delivery_expired", "delivery_not_owned",
+    "no_delivery", "unsupported_feature", "cursor_invalid",
+    "operation_in_doubt", "internal_error",
 }
 error_codes = set(openapi["components"]["schemas"]["Error"]["properties"]
                   ["error"]["properties"]["code"]["enum"])
@@ -237,8 +241,28 @@ with tempfile.TemporaryDirectory(prefix="kuttidb-admin-") as tmp:
         assert capabilities["keyspace_entry_filters"] == ["prefix", "expires"]
         assert capabilities["tls"] == {"available": TLS_AVAILABLE}
         assert capabilities["persistence"] == {"keyspaces": True, "queues": True, "streams": True}
+        # Without --job-completion the feature is reported unavailable and
+        # every durable job resource is absent or refused.
+        assert capabilities["job_completion"]["available"] is False
+        assert capabilities["job_completion"]["enabled"] is False
+        assert set(capabilities["job_completion"]["limits"]) == {
+            "state_max_bytes", "receipts_max_bytes", "receipts_max_count",
+            "receipt_retention_ms", "max_operation_bytes"}
+        assert all(v == "0" for v in capabilities["job_completion"]["limits"].values())
+        keyspaces = json.loads(request("GET", "/api/admin/v1/keyspaces", auth)[1])
+        assert keyspaces["meta"]["count"] == 2
+        assert {"name": "durable", "available": False} in keyspaces["data"]
+        assert request("GET", "/api/admin/v1/keyspaces/durable", auth)[0].startswith(b"HTTP/1.1 404")
+        assert request("GET", "/api/admin/v1/job-completions", auth)[0].startswith(b"HTTP/1.1 404")
+        assert request("GET", f"/api/admin/v1/durable-operations/{uuid.uuid4()}", auth)[0].startswith(b"HTTP/1.1 404")
+        durable_disabled_id = "b64u:" + base64.urlsafe_b64encode(b"durable-disabled").rstrip(b"=").decode()
+        disabled_put = request("PUT", f"/api/admin/v1/keyspaces/durable/entries/{durable_disabled_id}",
+                               auth + [("Content-Type", "application/json"), ("Idempotency-Key", str(uuid.uuid4())), ("If-None-Match", "*")],
+                               b'{"value":{"encoding":"base64","data":"eA=="}}')
+        assert disabled_put[0].startswith(b"HTTP/1.1 503") and json.loads(disabled_put[1])["error"]["code"] == "unsupported_feature", disabled_put
         status = json.loads(request("GET", "/api/admin/v1/status", auth)[1])
         assert status["management"]["active_tails"] == 0 and status["audit"]["healthy"] is True
+        assert status["job_completion"]["enabled"] is False and status["job_completion"]["healthy"] is False
         request_id_header, _ = request("GET", "/api/admin/v1/status", auth + [("X-KuttiDB-Request-ID", "client-request-42")])
         assert b"X-KuttiDB-Request-ID: client-request-42" in request_id_header
         missing_entry_id = "b64u:" + base64.urlsafe_b64encode(b"missing-entry").rstrip(b"=").decode()
@@ -988,5 +1012,386 @@ with tempfile.TemporaryDirectory(prefix="kuttidb-admin-") as tmp:
     finally:
         cap_proc.terminate()
         cap_proc.wait(timeout=10)
+
+    # ---- atomic job completion (Phase E) ---------------------------------
+    # A dedicated server instance runs with --job-completion so the durable
+    # Keyspace, completion deliveries, and the receipt ledger are exercised
+    # through the same core engine the native protocol uses.
+    JOB_NATIVE_PORT = 7427
+    JOB_ADMIN_PORT = PORT + 10
+
+    def wait_port_at(port):
+        end = time.time() + 5
+        while time.time() < end:
+            try:
+                socket.create_connection(("127.0.0.1", port), .1).close()
+                return
+            except OSError:
+                time.sleep(.03)
+        raise RuntimeError(f"job completion server on {port} did not start")
+
+    def b64u_id(raw):
+        return "b64u:" + base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    def http_status(head):
+        return head.split(b"\r\n")[0].decode()
+
+    def http_header(head, name):
+        marker = (name.lower() + ": ").encode()
+        return next(line.split(b": ", 1)[1].decode() for line in head.split(b"\r\n")
+                    if line.lower().startswith(marker))
+
+    with tempfile.TemporaryDirectory(prefix="kuttidb-jobs-") as jtmp:
+        job_token_file = os.path.join(jtmp, "admin.token")
+        with open(job_token_file, "wb") as f:
+            f.write(TOKEN + b"\n")
+        os.chmod(job_token_file, 0o600)
+        job_wal = os.path.join(jtmp, "kuttidb.wal")
+        job_queue_wal = os.path.join(jtmp, "queue.wal")
+        job_audit_file = os.path.join(jtmp, "admin.audit.jsonl")
+
+        def start_job_server():
+            child = subprocess.Popen(
+                [SERVER, str(JOB_NATIVE_PORT), job_wal, "--job-completion",
+                 "--admin-bind", f"127.0.0.1:{JOB_ADMIN_PORT}",
+                 "--admin-token-file", job_token_file,
+                 "--admin-audit-log", job_audit_file,
+                 "--queue-wal", job_queue_wal],
+                stderr=subprocess.PIPE, start_new_session=True)
+            wait_port_at(JOB_ADMIN_PORT)
+            return child
+
+        job_proc = start_job_server()
+        try:
+            jauth = [("Authorization", "Bearer " + TOKEN.decode())]
+
+            def jreq(method, path, headers=(), body=b""):
+                return request(method, path, headers, body, port=JOB_ADMIN_PORT)
+
+            # (i) capabilities and status report the enabled feature.
+            job_caps = json.loads(jreq("GET", "/api/admin/v1/capabilities", jauth)[1])
+            assert job_caps["job_completion"]["available"] is True
+            assert job_caps["job_completion"]["enabled"] is True
+            job_limits = job_caps["job_completion"]["limits"]
+            assert set(job_limits) == {"state_max_bytes", "receipts_max_bytes", "receipts_max_count",
+                                       "receipt_retention_ms", "max_operation_bytes"}
+            assert all(isinstance(v, str) and v.isdigit() for v in job_limits.values()), job_limits
+            job_status = json.loads(jreq("GET", "/api/admin/v1/status", jauth)[1])
+            assert job_status["job_completion"]["enabled"] is True and job_status["job_completion"]["healthy"] is True
+            assert job_status["job_completion"]["state_entries"] == 0
+
+            # (a) durable keyspace inventory + entry round trip.
+            durable_info = json.loads(jreq("GET", "/api/admin/v1/keyspaces/durable", jauth)[1])["data"]
+            assert durable_info == {"name": "durable", "evictable": False, "entry_count": 0, "live_bytes": 0,
+                                    "capacity_bytes": job_limits["state_max_bytes"],
+                                    "persistence_healthy": True, "storage_class": "queue_wal"}, durable_info
+            keyspaces_collection = json.loads(jreq("GET", "/api/admin/v1/keyspaces", jauth)[1])
+            assert keyspaces_collection["data"][1]["name"] == "durable" and keyspaces_collection["data"][1]["evictable"] is False
+            assert keyspaces_collection["meta"]["count"] == 2
+
+            state_key = b64u_id(b"job-state-1")
+            put_op = str(uuid.uuid4())
+            head, body = jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                              jauth + [("Content-Type", "application/json"), ("Idempotency-Key", put_op), ("If-None-Match", "*")],
+                              b'{"value":{"encoding":"base64","data":"aGVsbG8="}}')
+            assert http_status(head) == "HTTP/1.1 200 OK", body
+            put_receipt = json.loads(body)
+            assert put_receipt["operation_id"] == put_op and put_receipt["replayed"] is False
+            assert put_receipt["state_version"] == "1" and put_receipt["commit_id"] == "1"
+            assert put_receipt["completed_at"].isdigit() and put_receipt["receipt_expires_at"].isdigit()
+            assert http_header(head, "ETag") == '"s-1"'
+            put_headers = jauth + [("Content-Type", "application/json")]
+            assert jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                        put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                        b'{"value":{"encoding":"base64","data":"eA=="}}')[0].startswith(b"HTTP/1.1 428")
+            assert jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                        put_headers + [("Idempotency-Key", str(uuid.uuid4())), ("If-None-Match", "*"), ("If-Match", '"s-1"')],
+                        b'{"value":{"encoding":"base64","data":"eA=="}}')[0].startswith(b"HTTP/1.1 400")
+            assert jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                        put_headers + [("Idempotency-Key", "not-a-uuid"), ("If-None-Match", "*")],
+                        b'{"value":{"encoding":"base64","data":"eA=="}}')[0].startswith(b"HTTP/1.1 400")
+            head, body = jreq("GET", f"/api/admin/v1/keyspaces/durable/entries/{state_key}", jauth)
+            assert http_status(head) == "HTTP/1.1 200 OK", body
+            entry = json.loads(body)
+            assert entry["entry_id"] == state_key and entry["key"] == state_key
+            assert entry["value"] == {"encoding": "base64", "data": "aGVsbG8="}
+            assert entry["version"] == "1" and entry["last_commit_id"] == "1"
+            assert http_header(head, "ETag") == '"s-1"'
+            assert jreq("GET", f"/api/admin/v1/keyspaces/durable/entries/{b64u_id(b'missing-key')}", jauth)[0].startswith(b"HTTP/1.1 404")
+            update_op = str(uuid.uuid4())
+            head, body = jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                              put_headers + [("Idempotency-Key", update_op), ("If-Match", '"s-1"')],
+                              b'{"value":{"encoding":"base64","data":"dg=="}}')
+            assert http_status(head) == "HTTP/1.1 200 OK" and json.loads(body)["state_version"] == "2", body
+            assert jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                        put_headers + [("Idempotency-Key", str(uuid.uuid4())), ("If-Match", '"s-1"')],
+                        b'{"value":{"encoding":"base64","data":"dg=="}}')[0].startswith(b"HTTP/1.1 412")
+            assert jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                        put_headers + [("Idempotency-Key", str(uuid.uuid4())), ("If-None-Match", "*")],
+                        b'{"value":{"encoding":"base64","data":"dg=="}}')[0].startswith(b"HTTP/1.1 412")
+            durable_operation = json.loads(jreq("GET", f"/api/admin/v1/durable-operations/{update_op}", jauth)[1])
+            assert durable_operation == {"operation_id": update_op, "kind": "state_put", "commit_id": "2",
+                                         "state_version": "2", "completed_at": durable_operation["completed_at"],
+                                         "receipt_expires_at": durable_operation["receipt_expires_at"]}
+            delete_headers = put_headers + [("X-KuttiDB-Confirm", "durable-state-delete")]
+            assert jreq("DELETE", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                        put_headers + [("Idempotency-Key", str(uuid.uuid4()))], b"{}")[0].startswith(b"HTTP/1.1 428")
+            assert jreq("DELETE", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                        delete_headers + [("Idempotency-Key", str(uuid.uuid4())), ("If-Match", '"s-999999"')], b"{}")[0].startswith(b"HTTP/1.1 412")
+            delete_op = str(uuid.uuid4())
+            head, body = jreq("DELETE", f"/api/admin/v1/keyspaces/durable/entries/{state_key}",
+                              delete_headers + [("Idempotency-Key", delete_op), ("If-Match", '"s-2"')], b"{}")
+            assert http_status(head) == "HTTP/1.1 200 OK" and json.loads(body)["state_version"] == "3", body
+            assert json.loads(jreq("GET", f"/api/admin/v1/durable-operations/{delete_op}", jauth)[1])["kind"] == "state_delete"
+            assert jreq("GET", f"/api/admin/v1/keyspaces/durable/entries/{state_key}", jauth)[0].startswith(b"HTTP/1.1 404")
+            absent_delete = jreq("DELETE", f"/api/admin/v1/keyspaces/durable/entries/{b64u_id(b'never-was')}",
+                                 delete_headers + [("Idempotency-Key", str(uuid.uuid4())), ("If-Match", '"s-1"')], b"{}")
+            assert absent_delete[0].startswith(b"HTTP/1.1 404") and json.loads(absent_delete[1])["error"]["code"] == "not_found"
+
+            # (a) bounded sorted inventory with prefix and keyset cursor.
+            for name in (b"job-key-b", b"job-key-a", b"job-key-c", b"other-key"):
+                head, body = jreq("PUT", f"/api/admin/v1/keyspaces/durable/entries/{b64u_id(name)}",
+                                  put_headers + [("Idempotency-Key", str(uuid.uuid4())), ("If-None-Match", "*")],
+                                  b'{"value":{"encoding":"base64","data":"dg=="}}')
+                assert http_status(head) == "HTTP/1.1 200 OK", body
+
+            def page_keys(payload):
+                return [base64.urlsafe_b64decode(item["entry_id"][5:] + "==") for item in payload["data"]]
+
+            inventory_page_one = json.loads(jreq("GET", "/api/admin/v1/keyspaces/durable/entries?limit=2", jauth)[1])
+            assert inventory_page_one["meta"]["count"] == 2 and inventory_page_one["meta"]["weakly_consistent"] is False
+            assert page_keys(inventory_page_one) == sorted(page_keys(inventory_page_one))
+            inventory_cursor = inventory_page_one["meta"]["next_cursor"]
+            assert inventory_cursor
+            inventory_page_two = json.loads(jreq("GET", f"/api/admin/v1/keyspaces/durable/entries?limit=10&cursor={urllib.parse.quote(inventory_cursor, safe='')}", jauth)[1])
+            all_keys = page_keys(inventory_page_one) + page_keys(inventory_page_two)
+            assert all_keys == sorted(all_keys) and not (set(page_keys(inventory_page_one)) & set(page_keys(inventory_page_two)))
+            assert set(all_keys) == {b"job-key-a", b"job-key-b", b"job-key-c", b"other-key"}, all_keys
+            prefix_page = json.loads(jreq("GET", f"/api/admin/v1/keyspaces/durable/entries?limit=10&prefix={urllib.parse.quote(b64u_id(b'job-key-'), safe='')}", jauth)[1])
+            assert page_keys(prefix_page) == [b"job-key-a", b"job-key-b", b"job-key-c"], prefix_page
+
+            # Completion-capable queue fixture: durable queues, one registered
+            # consumer, and the stable Queue identities from the native client.
+            assert jreq("POST", "/api/admin/v1/queues", put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                        b'{"name":"job-queue","durable":true,"max_depth":10}')[0].startswith(b"HTTP/1.1 201")
+            assert jreq("POST", "/api/admin/v1/queues", put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                        b'{"name":"job-out","durable":true,"max_depth":10}')[0].startswith(b"HTTP/1.1 201")
+            assert jreq("POST", "/api/admin/v1/queue-consumers", put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                        b'{"name":"job-consumer"}')[0].startswith(b"HTTP/1.1 201")
+            assert jreq("POST", "/api/admin/v1/queues", put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                        b'{"name":"job-empty","durable":true}')[0].startswith(b"HTTP/1.1 201")
+            queue_id = b64u_id(b"job-queue")
+            out_queue_id = b64u_id(b"job-out")
+            consumer_id = b64u_id(b"job-consumer")
+            with KuttiDBClient(port=JOB_NATIVE_PORT) as manifest_client:
+                incarnations = {q["name"]: q["incarnation"] for q in manifest_client.queue_manifest()}
+            out_incarnation = incarnations["job-out"]
+            for i in range(2):
+                assert jreq("POST", f"/api/admin/v1/queues/{queue_id}/messages",
+                            put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                            json.dumps({"body": base64.b64encode(f"job-payload-{i}".encode()).decode()}).encode())[0].startswith(b"HTTP/1.1 201")
+
+            def completion_body(op, proof, incarnation, message_id, expected_version, key_id,
+                                state_value, out_queue=None, out_inc=0, out_value=b""):
+                payload = {
+                    "operation_id": op,
+                    "input": {"queue": "job-queue", "queue_incarnation": str(incarnation),
+                              "message_id": str(message_id), "delivery_proof": proof},
+                    "state": {"key": key_id, "expected_version": str(expected_version),
+                              "value": {"encoding": "base64", "data": base64.b64encode(state_value).decode()}},
+                    "outgoing": None,
+                }
+                if out_queue is not None:
+                    payload["outgoing"] = {"queue": out_queue, "queue_incarnation": str(out_inc),
+                                           "value": {"encoding": "base64", "data": base64.b64encode(out_value).decode()}}
+                return payload
+
+            def completion_delivery(queue, visibility):
+                head, body = jreq("POST", f"/api/admin/v1/queue-consumers/{consumer_id}/deliveries",
+                                  put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                                  json.dumps({"queue_id": queue, "mode": "completion", "visibility_ms": visibility}).encode())
+                assert http_status(head) == "HTTP/1.1 200 OK", body
+                return json.loads(body)
+
+            # (b) completion-mode consume: stable identity plus an opaque proof.
+            delivery = completion_delivery(queue_id, 1000)
+            assert set(delivery["delivery"]) == {"store_id", "queue", "queue_incarnation", "message_id",
+                                                 "attempts", "redelivered", "lease_deadline_ms", "proof"}, delivery
+            assert delivery["delivery"]["store_id"].startswith("b64u:")
+            assert delivery["delivery"]["queue"] == "job-queue"
+            assert delivery["delivery"]["message_id"].isdigit() and delivery["delivery"]["queue_incarnation"].isdigit()
+            assert delivery["delivery"]["lease_deadline_ms"].isdigit() and delivery["delivery"]["redelivered"] is False
+            assert delivery["input"] == {"queue_id": queue_id, "queue_incarnation": delivery["delivery"]["queue_incarnation"],
+                                         "message_id": delivery["delivery"]["message_id"]}
+            completion_op = str(uuid.uuid4())
+            completion_headers = put_headers + [("Idempotency-Key", completion_op)]
+            first_body = completion_body(completion_op, delivery["delivery"]["proof"],
+                                         delivery["delivery"]["queue_incarnation"], delivery["delivery"]["message_id"],
+                                         0, b64u_id(b"job-state-1"), b"state-v1",
+                                         out_queue="job-out", out_inc=out_incarnation, out_value=b"out-v1")
+            head, body = jreq("POST", "/api/admin/v1/job-completions", completion_headers, json.dumps(first_body).encode())
+            assert http_status(head) == "HTTP/1.1 200 OK", body
+            first = json.loads(body)
+            assert first["status"] == "committed" and first["operation_id"] == completion_op and first["replayed"] is False
+            assert first["storage_id"].startswith("b64u:") and first["commit_id"].isdigit()
+            assert first["input"]["queue"] == "job-queue" and first["input"]["acknowledged"] is True
+            assert first["input"]["message_id"] == str(delivery["delivery"]["message_id"])
+            assert first["state"]["key"] == b64u_id(b"job-state-1") and first["state"]["version"].isdigit()
+            assert first["output"]["queue"] == "job-out" and first["output"]["message_id"].isdigit()
+            assert first["completed_at"].isdigit() and first["receipt_expires_at"].isdigit()
+            head, body = jreq("POST", "/api/admin/v1/job-completions", completion_headers, json.dumps(first_body).encode())
+            assert http_status(head) == "HTTP/1.1 200 OK", body
+            replay = json.loads(body)
+            assert replay["replayed"] is True
+            assert replay["commit_id"] == first["commit_id"] and replay["output"] == first["output"]
+            assert replay["state"]["version"] == first["state"]["version"]
+            # The committed state is readable through the durable entries API.
+            entry_after_completion = json.loads(jreq("GET", f"/api/admin/v1/keyspaces/durable/entries/{b64u_id(b'job-state-1')}", jauth)[1])
+            assert entry_after_completion["value"]["data"] == base64.b64encode(b"state-v1").decode()
+            assert entry_after_completion["version"] == first["state"]["version"]
+            # The output message landed on the outgoing queue with the receipt id.
+            output_delivery = completion_delivery(out_queue_id, 30000)
+            assert output_delivery["delivery"]["message_id"] == first["output"]["message_id"]
+            receipt = json.loads(jreq("GET", f"/api/admin/v1/job-completions/{completion_op}", jauth)[1])
+            assert receipt == {"operation_id": completion_op, "commit_id": first["commit_id"],
+                               "state_version": first["state"]["version"],
+                               "output_message_id": first["output"]["message_id"],
+                               "completed_at": first["completed_at"], "receipt_expires_at": first["receipt_expires_at"]}
+            assert jreq("GET", f"/api/admin/v1/job-completions/{str(uuid.uuid4())}", jauth)[0].startswith(b"HTTP/1.1 404")
+            assert jreq("GET", f"/api/admin/v1/job-completions/{put_op}", jauth)[0].startswith(b"HTTP/1.1 404")
+            assert jreq("GET", f"/api/admin/v1/durable-operations/{completion_op}", jauth)[0].startswith(b"HTTP/1.1 404")
+
+            # (c) the Idempotency-Key must equal the body operation id.
+            mismatch_body = dict(first_body)
+            mismatch_body["operation_id"] = str(uuid.uuid4())
+            mismatch = jreq("POST", "/api/admin/v1/job-completions",
+                            put_headers + [("Idempotency-Key", str(uuid.uuid4()))], json.dumps(mismatch_body).encode())
+            assert mismatch[0].startswith(b"HTTP/1.1 400") and json.loads(mismatch[1])["error"]["code"] == "idempotency_key_mismatch", mismatch
+
+            # (f) an expired proof still replays over HTTP: receipt lookup never
+            # requires a live lease, while a NEW commit with a stale proof is refused.
+            time.sleep(1.3)
+            head, body = jreq("POST", "/api/admin/v1/job-completions", completion_headers, json.dumps(first_body).encode())
+            expired_replay = json.loads(body)
+            assert http_status(head) == "HTTP/1.1 200 OK" and expired_replay["replayed"] is True, body
+            assert expired_replay["commit_id"] == first["commit_id"] and expired_replay["output"] == first["output"]
+            expiring = completion_delivery(queue_id, 100)
+            time.sleep(.25)
+            stale_op = str(uuid.uuid4())
+            stale = jreq("POST", "/api/admin/v1/job-completions",
+                         put_headers + [("Idempotency-Key", stale_op)],
+                         json.dumps(completion_body(stale_op, expiring["delivery"]["proof"],
+                                                    expiring["delivery"]["queue_incarnation"],
+                                                    expiring["delivery"]["message_id"],
+                                                    0, b64u_id(b"stale-state"), b"stale")).encode())
+            # A stale proof never commits: the fence reports delivery_expired
+            # while the lease is the reason, or delivery_not_owned once the
+            # reaper has already requeued the delivery. Both are 409s.
+            assert stale[0].startswith(b"HTTP/1.1 409"), stale
+            assert json.loads(stale[1])["error"]["code"] in {"delivery_expired", "delivery_not_owned"}, stale
+            # A completion consume from a Queue without ready messages is a
+            # definite miss, not a delivery.
+            empty_delivery = jreq("POST", f"/api/admin/v1/queue-consumers/{consumer_id}/deliveries",
+                                  put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                                  json.dumps({"queue_id": b64u_id(b"job-empty"), "mode": "completion"}).encode())
+            assert empty_delivery[0].startswith(b"HTTP/1.1 404") and json.loads(empty_delivery[1])["error"]["code"] == "no_delivery", empty_delivery
+            # The default (standard) mode keeps its existing response contract.
+            standard = jreq("POST", f"/api/admin/v1/queue-consumers/{consumer_id}/deliveries",
+                            put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                            json.dumps({"queue_id": queue_id}).encode())
+            assert standard[0].startswith(b"HTTP/1.1 201"), standard
+            standard_id = json.loads(standard[1])["data"]["delivery_id"]
+            assert jreq("POST", f"/api/admin/v1/queues/{queue_id}/deliveries/{standard_id}:ack",
+                        put_headers + [("Idempotency-Key", str(uuid.uuid4()))], b"{}")[0].startswith(b"HTTP/1.1 200")
+
+            # (g) a completion against a stale state version conflicts.
+            assert jreq("POST", f"/api/admin/v1/queues/{queue_id}/messages",
+                        put_headers + [("Idempotency-Key", str(uuid.uuid4()))],
+                        json.dumps({"body": base64.b64encode(b"conflict-payload").decode()}).encode())[0].startswith(b"HTTP/1.1 201")
+            conflict_delivery = completion_delivery(queue_id, 30000)
+            conflict_op = str(uuid.uuid4())
+            conflict = jreq("POST", "/api/admin/v1/job-completions",
+                            put_headers + [("Idempotency-Key", conflict_op)],
+                            json.dumps(completion_body(conflict_op, conflict_delivery["delivery"]["proof"],
+                                                       conflict_delivery["delivery"]["queue_incarnation"],
+                                                       conflict_delivery["delivery"]["message_id"],
+                                                       999999, b64u_id(b"job-state-1"), b"conflict")).encode())
+            assert conflict[0].startswith(b"HTTP/1.1 412"), conflict
+            current_version = json.loads(jreq("GET", f"/api/admin/v1/keyspaces/durable/entries/{b64u_id(b'job-state-1')}", jauth)[1])["version"]
+            update_op_two = str(uuid.uuid4())
+            head, body = jreq("POST", "/api/admin/v1/job-completions",
+                              put_headers + [("Idempotency-Key", update_op_two)],
+                              json.dumps(completion_body(update_op_two, conflict_delivery["delivery"]["proof"],
+                                                         conflict_delivery["delivery"]["queue_incarnation"],
+                                                         conflict_delivery["delivery"]["message_id"],
+                                                         int(current_version), b64u_id(b"job-state-1"), b"updated")).encode())
+            assert http_status(head) == "HTTP/1.1 200 OK" and json.loads(body)["output"] is None, body
+
+            # Bounded receipt inventory with the completed_at keyset cursor.
+            receipt_page_one = json.loads(jreq("GET", "/api/admin/v1/job-completions?limit=1", jauth)[1])
+            assert receipt_page_one["meta"]["count"] == 1 and receipt_page_one["meta"]["weakly_consistent"] is False
+            receipt_cursor = receipt_page_one["meta"]["next_cursor"]
+            assert receipt_cursor
+            receipt_page_two = json.loads(jreq("GET", f"/api/admin/v1/job-completions?limit=10&cursor={urllib.parse.quote(receipt_cursor, safe='')}", jauth)[1])
+            assert receipt_page_two["meta"]["count"] >= 1
+            assert all(item["operation_id"] != receipt_page_one["data"][0]["operation_id"] for item in receipt_page_two["data"])
+            bad_cursor = jreq("GET", "/api/admin/v1/job-completions?cursor=zzzz", jauth)
+            assert bad_cursor[0].startswith(b"HTTP/1.1 400") and json.loads(bad_cursor[1])["error"]["code"] == "cursor_invalid", bad_cursor
+
+            # (e) native and HTTP clients share one receipt ledger and one state.
+            parity_op = str(uuid.uuid4())
+            native_op = str(uuid.uuid4())
+            with KuttiDBClient(port=JOB_NATIVE_PORT) as native:
+                parity_receipt = native.state_put("parity-key", b"parity-v1", expected_version=0, operation_id=parity_op)
+                assert native.queue_publish("job-queue", b"native-payload") is not None
+                native_delivery = native.job_consume("job-queue", "job-consumer")
+                assert native_delivery is not None
+                native_intent = JobCompletionIntent(
+                    operation_id=uuid.UUID(native_op).bytes,
+                    queue="job-queue", queue_incarnation=native_delivery.queue_incarnation,
+                    message_id=native_delivery.message_id,
+                    state_key=b"native-state", expected_version=0, state_value=b"native-v1",
+                    output_queue=None, output_incarnation=0, output_value=b"")
+                native_result = native.job_complete(native_intent, proof=native_delivery.proof)
+                native_receipt = native.job_completion(native_op)
+                assert native_receipt is not None and native_receipt.commit_id == native_result.commit_id
+            native_http_receipt = json.loads(jreq("GET", f"/api/admin/v1/job-completions/{native_op}", jauth)[1])
+            assert native_http_receipt["commit_id"] == str(native_result.commit_id)
+            assert native_http_receipt["state_version"] == str(native_result.state_version)
+            parity_http = json.loads(jreq("GET", f"/api/admin/v1/durable-operations/{parity_op}", jauth)[1])
+            assert parity_http["kind"] == "state_put"
+            assert parity_http["commit_id"] == str(parity_receipt.commit_id)
+            assert parity_http["state_version"] == str(parity_receipt.state_version)
+            native_state_http = json.loads(jreq("GET", f"/api/admin/v1/keyspaces/durable/entries/{b64u_id(b'native-state')}", jauth)[1])
+            assert native_state_http["value"]["data"] == base64.b64encode(b"native-v1").decode()
+            with KuttiDBClient(port=JOB_NATIVE_PORT) as native:
+                assert native.state_get("job-state-1")["value"] == b"updated"
+
+            # (d) retained receipts survive a restart and answer without a proof.
+            job_proc.terminate()
+            job_proc.wait(timeout=10)
+            job_proc = start_job_server()
+            after_restart = json.loads(jreq("GET", f"/api/admin/v1/job-completions/{completion_op}", jauth)[1])
+            assert after_restart["commit_id"] == first["commit_id"], after_restart
+            assert after_restart["output_message_id"] == first["output"]["message_id"]
+            assert json.loads(jreq("GET", f"/api/admin/v1/durable-operations/{parity_op}", jauth)[1])["kind"] == "state_put"
+            assert json.loads(jreq("GET", f"/api/admin/v1/keyspaces/durable/entries/{b64u_id(b'job-state-1')}", jauth)[1])["value"]["data"] == base64.b64encode(b"updated").decode()
+            restart_status = json.loads(jreq("GET", "/api/admin/v1/status", jauth)[1])
+            assert restart_status["job_completion"]["enabled"] is True
+
+            # Bounded audit metadata only: no payloads or identity material.
+            with open(job_audit_file, encoding="utf-8") as f:
+                job_audit_records = [json.loads(line) for line in f if line.strip()]
+            assert any(r["operation"] == "durable.state.put" and r["result"] == "attempt" for r in job_audit_records)
+            assert any(r["operation"] == "durable.state.put" and r["result"] == "completed" for r in job_audit_records)
+            assert any(r["operation"] == "durable.state.delete" and r["result"] == "completed" for r in job_audit_records)
+            assert any(r["operation"] == "job.completion.submit" and r["result"] == "completed" for r in job_audit_records)
+            assert any(r["operation"] == "queue.consumer.completion_delivery" and r["result"] == "completed" for r in job_audit_records)
+            job_audit_text = json.dumps(job_audit_records)
+            assert "aGVsbG8=" not in job_audit_text and "c3RhdGUtdjE=" not in job_audit_text
+            assert TOKEN.decode() not in job_audit_text
+        finally:
+            job_proc.terminate()
+            job_proc.wait(timeout=10)
 
 print("MANAGEMENT API TESTS PASSED")

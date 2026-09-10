@@ -69,7 +69,8 @@ def start(name, token_path, delete_old=True):
          "--durability", "always", "--queue-wal",
          "/var/lib/kuttidb/queue.wal", "--stream-wal",
          "/var/lib/kuttidb/stream.wal", "--metrics-bind", "0.0.0.0:9099",
-         "--metrics-token-file", "/var/lib/kuttidb/metrics.token"],
+         "--metrics-token-file", "/var/lib/kuttidb/metrics.token",
+         "--job-completion"],
         capture_output=True, text=True, timeout=60, check=True)
 
 
@@ -95,9 +96,25 @@ def main():
             c.stream_declare("pv.events", partitions=2)
             for i in range(20):
                 c.stream_append("pv.events", f"event-{i}".encode(), partition=i % 2)
+            c.queue_declare("pv.job-input", durable=True)
+            c.queue_declare("pv.job-output", durable=True)
+            incarnations = {entry["name"]: entry["incarnation"]
+                            for entry in c.queue_manifest()}
+            c.queue_consumer_register("pv-worker")
+            c.queue_publish("pv.job-input", b"source-document")
+            delivery = c.job_consume("pv.job-input", "pv-worker")
+            assert delivery is not None, "completion test delivery missing"
+            job_intent = delivery.to_intent(
+                state_key="pv:job-state", expected_version=0,
+                state_value=b"indexed", output_queue="pv.job-output",
+                output_incarnation=incarnations["pv.job-output"],
+                output_value=b"source-document:indexed")
+            job_result = c.job_complete(job_intent, proof=delivery.proof)
+            assert not job_result.replayed and job_result.state_version == 1
             stats = c.stats()
         logs.append(f"seeded: cache=500 queue={len(ids)} "
-                    f"stream_offsets={stats['stream_partitions']}")
+                    f"stream_offsets={stats['stream_partitions']} job_commit="
+                    f"{job_result.commit_id}")
 
         # Hard kill: no graceful flush, straight to the recovery path.
         subprocess.run(["docker", "kill", "-s", "SIGKILL", NAMES["c1"]],
@@ -125,8 +142,17 @@ def main():
                        for x in c.stream_fetch("pv.events", partition=p)]
             assert len(records) == 20, "stream records lost across container SIGKILL"
             assert all(b"event-" in r["value"] for r in records)
+            state = c.state_get("pv:job-state")
+            assert state and state["value"] == b"indexed" and state["version"] == 1, \
+                "atomic job state lost across container SIGKILL"
+            receipt = c.job_completion(job_intent.operation_id)
+            assert receipt and receipt.commit_id == job_result.commit_id, \
+                "atomic job receipt lost across container SIGKILL"
+            assert c.queue_stats("pv.job-output")["depth"] == 1, \
+                "atomic job output lost across container SIGKILL"
         logs.append("recovery verified: cache, queue, and stream state survived "
-                    "a container SIGKILL restart on the same volume")
+                    "a container SIGKILL restart, including atomic job state, "
+                    "receipt, and output")
         print("\n".join(logs))
         print("CONTAINER PV RECOVERY TESTS PASSED")
     finally:

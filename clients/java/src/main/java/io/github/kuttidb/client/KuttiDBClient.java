@@ -16,10 +16,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.time.Duration;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
@@ -71,6 +73,7 @@ public class KuttiDBClient implements AutoCloseable {
     public static final long FEATURE_STREAM_COMMIT_BATCH = KuttiDBProtocol.FEAT_STREAM_COMMIT_BATCH;
     public static final long FEATURE_STREAM_KEYS = KuttiDBProtocol.FEAT_STREAM_KEYS;
     public static final long FEATURE_SERVER_INFO = KuttiDBProtocol.FEAT_SERVER_INFO;
+    public static final long FEATURE_JOBS = KuttiDBProtocol.FEAT_JOBS;
 
     // ======================================================================
     // Public value types
@@ -870,6 +873,17 @@ public class KuttiDBClient implements AutoCloseable {
         public final int port;
         public final int poolSize;
 
+        // Atomic job completion settings (forwarded to `kuttidb ensure`;
+        // defaults leave the server's own defaults in place). The managed
+        // data-dir always uses a durable default Queue WAL
+        // (<wal>.queues), so enabling jobCompletion is safe by construction.
+        public boolean jobCompletion;
+        public long jobStateMaxMemoryMb;
+        public long jobReceiptsMaxMemoryMb;
+        public long jobReceiptsMaxCount;
+        public long jobReceiptRetentionMs;
+        public long jobCompletionMaxBytes;
+
         public ManagedServerOptions(Path dataDir, Path executable, long idleTimeoutMillis,
                                     long startupTimeoutMillis, byte[] authToken) {
             this(dataDir, executable, idleTimeoutMillis, startupTimeoutMillis, authToken, "unix", "127.0.0.1", 7379, 0);
@@ -895,6 +909,19 @@ public class KuttiDBClient implements AutoCloseable {
             this.port = port == 0 ? 7379 : port;
             this.poolSize = poolSize;
         }
+
+        /** Enable the atomic job completion feature on the managed instance. */
+        public ManagedServerOptions jobCompletion(boolean v) { this.jobCompletion = v; return this; }
+        /** Forward {@code --job-state-max-memory-mb} (server default 64). */
+        public ManagedServerOptions jobStateMaxMemoryMb(long v) { this.jobStateMaxMemoryMb = v; return this; }
+        /** Forward {@code --job-receipts-max-memory-mb} (server default 64). */
+        public ManagedServerOptions jobReceiptsMaxMemoryMb(long v) { this.jobReceiptsMaxMemoryMb = v; return this; }
+        /** Forward {@code --job-receipts-max-count} (server default 100000). */
+        public ManagedServerOptions jobReceiptsMaxCount(long v) { this.jobReceiptsMaxCount = v; return this; }
+        /** Forward {@code --job-receipt-retention-ms} (server default 86400000). */
+        public ManagedServerOptions jobReceiptRetentionMs(long v) { this.jobReceiptRetentionMs = v; return this; }
+        /** Forward {@code --job-completion-max-bytes} (server default 131072). */
+        public ManagedServerOptions jobCompletionMaxBytes(long v) { this.jobCompletionMaxBytes = v; return this; }
     }
 
     /** Ensure, connect, and prove the identity of a local Unix or loopback-TCP instance. */
@@ -930,12 +957,20 @@ public class KuttiDBClient implements AutoCloseable {
         if (absent) {
             String executable = options.executable != null ? options.executable.toString()
                     : System.getenv().getOrDefault("KUTTIDB_SERVER", "kuttidb");
-            Process process = new ProcessBuilder(executable, "ensure",
+            List<String> command = new ArrayList<>(List.of(
+                    executable, "ensure",
                     "--data-dir", options.dataDir.toString(),
                     "--listen", endpoint,
                     "--idle-timeout-ms", Long.toString(options.idleTimeoutMillis),
                     "--startup-timeout-ms", Long.toString(options.startupTimeoutMillis),
-                    "--json")
+                    "--json"));
+            if (options.jobCompletion) command.add("--job-completion");
+            appendValueFlag(command, "--job-state-max-memory-mb", options.jobStateMaxMemoryMb);
+            appendValueFlag(command, "--job-receipts-max-memory-mb", options.jobReceiptsMaxMemoryMb);
+            appendValueFlag(command, "--job-receipts-max-count", options.jobReceiptsMaxCount);
+            appendValueFlag(command, "--job-receipt-retention-ms", options.jobReceiptRetentionMs);
+            appendValueFlag(command, "--job-completion-max-bytes", options.jobCompletionMaxBytes);
+            Process process = new ProcessBuilder(command)
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();
             try {
@@ -968,6 +1003,13 @@ public class KuttiDBClient implements AutoCloseable {
             throw e;
         }
         return client;
+    }
+
+    private static void appendValueFlag(List<String> command, String flag, long value) {
+        if (value > 0) {
+            command.add(flag);
+            command.add(Long.toString(value));
+        }
     }
 
     private static boolean literalLoopbackV4(String host) {
@@ -1255,6 +1297,118 @@ public class KuttiDBClient implements AutoCloseable {
     /** Leave a consumer group gracefully. */
     public void streamGroupLeave(String topic, String group) throws IOException {
         KuttiDBStreams.groupLeave(this, topic, group);
+    }
+
+    // ======================================================================
+    // Atomic job completion (capability CAP_JOBS; --job-completion)
+    // ======================================================================
+
+    /**
+     * Snapshot of every queue with stable identity: name, durability,
+     * incarnation, depth, in-flight, max depth, and revision. Incarnations
+     * are stable across restarts and required to compose completion intents
+     * for output queues. Bounded at 256 entries.
+     */
+    public List<QueueManifestEntry> queueManifest() throws IOException {
+        return KuttiDBJobs.manifest(this);
+    }
+
+    /**
+     * Deliver one message with a completion proof; {@code null} when the
+     * queue is empty. Requires a durable queue and a registered named
+     * consumer ({@link #queueConsumerRegister(String)}); the consumer's
+     * stable owner token owns the delivery, so pooled connections stay
+     * interchangeable. The returned proof is one-use: a committed completion
+     * retires it. See docs/design/ATOMIC_JOB_COMPLETION.md.
+     */
+    public JobDelivery jobConsume(String queue, String consumer, Duration visibility)
+            throws IOException {
+        if (visibility == null) throw new KuttiDBException("visibility is required");
+        return jobConsume(queue, consumer, visibility.toMillis());
+    }
+
+    /** {@link #jobConsume(String, String, Duration)} with a millisecond visibility. */
+    public JobDelivery jobConsume(String queue, String consumer, long visibilityMillis)
+            throws IOException {
+        return KuttiDBJobs.jobConsume(this, queue, consumer, visibilityMillis);
+    }
+
+    /**
+     * Submit one atomic completion: durable-state PUT + input ACK + optional
+     * output publish + receipt, committed together. On a timeout or
+     * disconnect keep the exact intent and id, then retry the same call or
+     * use {@link #jobCompletion(UUID)} to query the receipt — never
+     * regenerate the id and never issue a separate queue ACK after a success.
+     */
+    public JobCompletionResult jobComplete(JobCompletionIntent intent, byte[] proof)
+            throws IOException {
+        return KuttiDBJobs.jobComplete(this, intent, proof);
+    }
+
+    /**
+     * Look up a retained completion receipt by operation id; {@code null}
+     * means "no retained receipt". Never requires the (now stale) delivery
+     * proof and works after a restart.
+     */
+    public JobReceipt jobCompletion(UUID operationId) throws IOException {
+        return KuttiDBJobs.jobCompletion(this, operationId);
+    }
+
+    /**
+     * Read one durable-state entry: {@code null} on miss, otherwise the exact
+     * value bytes with their version and the commit id that last wrote them.
+     */
+    public StateValue stateGet(String key) throws IOException {
+        return KuttiDBJobs.stateGet(this, KuttiDBProtocol.keyBytes(key));
+    }
+
+    /** Binary-key variant of {@link #stateGet(String)}. */
+    public StateValue stateGet(byte[] key) throws IOException {
+        return KuttiDBJobs.stateGet(this, key);
+    }
+
+    /**
+     * Version-checked direct durable-state PUT with its own receipt.
+     * {@code options.expectedVersion() == 0} creates only; a positive value
+     * must match the current version exactly (no unchecked overwrite path
+     * exists). The same operation id may be retried unchanged to reconcile a
+     * lost response; a reused id with different content raises
+     * {@link JobIdempotencyConflictException}.
+     */
+    public JobMutationReceipt statePut(String key, byte[] value, StateOptions options)
+            throws IOException {
+        return KuttiDBJobs.statePut(this, KuttiDBProtocol.keyBytes(key), value, options);
+    }
+
+    /** Binary-key variant of {@link #statePut(String, byte[], StateOptions)}. */
+    public JobMutationReceipt statePut(byte[] key, byte[] value, StateOptions options)
+            throws IOException {
+        return KuttiDBJobs.statePut(this, key, value, options);
+    }
+
+    /**
+     * Version-checked direct durable-state DELETE with its own receipt.
+     * Requires the entry's current positive version. Retrying a committed
+     * delete with the same id returns its retained receipt even though the
+     * entry is already absent; deleting an absent key without a retained
+     * receipt is a definite not-found ({@link KuttiDBJobException}, code 12).
+     */
+    public JobMutationReceipt stateDelete(String key, StateOptions options) throws IOException {
+        return KuttiDBJobs.stateDelete(this, KuttiDBProtocol.keyBytes(key), options);
+    }
+
+    /** Binary-key variant of {@link #stateDelete(String, StateOptions)}. */
+    public JobMutationReceipt stateDelete(byte[] key, StateOptions options) throws IOException {
+        return KuttiDBJobs.stateDelete(this, key, options);
+    }
+
+    /**
+     * Look up a retained direct-state mutation receipt (shared
+     * operation-id ledger); {@code null} when no receipt is retained.
+     * The {@code kind} is {@code "state_put"} or {@code "state_delete"}.
+     */
+    public DurableOperationReceipt durableOperation(UUID operationId) throws IOException {
+        return KuttiDBJobs.durableOperation(this, operationId);
     }
 
     // ======================================================================

@@ -37,6 +37,7 @@ fn managed_lifecycle_integration() {
         idle_timeout: Duration::from_millis(250),
         startup_timeout: Duration::from_secs(5),
         auth_token: None,
+        ..Default::default()
     })
     .expect("managed connect");
     client
@@ -64,6 +65,7 @@ fn managed_lifecycle_integration() {
         idle_timeout: Duration::from_millis(250),
         startup_timeout: Duration::from_secs(5),
         auth_token: None,
+        ..Default::default()
     })
     .expect("managed TCP connect");
     tcp.put("managed-rust-tcp", b"value", None)

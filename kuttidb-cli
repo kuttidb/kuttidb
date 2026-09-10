@@ -13,6 +13,32 @@ Usage:
   kuttidb-cli stats                    show server stats
   kuttidb-cli health                   return success only when storage is ready
   kuttidb-cli capabilities             print negotiated protocol capabilities
+  kuttidb-cli manifest                 queue inventory incl. stable incarnations (JSON)
+  kuttidb-cli consumer-register NAME    register a durable named consumer (for job-consume)
+  kuttidb-cli consumer-unregister NAME  remove a durable named consumer
+  kuttidb-cli job-consume QUEUE CONSUMER [--visibility S] [--output FILE]
+                                       receive a completion-capable delivery (JSON;
+                                       the full proof is written only to FILE, 0600)
+  kuttidb-cli job-complete --delivery FILE [--request FILE]
+                                       [--operation-id UUID --queue Q --queue-incarnation N
+                                        --message-id N --state-key K --expected-version N
+                                        [--state-value SPEC] [--output-queue Q
+                                        --output-incarnation N [--output-value SPEC]]]
+                                       submit one atomic completion (JSON result)
+  kuttidb-cli job-completion UUID      look up a retained completion receipt (JSON)
+  kuttidb-cli state-get KEY            read durable state (JSON)
+  kuttidb-cli state-put KEY --expected-version N [--operation-id UUID] [--value SPEC]
+                                       version-checked durable-state PUT (JSON receipt)
+  kuttidb-cli state-delete KEY --expected-version N [--operation-id UUID]
+                                       version-checked durable-state DELETE (JSON receipt)
+  kuttidb-cli durable-operation UUID   look up a retained state-mutation receipt (JSON)
+
+Value SPEC: '-' reads stdin bytes, 'b64:...' decodes Base64, '@FILE' reads a
+file, anything else is the literal argument bytes. 64-bit identity fields in
+JSON output are lossless decimal STRINGS; byte values are Base64. Delivery
+and intent files contain sensitive proof or payload data: they are created
+only on explicit request with owner-only permissions and are never printed
+to routine output.
 
 Options:
   -H, --host HOST     server host (default 127.0.0.1, env KUTTIDB_HOST)
@@ -22,14 +48,19 @@ Options:
   --ca-file PATH      trusted certificate/CA file (env KUTTIDB_CA_FILE)
   --server-name NAME  certificate name (defaults to host)
 
-Exit codes: 0 ok, 1 miss/not found, 2 connection or server error.
+Exit codes: 0 ok, 1 miss/not found, 2 connection, server, or validation
+error, 3 conflict (idempotency or state version), 4 unknown outcome
+(operation in doubt: preserve the operation id and retry exactly or look up
+the receipt).
 """
 
+import json
 import os
 import socket
 import ssl
 import struct
 import sys
+import uuid
 
 OP_PUT = 0x01
 OP_GET = 0x02
@@ -44,6 +75,7 @@ OP_GET_BATCH = 0x12
 OP_PUT_BATCH_TTL = 0x13
 ST_OK = 0x00
 ST_MISS = 0x01
+ST_ERR = 0x02
 MAX_KEY = (1 << 16) - 1
 MAX_VALUE = 64 << 20
 BATCH = 256
@@ -55,8 +87,13 @@ class CLIError(Exception):
 
 class Conn:
     def __init__(self, host, port, auth_token=None, tls=False, ca_file=None,
-                 server_name=None):
-        raw_sock = socket.create_connection((host, port), timeout=10)
+                 server_name=None, unix_path=None):
+        if unix_path:
+            raw_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            raw_sock.settimeout(10)
+            raw_sock.connect(unix_path)
+        else:
+            raw_sock = socket.create_connection((host, port), timeout=10)
         if tls:
             context = ssl.create_default_context(cafile=ca_file)
             try:
@@ -128,6 +165,26 @@ def read_resp(c):
 OP_QUEUE_LIST = 0x2c
 OP_STREAM_LIST = 0x69
 OP_STREAM_GROUP_LIST = 0x6a
+
+# Atomic job completion family (capability-gated server side).
+OP_JOB_CONSUME = 0x70
+OP_JOB_COMPLETE = 0x71
+OP_JOB_RECEIPT = 0x72
+OP_STATE_GET = 0x73
+OP_STATE_PUT = 0x74
+OP_STATE_DELETE = 0x75
+OP_DURABLE_OPERATION = 0x76
+OP_QUEUE_MANIFEST = 0x77
+OP_QUEUE_CONSUMER_REGISTER = 0x29
+OP_QUEUE_CONSUMER_UNREGISTER = 0x2a
+
+JOB_ERROR_NAMES = {
+    1: "unsupported_feature", 2: "validation_failed", 3: "request_too_large",
+    4: "idempotency_conflict", 5: "state_version_conflict", 6: "delivery_expired",
+    7: "delivery_not_owned", 8: "resource_exhausted", 9: "operation_in_progress",
+    10: "operation_in_doubt", 11: "persistence_unavailable", 12: "not_found",
+}
+JOB_CONFLICT_CODES = {"idempotency_conflict", "state_version_conflict"}
 
 
 def _list_request(c, opcode):
@@ -250,6 +307,422 @@ def cmd_mput(c, pairs, ttl_s=None):
             raise CLIError("server error in mput")
 
 
+
+# ---- atomic job completion helpers -----------------------------------------
+
+def _job_error_body(body):
+    """Maps a typed error envelope to a CLI exit code."""
+    code = body[0] if len(body) >= 1 else 0
+    outcome = body[1] if len(body) >= 2 else 0
+    name = JOB_ERROR_NAMES.get(code, f"code_{code}")
+    detail = body[2:].decode(errors="replace") if len(body) > 2 else ""
+    text = f"{name} ({'unknown' if outcome else 'not_committed'})"
+    if detail:
+        text += f": {detail}"
+    exit_code = 4 if name == "operation_in_doubt" else (
+        3 if name in JOB_CONFLICT_CODES else 2)
+    return exit_code, text
+
+
+def _job_call(c, opcode, key, value=b""):
+    """Sends one job request and returns (status, body) raw."""
+    c.send_req(single(opcode, key, value))
+    return read_resp(c)
+
+
+def _expect_json(value):
+    return json.loads(value.decode())
+
+
+def _b64e(data):
+    import base64
+    return base64.b64encode(data).decode("ascii")
+
+
+def _b64d(text):
+    import base64
+    return base64.b64decode(text.encode("ascii"))
+
+
+
+def _load_value(spec):
+    if spec == "-":
+        return sys.stdin.buffer.read()
+    if spec.startswith("b64:"):
+        return _b64d(spec[4:])
+    if spec.startswith("@"):
+        with open(spec[1:], "rb") as f:
+            return f.read()
+    return spec.encode()
+
+
+def _write_private_file(path, data):
+    """Owner-only file for sensitive delivery/intent data: created only on
+    explicit request, never world-readable."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def _json_out(obj):
+    print(json.dumps(obj, sort_keys=True))
+
+
+def _uuid_bytes(text):
+    return uuid.UUID(text).bytes
+
+
+def _manifest_rows(c):
+    status, value = _job_call(c, OP_QUEUE_MANIFEST, b"", b"")
+    if status == ST_ERR:
+        raise CLIError("manifest failed")
+    if status != ST_OK:
+        raise CLIError("manifest failed")
+    (n,) = struct.unpack("<H", value[:2])
+    at, rows = 2, []
+    for _ in range(n):
+        (nlen,) = struct.unpack("<H", value[at:at + 2]); at += 2
+        name = value[at:at + nlen].decode(); at += nlen
+        durable = value[at]; at += 1
+        inc, depth, inflight, maxd, rev = struct.unpack("<QQQQQ", value[at:at + 40])
+        at += 40
+        rows.append({"name": name, "durable": bool(durable),
+                     "incarnation": str(inc), "depth": str(depth),
+                     "inflight": str(inflight), "max_depth": str(maxd),
+                     "revision": str(rev)})
+    return rows
+
+
+def cmd_manifest(c):
+    for row in _manifest_rows(c):
+        _json_out(row)
+
+
+def cmd_consumer_register(c, rest):
+    if len(rest) != 1:
+        print("usage: kuttidb-cli consumer-register NAME", file=sys.stderr)
+        return 2
+    status, value = _job_call(c, OP_QUEUE_CONSUMER_REGISTER, rest[0].encode())
+    if status != ST_OK:
+        raise CLIError("consumer registration failed")
+    print(f"owner={struct.unpack('<Q', value)[0]}")
+    return 0
+
+
+def cmd_consumer_unregister(c, rest):
+    if len(rest) != 1:
+        print("usage: kuttidb-cli consumer-unregister NAME", file=sys.stderr)
+        return 2
+    status, _ = _job_call(c, OP_QUEUE_CONSUMER_UNREGISTER, rest[0].encode())
+    if status != ST_OK:
+        raise CLIError("consumer unregistration failed")
+    return 0
+
+
+def cmd_job_consume(c, rest):
+    queue = None
+    consumer = None
+    visibility = 30.0
+    output = None
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--visibility":
+            visibility = parse_ttl(rest[i + 1]); i += 2
+        elif a == "--output":
+            output = rest[i + 1]; i += 2
+        elif queue is None:
+            queue = a; i += 1
+        elif consumer is None:
+            consumer = a; i += 1
+        else:
+            raise CLIError("job-consume: too many arguments")
+    if not queue or not consumer:
+        print("usage: kuttidb-cli job-consume QUEUE CONSUMER "
+              "[--visibility 90|5m|2h] [--output FILE]", file=sys.stderr)
+        return 2
+    gb = consumer.encode()
+    status, value = _job_call(c, OP_JOB_CONSUME, queue.encode(),
+                              struct.pack("<H", len(gb)) + gb +
+                              struct.pack("<Q", int(visibility * 1000)))
+    if status == ST_MISS:
+        return 1
+    if status == ST_ERR:
+        code, text = _job_error_body(value)
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    if status != ST_OK or len(value) < 61:
+        raise CLIError("job consume failed")
+    delivery = {
+        "store_id": _b64e(value[0:16]),
+        "queue": queue,
+        "queue_incarnation": str(struct.unpack("<Q", value[16:24])[0]),
+        "message_id": str(struct.unpack("<Q", value[24:32])[0]),
+        "attempts": struct.unpack("<I", value[32:36])[0],
+        "redelivered": bool(value[36]),
+        "lease_deadline_ms": str(struct.unpack("<Q", value[37:45])[0]),
+        "proof": _b64e(value[45:61]),
+        "value": _b64e(value[61:]),
+    }
+    if output:
+        _write_private_file(output, json.dumps(delivery, sort_keys=True).encode())
+        safe = dict(delivery)
+        safe["proof"] = "(written to " + output + ")"
+        _json_out(safe)
+    else:
+        # Routine output never includes the proof.
+        safe = dict(delivery)
+        safe["proof"] = "(use --output FILE to persist it)"
+        safe["value"] = delivery["value"]
+        _json_out(safe)
+    return 0
+
+
+def cmd_job_complete(c, rest):
+    delivery_file = None
+    request_file = None
+    fields = {}
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in ("--delivery", "--request", "--operation-id", "--queue",
+                 "--state-key", "--state-value", "--output-queue",
+                 "--output-value"):
+            key = a[2:].replace("-", "_")
+            fields[key] = rest[i + 1]; i += 2
+        elif a in ("--queue-incarnation", "--message-id", "--expected-version",
+                   "--output-incarnation"):
+            key = a[2:].replace("-", "_")
+            fields[key] = int(rest[i + 1]); i += 2
+        else:
+            print(f"kuttidb-cli: job-complete: unknown argument {a}",
+                  file=sys.stderr)
+            return 2
+    delivery_file = fields.pop("delivery", None)
+    request_file = fields.pop("request", None)
+    if request_file:
+        with open(request_file, "rb") as f:
+            intent = _expect_json(f.read())
+    else:
+        if delivery_file:
+            with open(delivery_file, "rb") as f:
+                delivery = _expect_json(f.read())
+            intent = {
+                "operation_id": fields.get("operation_id") or _new_uuid(),
+                "input": {"queue": fields.get("queue", delivery["queue"]),
+                          "queue_incarnation": str(fields.get(
+                              "queue_incarnation",
+                              int(delivery["queue_incarnation"]))),
+                          "message_id": str(fields.get(
+                              "message_id", int(delivery["message_id"])))},
+                "state": {"key": _b64e(_load_value(fields["state_key"])
+                                       if "state_key" in fields else b""),
+                          "expected_version": str(fields.get(
+                              "expected_version", 0)),
+                          "value": _b64e(_load_value(fields["state_value"])
+                                         if "state_value" in fields else b"")},
+                "output": None if "output_queue" not in fields else {
+                    "queue": fields["output_queue"],
+                    "queue_incarnation": str(fields.get(
+                        "output_incarnation", 0)),
+                    "value": _b64e(_load_value(fields["output_value"])
+                                   if "output_value" in fields else b"")},
+            }
+        else:
+            print("usage: kuttidb-cli job-complete --delivery FILE "
+                  "[--request FILE] or compose with --queue/--message-id/...",
+                  file=sys.stderr)
+            return 2
+    proof = b""
+    if delivery_file:
+        with open(delivery_file, "rb") as f:
+            proof = _b64d(_expect_json(f.read())["proof"])
+    req = intent
+    sk = _b64d(req["state"]["key"])
+    sv = _b64d(req["state"]["value"])
+    out = req.get("output")
+    value = (_uuid_bytes(req["operation_id"]) +
+             struct.pack("<QQ", int(req["input"]["queue_incarnation"]),
+                         int(req["input"]["message_id"])) + proof +
+             struct.pack("<H", len(sk)) + sk +
+             struct.pack("<Q", int(req["state"]["expected_version"])) +
+             struct.pack("<I", len(sv)) + sv)
+    if out is None:
+        value += b"\x00"
+    else:
+        oq = out["queue"].encode()
+        ov = _b64d(out["value"])
+        value += (b"\x01" + struct.pack("<H", len(oq)) + oq +
+                  struct.pack("<Q", int(out["queue_incarnation"])) +
+                  struct.pack("<I", len(ov)) + ov)
+    status, resp = _job_call(c, OP_JOB_COMPLETE, req["input"]["queue"].encode(),
+                             value)
+    if status == ST_MISS:
+        return 1
+    if status == ST_ERR:
+        code, text = _job_error_body(resp)
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    if status != ST_OK or len(resp) != 41:
+        raise CLIError("job completion failed")
+    commit, version, out_msg, completed, expires = struct.unpack(
+        "<QQQQQ", resp[:40])
+    _json_out({"commit_id": str(commit), "state_version": str(version),
+               "output_message_id": str(out_msg),
+               "completed_at_ms": str(completed),
+               "receipt_expires_at_ms": str(expires),
+               "replayed": bool(resp[40])})
+    return 0
+
+
+def _new_uuid():
+    return str(uuid.uuid4())
+
+
+def cmd_job_completion(c, rest):
+    if len(rest) != 1:
+        print("usage: kuttidb-cli job-completion OPERATION_ID", file=sys.stderr)
+        return 2
+    status, resp = _job_call(c, OP_JOB_RECEIPT, b"", _uuid_bytes(rest[0]))
+    if status == ST_MISS:
+        return 1
+    if status == ST_ERR:
+        code, text = _job_error_body(resp)
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    commit, version, out_msg, completed, expires = struct.unpack(
+        "<QQQQQ", resp[:40])
+    _json_out({"operation_id": rest[0], "commit_id": str(commit),
+               "state_version": str(version),
+               "output_message_id": str(out_msg),
+               "completed_at_ms": str(completed),
+               "receipt_expires_at_ms": str(expires)})
+    return 0
+
+
+def cmd_state_get(c, rest):
+    if len(rest) != 1:
+        print("usage: kuttidb-cli state-get KEY", file=sys.stderr)
+        return 2
+    status, resp = _job_call(c, OP_STATE_GET, rest[0].encode())
+    if status == ST_MISS:
+        return 1
+    if status == ST_ERR:
+        code, text = _job_error_body(resp)
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    version, commit = struct.unpack("<QQ", resp[:16])
+    _json_out({"key": rest[0], "version": str(version),
+               "commit_id": str(commit), "value": _b64e(resp[16:])})
+    return 0
+
+
+def cmd_state_put(c, rest):
+    key = None
+    expected = 0
+    op_id = None
+    value_spec = ""
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--expected-version":
+            expected = int(rest[i + 1]); i += 2
+        elif a == "--operation-id":
+            op_id = rest[i + 1]; i += 2
+        elif a == "--value":
+            value_spec = rest[i + 1]; i += 2
+        elif key is None:
+            key = a; i += 1
+        else:
+            print("usage: kuttidb-cli state-put KEY --expected-version N "
+                  "[--operation-id UUID] [--value SPEC]", file=sys.stderr)
+            return 2
+    if not key or expected < 0:
+        print("usage: kuttidb-cli state-put KEY --expected-version N "
+              "[--operation-id UUID] [--value SPEC]", file=sys.stderr)
+        return 2
+    value = _load_value(value_spec) if value_spec else b""
+    status, resp = _job_call(c, OP_STATE_PUT, key.encode(),
+                             (_uuid_bytes(op_id) if op_id else
+                              _uuid_bytes(_new_uuid())) +
+                             struct.pack("<Q", expected) + value)
+    if status == ST_ERR:
+        code, text = _job_error_body(resp)
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    if status != ST_OK or len(resp) != 33:
+        raise CLIError("durable state put failed")
+    commit, version, completed, expires = struct.unpack("<QQQQ", resp[:32])
+    _json_out({"key": key, "commit_id": str(commit),
+               "state_version": str(version),
+               "completed_at_ms": str(completed),
+               "receipt_expires_at_ms": str(expires),
+               "replayed": bool(resp[32])})
+    return 0
+
+
+def cmd_state_delete(c, rest):
+    key = None
+    expected = None
+    op_id = None
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--expected-version":
+            expected = int(rest[i + 1]); i += 2
+        elif a == "--operation-id":
+            op_id = rest[i + 1]; i += 2
+        elif key is None:
+            key = a; i += 1
+        else:
+            print("usage: kuttidb-cli state-delete KEY --expected-version N "
+                  "[--operation-id UUID]", file=sys.stderr)
+            return 2
+    if not key or not expected or expected <= 0:
+        print("usage: kuttidb-cli state-delete KEY --expected-version N "
+              "[--operation-id UUID]", file=sys.stderr)
+        return 2
+    status, resp = _job_call(c, OP_STATE_DELETE, key.encode(),
+                             (_uuid_bytes(op_id) if op_id else
+                              _uuid_bytes(_new_uuid())) +
+                             struct.pack("<Q", expected))
+    if status == ST_ERR:
+        code, text = _job_error_body(resp)
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    if status != ST_OK or len(resp) != 33:
+        raise CLIError("durable state delete failed")
+    commit, version, completed, expires = struct.unpack("<QQQQ", resp[:32])
+    _json_out({"key": key, "commit_id": str(commit),
+               "state_version": str(version),
+               "completed_at_ms": str(completed),
+               "receipt_expires_at_ms": str(expires),
+               "replayed": bool(resp[32])})
+    return 0
+
+
+def cmd_durable_operation(c, rest):
+    if len(rest) != 1:
+        print("usage: kuttidb-cli durable-operation OPERATION_ID",
+              file=sys.stderr)
+        return 2
+    status, resp = _job_call(c, OP_DURABLE_OPERATION, b"", _uuid_bytes(rest[0]))
+    if status == ST_MISS:
+        return 1
+    if status == ST_ERR:
+        code, text = _job_error_body(resp)
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    kind = {2: "state_put", 3: "state_delete"}.get(
+        resp[0], f"kind_{resp[0]}")
+    commit, version, completed, expires = struct.unpack("<QQQQ", resp[1:33])
+    _json_out({"operation_id": rest[0], "kind": kind,
+               "commit_id": str(commit), "state_version": str(version),
+               "completed_at_ms": str(completed),
+               "receipt_expires_at_ms": str(expires)})
+    return 0
+
+
 def main(argv):
     host = os.environ.get("KUTTIDB_HOST", "127.0.0.1")
     port = int(os.environ.get("KUTTIDB_PORT", "7379"))
@@ -257,6 +730,7 @@ def main(argv):
     use_tls = os.environ.get("KUTTIDB_TLS", "").lower() in ("1", "true", "yes")
     ca_file = os.environ.get("KUTTIDB_CA_FILE")
     server_name = None
+    unix_path = os.environ.get("KUTTIDB_UNIX")
     show_help = False
     args = []
     i = 0
@@ -283,6 +757,9 @@ def main(argv):
         elif a == "--server-name":
             server_name = argv[i + 1]
             i += 2
+        elif a == "--unix-path":
+            unix_path = argv[i + 1]
+            i += 2
         else:
             args.append(a)
             i += 1
@@ -302,9 +779,11 @@ def main(argv):
                 auth_token = f.read(1025).rstrip(b"\r\n")
             if not auth_token or len(auth_token) > 1024:
                 raise CLIError("auth token file must contain 1..1024 bytes")
-        c = Conn(host, port, auth_token, use_tls, ca_file, server_name)
+        c = Conn(host, port, auth_token, use_tls, ca_file, server_name,
+                 unix_path)
     except (OSError, CLIError) as e:
-        print(f"kuttidb-cli: cannot connect to {host}:{port} ({e})", file=sys.stderr)
+        endpoint = unix_path or f"{host}:{port}"
+        print(f"kuttidb-cli: cannot connect to {endpoint} ({e})", file=sys.stderr)
         return 2
 
     try:
@@ -397,6 +876,35 @@ def main(argv):
             cmd_topics(c)
         elif cmd == "groups":
             cmd_groups(c)
+        elif cmd == "manifest":
+            cmd_manifest(c)
+        elif cmd == "consumer-register":
+            rc = cmd_consumer_register(c, rest)
+            return rc
+        elif cmd == "consumer-unregister":
+            rc = cmd_consumer_unregister(c, rest)
+            return rc
+        elif cmd == "job-consume":
+            rc = cmd_job_consume(c, rest)
+            return rc
+        elif cmd == "job-complete":
+            rc = cmd_job_complete(c, rest)
+            return rc
+        elif cmd == "job-completion":
+            rc = cmd_job_completion(c, rest)
+            return rc
+        elif cmd == "state-get":
+            rc = cmd_state_get(c, rest)
+            return rc
+        elif cmd == "state-put":
+            rc = cmd_state_put(c, rest)
+            return rc
+        elif cmd == "state-delete":
+            rc = cmd_state_delete(c, rest)
+            return rc
+        elif cmd == "durable-operation":
+            rc = cmd_durable_operation(c, rest)
+            return rc
         else:
             print(f"unknown command: {cmd}", file=sys.stderr)
             return 2

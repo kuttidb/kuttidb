@@ -22,12 +22,15 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 |---|---|
 | [guides/GETTING_STARTED.md](guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
 | [guides/SAAS_DEMO.md](guides/SAAS_DEMO.md) | One-command report demo: cache, background jobs, event replay, and crash recovery |
+| [guides/ATOMIC_JOB_COMPLETION.md](guides/ATOMIC_JOB_COMPLETION.md) | Atomic job completion: durable state, ACK, and the next message in one commit |
+| [guides/CLIENT_FEATURE_MATRIX.md](guides/CLIENT_FEATURE_MATRIX.md) | Per-client feature coverage, method mapping, and transports |
 | [design/ARCHITECTURE.md](design/ARCHITECTURE.md) | Engines, storage separation, durability model |
 | [design/PROTOCOL.md](design/PROTOCOL.md) | Binary wire protocol, CLI flags, limits |
 | [messaging/QUEUES.md](messaging/QUEUES.md) | Queue semantics, delivery and dead-letter rules |
 | [messaging/EXCHANGES.md](messaging/EXCHANGES.md) | Exchange types, routing rules, binding limits |
 | [messaging/STREAMS.md](messaging/STREAMS.md) | Partition ordering, offsets, retention, consumer groups |
 | [design/DURABILITY.md](design/DURABILITY.md) | Acknowledgement points, atomic operations, single-node limits |
+| [design/ATOMIC_JOB_COMPLETION.md](design/ATOMIC_JOB_COMPLETION.md) | Completion commit authority, receipts, recovery, and checkpoints |
 | [SECURITY.md](SECURITY.md) | Auth, TLS, permissions, threat model |
 | [api/MANAGEMENT_API.md](api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
 | [design/MANAGEMENT_UI_DESIGN_SYSTEM.md](design/MANAGEMENT_UI_DESIGN_SYSTEM.md) | Brand-based console design: tokens, components, layouts, and interaction states |

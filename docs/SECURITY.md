@@ -60,6 +60,31 @@ a controlled restart. Use certificates issued by your internal/public CA in
 production; self-signed certificates are appropriate only when their exact CA
 certificate is explicitly distributed to clients.
 
+## Delivery proofs and completion receipts (atomic job completion)
+
+When `--job-completion` is enabled:
+
+- A completion-capable delivery returns an opaque, one-use 128-bit **proof**
+  (urandom; strong randomness in `TLS=0` builds too) bound to the live
+  delivery, its native owner token, and the process epoch. Proofs fence
+  exactly one commit attempt; they are never logged, never written to
+  receipts, never present in STATS, and never accepted for any other
+  message. Losing a proof is safe: receive a fresh delivery.
+- Receipts store no credentials — only the operation id, commit metadata,
+  and retention deadline. Authenticated receipt lookup (`GET
+  /job-completions/{id}`, `0x72`) intentionally works without the old proof
+  after a restart; it stays behind the same bearer authentication as every
+  other endpoint and is never a public unauthenticated surface.
+- Admission is bounded (`--job-receipts-*`, `--job-state-max-memory-mb`,
+  `--job-completion-max-bytes`): capacity pressure rejects new protected
+  work instead of evicting retained state, so no client can exhaust the
+  server through completion traffic alone. The access model stays the
+  existing coarse token boundary — there is no per-tenant isolation.
+- Audit entries for completion mutations carry bounded metadata only
+  (operation id, path, outcome class); payloads, proofs, and tokens are
+  never logged. Audit failure after a committed completion is reported as an
+  unknown outcome, never as a rollback.
+
 ## Trust boundaries
 
 An authenticated network client can read, overwrite, and delete every key;

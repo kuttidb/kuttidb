@@ -52,6 +52,17 @@ The StatefulSet is the complete reference for durable operation:
   to the working set; the in-memory cache budget is the fifth positional
   argument (`MAX_MEM_MB`, evictable cache data only — durable queue and
   stream data have separate accounting).
+- **Atomic job completion (opt-in)**: add `--job-completion` plus the
+  `--job-*` budget flags to the container command to enable the `durable`
+  keyspace and the completion surface. The Queue WAL (already on the PVC) is
+  the commit authority for durable state and receipts — keep it mounted,
+  sized for the receipt ledger, and included in backups. `/ready` also
+  reflects the job engine's health once enabled; capacity pressure is
+  reported in STATS and never flips readiness. See
+  [DEPLOYMENT.md](DEPLOYMENT.md#atomic-job-completion-sizing) and
+  [../design/ATOMIC_JOB_COMPLETION.md](../design/ATOMIC_JOB_COMPLETION.md).
+  Back up the volume before first use: the feature appends record types to
+  the Queue WAL that older binaries do not parse.
 
 ### Tokens
 

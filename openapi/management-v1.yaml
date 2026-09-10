@@ -117,6 +117,58 @@ paths:
       parameters: [ { $ref: '#/components/parameters/EntryId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { lease_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 } } } } } }
       responses: { '200': { description: Present Base64 value }, '201': { description: Newly acquired opaque claim }, '409': { $ref: '#/components/responses/Conflict' }, '429': { description: Claim registry exhausted } }
+  /keyspaces/durable:
+    get:
+      summary: Read aggregate state for the durable Keyspace (atomic job completion)
+      description: Only available when the server was started with --job-completion; the response is 404 otherwise. The durable Keyspace is non-evictable, never expires, and its commit authority is the Queue WAL.
+      responses: { '200': { description: Durable Keyspace aggregate state }, '404': { $ref: '#/components/responses/NotFound' } }
+  /keyspaces/durable/entries:
+    get:
+      summary: List bounded durable Keyspace entry metadata sorted by key
+      description: Bounded metadata inventory of the durable state map. The keyset cursor is the b64u entry identifier of the last returned entry and stays valid across restarts, but it must be combined with the same prefix filter.
+      parameters: [ { $ref: '#/components/parameters/Limit' }, { name: prefix, in: query, required: false, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, description: Exact binary-key prefix, encoded as a canonical opaque binary identifier. }, { name: cursor, in: query, required: false, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, description: Keyset position from meta.next_cursor; the entry identifier after which the page starts. } ]
+      responses: { '200': { description: Sorted entry metadata page }, '400': { $ref: '#/components/responses/BadRequest' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /keyspaces/durable/entries/{entry_id}:
+    get:
+      summary: Read one exact durable Keyspace entry
+      parameters: [ { $ref: '#/components/parameters/EntryId' } ]
+      responses: { '200': { description: Entry value with its version envelope, headers: { ETag: { schema: { type: string, pattern: '^"s-[0-9]+"$' }, description: Current durable state version; reuse it as the mutation If-Match value. } } }, '404': { $ref: '#/components/responses/NotFound' } }
+    put:
+      summary: Version-checked durable state PUT through the atomic job completion engine
+      description: "The Idempotency-Key must be a UUID and becomes the core operation id. Use If-None-Match: * for create-only (expected version 0) or If-Match: \"s-<version>\" for an exact match; missing precondition headers are rejected with 428. HTTP 200 covers both the first commit and a matched replay (replayed: true); the core receipt ledger is authoritative and the process-local idempotency cache is bypassed."
+      parameters: [ { $ref: '#/components/parameters/EntryId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-None-Match, in: header, required: false, schema: { type: string, const: '*' }, description: Create-only precondition (expected version 0). }, { name: If-Match, in: header, required: false, schema: { type: string, pattern: '^"s-[0-9]+"$' }, description: Exact current version envelope. } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DurableEntryPut' } } } }
+      responses: { '200': { description: Durable mutation receipt with the new version ETag }, '400': { $ref: '#/components/responses/BadRequest' }, '409': { description: Idempotency conflict — this operation id was used for different content }, '412': { $ref: '#/components/responses/PreconditionFailed' }, '413': { description: Operation exceeds the configured job-completion size limit }, '428': { $ref: '#/components/responses/PreconditionRequired' }, '429': { description: Durable job engine at capacity }, '503': { description: Operation in doubt (outcome unknown) or persistence unavailable } }
+    delete:
+      summary: Version-checked durable state DELETE through the atomic job completion engine
+      description: "Requires the exact current If-Match version envelope, the exact X-KuttiDB-Confirm: durable-state-delete confirmation, and a UUID Idempotency-Key that becomes the core operation id. Retrying a committed delete returns its retained receipt; deleting an absent entry without a retained receipt is a definite 404."
+      parameters: [ { $ref: '#/components/parameters/EntryId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^"s-[0-9]+"$' } }, { name: X-KuttiDB-Confirm, in: header, required: true, schema: { type: string, const: durable-state-delete } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Durable mutation receipt }, '404': { $ref: '#/components/responses/NotFound' }, '409': { description: Idempotency conflict }, '412': { $ref: '#/components/responses/PreconditionFailed' }, '428': { $ref: '#/components/responses/PreconditionRequired' }, '503': { description: Operation in doubt (outcome unknown) or persistence unavailable } }
+  /job-completions:
+    post:
+      summary: Submit one atomic job completion (state PUT + input ACK + optional output publish)
+      description: "The Idempotency-Key header must equal the body operation_id. The core receipt ledger is consulted first, so a matched retry returns the original receipt with replayed: true and never requires a live delivery proof; expired proofs are rejected only for new commits. HTTP 200 covers both the first commit and a matched replay."
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/JobCompletionSubmit' } } } }
+      responses: { '200': { description: Committed completion receipt (first commit or matched replay) }, '400': { $ref: '#/components/responses/BadRequest' }, '409': { description: Idempotency conflict, expired delivery, or unowned delivery }, '412': { description: Durable state version conflict }, '413': { description: Operation exceeds the configured job-completion size limit }, '429': { description: Durable job engine at capacity }, '503': { description: Operation in doubt (outcome unknown), persistence unavailable, or feature disabled } }
+    get:
+      summary: List bounded retained completion receipts ordered by completion time
+      description: Bounded inventory of retained completion-kind receipts. The keyset cursor is the b64u encoding of "<completed_at_ms decimal>:<32 hex operation id>"; malformed cursors are rejected with 400 cursor_invalid. A missing receipt means "not retained", never "never executed".
+      parameters: [ { $ref: '#/components/parameters/Limit' }, { name: cursor, in: query, required: false, schema: { type: string, pattern: '^[A-Za-z0-9_-]+$' }, description: Keyset position from meta.next_cursor. } ]
+      responses: { '200': { description: Ordered completion-receipt page }, '400': { $ref: '#/components/responses/BadRequest' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /job-completions/{operation_id}:
+    get:
+      summary: Look up one retained completion receipt by operation id
+      description: "The lookup never requires the delivery proof and keeps working after a server restart. A 404 means no retained receipt (not retained), never that the operation did not execute. Completion-kind ids only: state mutation ids belong under /durable-operations."
+      parameters: [ { $ref: '#/components/parameters/OperationId' } ]
+      responses: { '200': { description: Retained completion receipt }, '404': { $ref: '#/components/responses/NotFound' } }
+  /durable-operations/{operation_id}:
+    get:
+      summary: Look up one retained direct durable-state mutation receipt by operation id
+      description: "Kind-filtered receipt lookup over the shared operation-id ledger (state_put and state_delete kinds). Completion-kind ids return 404 on this path."
+      parameters: [ { $ref: '#/components/parameters/OperationId' } ]
+      responses: { '200': { description: Retained state mutation receipt }, '404': { $ref: '#/components/responses/NotFound' } }
   /queue-consumers:
     get:
       summary: List durable Queue consumers without native owner tokens
@@ -140,9 +192,10 @@ paths:
   /queue-consumers/{consumer_id}/deliveries:
     post:
       summary: Consume one Queue message through a named durable consumer
+      description: "The default (standard or omitted mode) returns an opaque Management delivery whose acknowledgement stays inside the Management API. mode: completion returns the stable input identity plus an opaque one-use delivery proof that must be presented to POST /job-completions; the proof is the only credential and native owner tokens are never exposed."
       parameters: [ { $ref: '#/components/parameters/ConsumerId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ queue_id ], properties: { queue_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, visibility_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 } } } } } }
-      responses: { '201': { description: Opaque delivery receipt and Base64 body }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '429': { description: Delivery registry exhausted } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [ queue_id ], properties: { queue_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, visibility_ms: { type: integer, minimum: 100, maximum: 60000, default: 30000 }, mode: { type: string, enum: [ standard, completion ], default: standard } } } } } }
+      responses: { '200': { description: Completion-capable delivery with stable identity and opaque proof }, '201': { description: Opaque delivery receipt and Base64 body }, '404': { description: Queue, consumer, or no ready delivery }, '409': { $ref: '#/components/responses/Conflict' }, '429': { description: Delivery registry exhausted }, '503': { description: Feature unavailable } }
   /atomic-operations:
     post:
       summary: Execute one native all-or-nothing Keyspace-plus-delivery operation
@@ -481,6 +534,7 @@ components:
     ConsumerId: { name: consumer_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
     RouterId: { name: router_id, in: path, required: true, schema: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' } }
     DeliveryId: { name: delivery_id, in: path, required: true, schema: { type: string, pattern: '^d:[a-f0-9]{32}$' } }
+    OperationId: { name: operation_id, in: path, required: true, schema: { type: string, description: Canonical UUID operation id (a b64u-prefixed 16-byte identifier is also accepted). } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
   responses:
     Unauthorized: { description: Missing or invalid bearer token, headers: { WWW-Authenticate: { schema: { type: string, example: Bearer } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
@@ -491,7 +545,7 @@ components:
     PreconditionRequired: { description: A required Idempotency-Key or revision precondition is absent, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     PreconditionFailed: { description: The supplied resource revision or generation is stale, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
-    Error: { type: object, required: [error], properties: { error: { type: object, required: [code, message, request_id], properties: { code: { type: string, enum: [bad_request, unauthorized, forbidden_origin, not_found, method_not_allowed, request_too_large, unsupported_media_type, validation_failed, resource_exhausted, rate_limited, conflict, idempotency_conflict, precondition_required, precondition_failed, persistence_unavailable, engine_unavailable, audit_unavailable, delivery_expired, operation_in_doubt, internal_error] }, message: { type: string }, request_id: { type: string } } } } }
+    Error: { type: object, required: [error], properties: { error: { type: object, required: [code, message, request_id], properties: { code: { type: string, enum: [bad_request, unauthorized, forbidden_origin, not_found, method_not_allowed, request_too_large, unsupported_media_type, validation_failed, resource_exhausted, rate_limited, conflict, idempotency_conflict, idempotency_key_mismatch, precondition_required, precondition_failed, persistence_unavailable, engine_unavailable, audit_unavailable, delivery_expired, delivery_not_owned, no_delivery, unsupported_feature, cursor_invalid, operation_in_doubt, internal_error] }, message: { type: string }, outcome: { type: string, enum: [unknown], description: Present only when the durable effect of the operation is unknown (never a definite rollback). }, request_id: { type: string } } } } }
     Collection: { type: object, required: [data, meta], properties: { data: { type: array, maxItems: 500 }, meta: { type: object, required: [count, limit, truncated], properties: { count: { type: integer }, limit: { type: integer }, truncated: { type: boolean } } } } }
     Capabilities: { type: object, properties: { product: { const: KuttiDB }, management_api_contract: { const: '1.0' }, enabled_engines: { type: array, items: { type: string } }, tls: { type: object, required: [available], properties: { available: { type: boolean } } }, persistence: { type: object, required: [keyspaces, queues, streams], properties: { keyspaces: { type: boolean }, queues: { type: boolean }, streams: { type: boolean } } }, operations: { type: object }, limits: { type: object, properties: { tail_events_per_second: { type: integer, minimum: 1 } } } } }
     Status: { type: object, description: No secrets, paths, keys, values, message bodies, or record bodies are returned. }
@@ -518,3 +572,42 @@ components:
     DefaultRoutedBody: { type: object, required: [queue_id, body], properties: { queue_id: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$' }, body: { type: string, description: Canonical padded Base64 data }, ttl_ms: { type: integer, minimum: 0 } } }
     StreamDeclare: { type: object, required: [name, partitions], properties: { name: { type: string }, partitions: { type: integer, minimum: 1, maximum: 256 }, max_retained_bytes: { type: integer, minimum: 0 }, max_retained_age_ms: { type: integer, minimum: 0 } } }
     Nack: { type: object, properties: { requeue: { type: boolean, default: true }, delay_ms: { type: integer, minimum: 0, maximum: 60000 } } }
+    DurableEntryPut:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: object
+          required: [encoding, data]
+          properties:
+            encoding: { type: string, const: base64 }
+            data: { type: string, description: Canonical padded Base64 value bytes; empty values are valid. }
+    JobCompletionSubmit:
+      type: object
+      required: [operation_id, input, state]
+      properties:
+        operation_id: { type: string, description: Caller-owned UUID; must equal the Idempotency-Key header and stays stable across retries. }
+        input:
+          type: object
+          required: [queue, queue_incarnation, message_id, delivery_proof]
+          properties:
+            queue: { type: string, description: Exact input Queue name. }
+            queue_incarnation: { type: string, description: Stable Queue identity from the completion delivery, as a decimal string. }
+            message_id: { type: string, description: Delivered message id, as a decimal string. }
+            delivery_proof: { type: string, description: Opaque Base64 proof from the completion delivery; required for new commits, ignored by matched replays. }
+        state:
+          type: object
+          required: [key, expected_version, value]
+          properties:
+            key: { type: string, pattern: '^b64u:[A-Za-z0-9_-]+$', description: Durable state key as a canonical opaque binary identifier. }
+            expected_version: { type: string, description: "0 creates only; a positive value must match the current version exactly, as a decimal string." }
+            value: { type: object, required: [encoding, data], properties: { encoding: { type: string, const: base64 }, data: { type: string } } }
+        outgoing:
+          oneOf:
+            - { type: 'null' }
+            - type: object
+              required: [queue, queue_incarnation, value]
+              properties:
+                queue: { type: string, description: Durable output Queue name. }
+                queue_incarnation: { type: string, description: Output Queue identity, as a decimal string. }
+                value: { type: object, required: [encoding, data], properties: { encoding: { type: string, const: base64 }, data: { type: string } } }

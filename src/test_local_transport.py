@@ -43,6 +43,32 @@ try:
         db.put("direct", b"memory")
         assert db.get("direct") == b"memory"
         assert db.stats()["transport"] == "shared_memory"
+        # Job completion is never reachable through shared memory: the
+        # companion guard must refuse instead of splitting cache and durable
+        # work across instances.
+        try:
+            lc2 = LocalKuttiDB(embed_path=embed, port=7403)
+            lc2.jobs_companion()
+            raise AssertionError("jobs_companion should refuse shared memory")
+        except RuntimeError:
+            pass
+        finally:
+            if "lc2" in dir():
+                lc2.close()
+    # Network fallback exposes the server-coordinated companion. This
+    # server runs without a Queue WAL (cache WAL "-"), so the job family is
+    # unavailable and the call answers the typed unsupported_feature error —
+    # exactly the capability-gating contract.
+    from kuttidb_client import JobUnsupportedFeatureError
+    with LocalKuttiDB(port=7403, unix_path=unix_path) as db:
+        assert db.transport == "unix_socket"
+        companion = db.jobs_companion()
+        assert companion is db._network
+        try:
+            companion.job_consume("some-queue", "some-worker")
+            raise AssertionError("job_consume should be refused")
+        except JobUnsupportedFeatureError:
+            pass
     print("LOCAL TRANSPORT TESTS PASSED")
 finally:
     if proc:

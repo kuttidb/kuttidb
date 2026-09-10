@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(KuttiDB VERSION 0.0.1 LANGUAGES C)
+project(KuttiDB VERSION 0.0.1 LANGUAGES C CXX)
 
 add_compile_definitions(_POSIX_C_SOURCE=200809L _DEFAULT_SOURCE _DARWIN_C_SOURCE)
 
@@ -20,6 +20,8 @@ add_library(kuttidb_core STATIC
     src/embed_kuttidb.c
     src/platform.c
     src/queue.c
+    src/job_state.c
+    src/job_completion.c
     src/stream.c
 )
 target_include_directories(kuttidb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -87,6 +89,20 @@ target_compile_options(exchange_test PRIVATE -Wall -Wextra)
 target_link_libraries(exchange_test PRIVATE Threads::Threads)
 
 add_executable(atomic_test src/test_atomic.c src/queue.c)
+
+add_executable(job_state_test src/test_job_state.c src/job_state.c src/job_completion.c src/queue.c)
+target_compile_options(job_state_test PRIVATE -Wall -Wextra)
+target_link_libraries(job_state_test PRIVATE Threads::Threads)
+
+add_executable(job_completion_test src/test_job_completion.c src/job_state.c src/job_completion.c src/queue.c)
+target_compile_options(job_completion_test PRIVATE -Wall -Wextra)
+target_link_libraries(job_completion_test PRIVATE Threads::Threads)
+
+# The crash matrix is only meaningful with the test-only failpoints enabled.
+add_executable(job_crash_test src/test_job_crash.c src/job_state.c src/job_completion.c src/queue.c)
+target_compile_definitions(job_crash_test PRIVATE KUTTIDB_JOB_FAILPOINTS=1)
+target_compile_options(job_crash_test PRIVATE -Wall -Wextra)
+target_link_libraries(job_crash_test PRIVATE Threads::Threads)
 target_compile_features(atomic_test PRIVATE c_std_11)
 target_compile_options(atomic_test PRIVATE -Wall -Wextra)
 target_link_libraries(atomic_test PRIVATE Threads::Threads)
@@ -111,6 +127,36 @@ target_compile_features(kuttidb-bench PRIVATE c_std_11)
 target_compile_options(kuttidb-bench PRIVATE -Wall -Wextra)
 target_link_libraries(kuttidb-bench PRIVATE Threads::Threads)
 
+# Public C companion client for atomic job completion (network client; the
+# shared-memory embed ABI stays cache-only). TLS support follows the main
+# server's OpenSSL discovery.
+add_library(kuttidb_client SHARED src/kuttidb_client.c)
+target_compile_features(kuttidb_client PUBLIC c_std_11)
+target_compile_options(kuttidb_client PRIVATE -Wall -Wextra)
+target_link_libraries(kuttidb_client PUBLIC Threads::Threads)
+if(OpenSSL_FOUND)
+    target_compile_definitions(kuttidb_client PRIVATE HAVE_OPENSSL)
+    target_link_libraries(kuttidb_client PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+add_executable(job_client_test src/test_job_client_c.c src/kuttidb_client.c)
+target_compile_options(job_client_test PRIVATE -Wall -Wextra)
+target_link_libraries(job_client_test PRIVATE Threads::Threads)
+if(OpenSSL_FOUND)
+    target_compile_definitions(job_client_test PRIVATE HAVE_OPENSSL)
+    target_link_libraries(job_client_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+add_executable(job_client_cpp_test src/test_job_client_cpp.cpp src/kuttidb_client.c)
+target_compile_features(job_client_cpp_test PRIVATE cxx_std_17)
+target_compile_options(job_client_cpp_test PRIVATE -Wall -Wextra)
+target_link_libraries(job_client_cpp_test PRIVATE Threads::Threads)
+
+install(TARGETS kuttidb kuttidb_client
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib)
+install(FILES src/kuttidb_client.h DESTINATION include)
+
 # Release builds add -DNDEBUG, which would compile the assert()-based test
 # bodies — including setup calls with side effects — out of existence: e.g.
 # test_managed_lock.c mints its instance identity inside an assert, and a
@@ -121,7 +167,9 @@ target_link_libraries(kuttidb-bench PRIVATE Threads::Threads)
 foreach(kuttidb_test_target
         core_test platform_test managed_lifecycle_test managed_lock_test
         queue_test queue_failure_test queue_crash_test exchange_test
-        atomic_test stream_test fuzz_test embed_aslr_test)
+        atomic_test job_state_test job_completion_test job_crash_test
+        job_client_test job_client_cpp_test
+        stream_test fuzz_test embed_aslr_test)
     target_compile_options(${kuttidb_test_target} PRIVATE -UNDEBUG)
 endforeach()
 
@@ -135,6 +183,10 @@ add_test(NAME queue_failures COMMAND queue_failure_test)
 add_test(NAME queue_crash COMMAND queue_crash_test)
 add_test(NAME exchange_core COMMAND exchange_test)
 add_test(NAME atomic_core COMMAND atomic_test)
+add_test(NAME job_state_core COMMAND job_state_test)
+add_test(NAME job_completion_core COMMAND job_completion_test)
+add_test(NAME job_crash_matrix COMMAND job_crash_test)
+add_test(NAME job_client_cpp_link COMMAND job_client_cpp_test)
 add_test(NAME stream_core COMMAND stream_test)
 add_test(NAME wal_fuzz COMMAND fuzz_test)
 add_test(NAME embed_aslr COMMAND embed_aslr_test)

@@ -88,6 +88,17 @@ TCP / Unix socket                         embedded trusted-local path
   single sequential log, a record's durability implies every earlier record's,
   so the acknowledgement point is unchanged. A write or fsync failure marks
   the store failed permanently and all durable operations fail closed.
+- Atomic job completion (`--job-completion`) adds the durable-state and
+  receipt indexes (`src/job_state.c`, `src/job_completion.c`) with the Queue
+  WAL as their commit authority (ADR 0002). The total lock order is
+  metadata → per-queue locks (creation order) → job-state lock →
+  job-completion proof lock → WAL lock; the completion commit takes the queue
+  locks twice-visited around a receipt-only pre-check and holds the input
+  queue lock across fence + record fsync + application, so the visibility
+  reaper can never reassign an admitted delivery. Checkpoints emit the
+  store identity, queue incarnations, id high-water marks, live durable
+  state, and unexpired receipts alongside the pre-existing records. See
+  [ATOMIC_JOB_COMPLETION.md](ATOMIC_JOB_COMPLETION.md).
 
 ### Security and locality
 

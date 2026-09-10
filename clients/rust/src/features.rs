@@ -63,6 +63,8 @@ pub const FEATURE_QUEUE_BATCH: u64 = 1 << 12;
 pub const FEATURE_STREAM_COMMIT_BATCH: u64 = 1 << 13;
 pub const FEATURE_STREAM_KEYS: u64 = 1 << 14;
 pub const FEATURE_SERVER_INFO: u64 = 1 << 15;
+/// Atomic job completion (`--job-completion`), opcodes 0x70–0x77.
+pub const FEATURE_JOBS: u64 = 1 << 16;
 
 fn ok(status: u8) -> Result<(), Error> {
     if status == ST_OK {
@@ -81,12 +83,12 @@ fn u32v(v: usize) -> [u8; 4] {
     (v as u32).to_le_bytes()
 }
 
-struct Dec<'a> {
-    b: &'a [u8],
-    i: usize,
+pub(crate) struct Dec<'a> {
+    pub(crate) b: &'a [u8],
+    pub(crate) i: usize,
 }
 impl<'a> Dec<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         if self.i + n > self.b.len() {
             return Err(Error::Server);
         }
@@ -94,16 +96,16 @@ impl<'a> Dec<'a> {
         self.i += n;
         Ok(x)
     }
-    fn u16(&mut self) -> Result<u16, Error> {
+    pub(crate) fn u16(&mut self) -> Result<u16, Error> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
-    fn u32(&mut self) -> Result<u32, Error> {
+    pub(crate) fn u32(&mut self) -> Result<u32, Error> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
-    fn u64(&mut self) -> Result<u64, Error> {
+    pub(crate) fn u64(&mut self) -> Result<u64, Error> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
-    fn done(&self) -> Result<(), Error> {
+    pub(crate) fn done(&self) -> Result<(), Error> {
         if self.i == self.b.len() {
             Ok(())
         } else {

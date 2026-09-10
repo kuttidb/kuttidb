@@ -59,6 +59,30 @@ delivery together: after recovery, both sides exist or neither does. They requir
 cache persistence and durable target queues.
 [Read the commit contract →](docs/design/DURABILITY.md#atomic-cache-plus-message-operations)
 
+**Finish the job. Save the result. Queue what comes next. Together.**
+Atomic job completion goes further: with `--job-completion`, a worker commits a
+version-checked durable state PUT, the input ACK, an optional next message, and
+a retryable receipt as one Queue-WAL commit. Retrying the same completion ID
+returns the original result without repeating its effects — including after a
+restart — while the receipt is retained. Durable state is a fixed, non-evictable
+`durable` keyspace, separate from the evictable cache. (This is distinct from
+`put_and_enqueue`, which writes a payload to the cache and a queue without
+ACKing an input.)
+[Read the guide →](docs/guides/ATOMIC_JOB_COMPLETION.md) ·
+[Design →](docs/design/ATOMIC_JOB_COMPLETION.md)
+
+```python
+db.queue_consumer_register("pdf-worker")
+delivery = db.job_consume("extract-pdf", "pdf-worker")
+intent = delivery.to_intent(state_key="pdf:42", expected_version=0,
+                            state_value=text,
+                            output_queue="index-text",
+                            output_incarnation=out_inc,
+                            output_value=b"pdf:42")
+result = db.job_complete(intent, proof=delivery.proof)
+# No separate ACK: the completion committed state, ACK, output, and receipt.
+```
+
 Also included:
 
 - **Exchanges and routing:** direct, fanout, and topic exchanges, durable bindings,
@@ -296,6 +320,8 @@ ports, and a Prometheus metrics listener. Multi-architecture images cover
 | Document | Contents |
 |---|---|
 | [GETTING_STARTED.md](docs/guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
+| [ATOMIC_JOB_COMPLETION.md](docs/guides/ATOMIC_JOB_COMPLETION.md) | Atomic job completion: durable state, ACK, and the next message in one commit |
+| [CLIENT_FEATURE_MATRIX.md](docs/guides/CLIENT_FEATURE_MATRIX.md) | Per-client feature coverage, method mapping, and transports |
 | [SAAS_DEMO.md](docs/guides/SAAS_DEMO.md) | One-command report demo: cache, background jobs, event replay, and crash recovery |
 | [ARCHITECTURE.md](docs/design/ARCHITECTURE.md) | Engines, storage separation, durability model |
 | [PROTOCOL.md](docs/design/PROTOCOL.md) | Binary wire protocol, CLI flags, limits |
@@ -303,6 +329,7 @@ ports, and a Prometheus metrics listener. Multi-architecture images cover
 | [EXCHANGES.md](docs/messaging/EXCHANGES.md) | Exchange types, routing rules, binding limits |
 | [STREAMS.md](docs/messaging/STREAMS.md) | Partition ordering, offsets, retention, consumer groups |
 | [DURABILITY.md](docs/design/DURABILITY.md) | Acknowledgement points, atomic operations, single-node limits |
+| [ATOMIC_JOB_COMPLETION.md](docs/design/ATOMIC_JOB_COMPLETION.md) | Completion commit authority, receipts, recovery, and checkpoints |
 | [SECURITY.md](docs/SECURITY.md) | Auth, TLS, permissions, threat model |
 | [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
 | [MANAGEMENT_UI_DESIGN_SYSTEM.md](docs/design/MANAGEMENT_UI_DESIGN_SYSTEM.md) | Brand-based console design: tokens, components, layouts, and interaction states |
@@ -336,7 +363,7 @@ A single server, on purpose. The limits are part of the contract:
 | Boundary | What to expect |
 |---|---|
 | **Single-node durability** | Durable modes protect process crashes and clean restarts on a healthy node. They do not protect disk or machine loss. Replication is not implemented. |
-| **At-least-once delivery** | Unfinished work can be redelivered. There is no exactly-once processing guarantee. |
+| **At-least-once delivery** | Unfinished work can be redelivered. There is no exactly-once processing guarantee. (Atomic job completion deduplicates the *commit* by completion ID while its receipt is retained — it is not exactly-once computation.) |
 | **Evictable cache** | Entries may be lost by policy. Cache durability depends on the selected mode. |
 | **Native protocol** | KuttiDB is not a drop-in Redis, RabbitMQ, or Kafka replacement and does not speak their wire protocols. |
 | **Platform support** | macOS and Linux. Windows still requires IOCP, named-pipe, and mapping work. |

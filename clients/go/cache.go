@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -68,16 +69,27 @@ type Client struct {
 // ManagedOptions configures the opt-in local lifecycle. Unix is the
 // owner-only default; TCP is accepted only for a literal IPv4 loopback host.
 // New/NewAuthenticated/NewTLS remain connect-only.
+//
+// The job-completion settings (additive, all optional) are forwarded to the
+// `kuttidb ensure` allowlist; zero/false values keep the server defaults.
+// JobCompletion requires the durable Queue WAL, which the managed launcher
+// always provisions.
 type ManagedOptions struct {
-	DataDir        string
-	Executable     string
-	Transport      string // "unix" (default) or "tcp"
-	Host           string // TCP only; defaults to 127.0.0.1
-	Port           int    // TCP only; defaults to 7379
-	IdleTimeout    time.Duration
-	StartupTimeout time.Duration
-	Token          []byte
-	PoolSize       int
+	DataDir                string
+	Executable             string
+	Transport              string // "unix" (default) or "tcp"
+	Host                   string // TCP only; defaults to 127.0.0.1
+	Port                   int    // TCP only; defaults to 7379
+	IdleTimeout            time.Duration
+	StartupTimeout         time.Duration
+	Token                  []byte
+	PoolSize               int
+	JobCompletion          bool   // enable --job-completion
+	JobStateMaxMemoryMB    int    // 0 = server default (64)
+	JobReceiptsMaxMemoryMB int    // 0 = server default (64)
+	JobReceiptsMaxCount    int    // 0 = server default (100000)
+	JobReceiptRetentionMS  int64  // 0 = server default (86400000)
+	JobCompletionMaxBytes  uint64 // 0 = server default (131072)
 }
 
 type conn struct {
@@ -179,9 +191,23 @@ func NewManaged(options ManagedOptions) (*Client, error) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), options.StartupTimeout+time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, executable, "ensure", "--data-dir", dir, "--listen", endpoint,
+		args := []string{"ensure", "--data-dir", dir, "--listen", endpoint,
 			"--idle-timeout-ms", fmt.Sprintf("%d", options.IdleTimeout.Milliseconds()),
-			"--startup-timeout-ms", fmt.Sprintf("%d", options.StartupTimeout.Milliseconds()), "--json")
+			"--startup-timeout-ms", fmt.Sprintf("%d", options.StartupTimeout.Milliseconds()), "--json"}
+		if options.JobCompletion {
+			args = append(args, "--job-completion")
+		}
+		setting := func(flag string, v uint64) {
+			if v != 0 {
+				args = append(args, flag, strconv.FormatUint(v, 10))
+			}
+		}
+		setting("--job-state-max-memory-mb", uint64(options.JobStateMaxMemoryMB))
+		setting("--job-receipts-max-memory-mb", uint64(options.JobReceiptsMaxMemoryMB))
+		setting("--job-receipts-max-count", uint64(options.JobReceiptsMaxCount))
+		setting("--job-receipt-retention-ms", uint64(options.JobReceiptRetentionMS))
+		setting("--job-completion-max-bytes", options.JobCompletionMaxBytes)
+		cmd := exec.CommandContext(ctx, executable, args...)
 		out, runErr := cmd.Output()
 		if runErr != nil {
 			return nil, fmt.Errorf("kuttidb: managed startup failed: %w", runErr)

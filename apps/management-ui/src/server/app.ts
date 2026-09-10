@@ -8,6 +8,7 @@ import { ConnectionStore, newRequestId } from "./connection-store.js";
 import type { GatewayConfig } from "./config.js";
 import { redact } from "./redaction.js";
 import { TargetPolicyError, validateTarget } from "./target-policy.js";
+import { isAllowedUpstreamRequest, validateJobCompletionResponse } from "./upstream-policy.js";
 
 const sessionCookie = "kuttidb_console";
 const connectionInput = z.object({
@@ -16,7 +17,9 @@ const connectionInput = z.object({
   token: z.string().min(1).max(1_024)
 });
 
-const safeProxyHeaders = new Set(["accept", "content-type", "idempotency-key", "if-match", "x-kuttidb-confirm", "x-kuttidb-request-id"]);
+// if-none-match carries the durable-state create-only precondition
+// (If-None-Match: *) for PUT /keyspaces/durable/entries/{entry_id}.
+const safeProxyHeaders = new Set(["accept", "content-type", "idempotency-key", "if-match", "if-none-match", "x-kuttidb-confirm", "x-kuttidb-request-id"]);
 const safeResponseHeaders = new Set(["content-type", "etag", "retry-after", "cache-control", "x-kuttidb-request-id"]);
 
 export async function buildApp(config: GatewayConfig, staticRoot?: string): Promise<FastifyInstance> {
@@ -83,6 +86,10 @@ export async function buildApp(config: GatewayConfig, staticRoot?: string): Prom
     if (!connection) return reply.code(401).send({ error: { code: "unauthorized", message: "This connection is locked. Enter its token to reconnect." } });
     const relativePath = params["*"];
     if (!isSafeAdminPath(relativePath)) return reply.code(400).send({ error: { code: "validation_failed", message: "Invalid Management API path." } });
+    if (!isAllowedUpstreamRequest(request.method, relativePath)) {
+      request.log.warn({ path: relativePath, method: request.method }, "admin proxy request refused by the upstream allowlist");
+      return reply.code(400).send({ error: { code: "validation_failed", message: "This Management API path or method is not allowed through the console gateway." } });
+    }
     const requestId = typeof request.headers["x-kuttidb-request-id"] === "string" ? request.headers["x-kuttidb-request-id"] : newRequestId();
     const headers = new Headers({ authorization: `Bearer ${connection.token.toString("utf8")}`, "x-kuttidb-request-id": requestId });
     for (const [key, value] of Object.entries(request.headers)) {
@@ -96,6 +103,22 @@ export async function buildApp(config: GatewayConfig, staticRoot?: string): Prom
       for (const [key, value] of response.headers) if (safeResponseHeaders.has(key.toLowerCase())) reply.header(key, value);
       const body = Buffer.from(await response.arrayBuffer());
       if (body.byteLength > 1_048_576) return reply.code(502).send({ error: { code: "response_too_large", message: "The Management API response exceeded the console safety limit." } });
+      // Contract validation for the atomic job completion resources: 64-bit
+      // fields must arrive as decimal strings and proofs inside bounded
+      // envelopes. A violated mutation response is presented as unresolved
+      // (operation_in_doubt) because the durable effect may have committed.
+      if (request.method === "GET" || request.method === "HEAD") {
+        if (validateJobCompletionResponse("GET", relativePath, response.status, safeJson(body)) !== "ok") {
+          request.log.warn({ path: relativePath }, "admin proxy response failed contract validation");
+          return reply.code(502).send({ error: { code: "upstream_contract", message: "The Management API response did not match the console contract." } });
+        }
+      } else {
+        const verdict = validateJobCompletionResponse(request.method, relativePath, response.status, safeJson(body));
+        if (verdict && verdict !== "ok") {
+          request.log.warn({ path: relativePath, method: request.method, reason: verdict }, "admin proxy response failed contract validation");
+          return reply.code(502).send({ error: { code: "operation_in_doubt", message: "The response could not be validated; treat the outcome as unknown and reconcile.", outcome: "unknown" } });
+        }
+      }
       return reply.code(response.status).type(response.headers.get("content-type") ?? "application/json").send(body);
     } catch (error) {
       request.log.warn({ err: redact(error) }, "admin proxy request failed");
@@ -133,6 +156,15 @@ function sendSafeError(reply: { code: (status: number) => { send: (value: unknow
 
 function isSafeAdminPath(path: string): boolean {
   return Boolean(path) && !path.includes("//") && !path.split("/").some((segment) => segment === ".." || segment === ".") && !path.includes("://");
+}
+
+/** Parse a bounded response body as JSON; undefined when not JSON. */
+function safeJson(body: Buffer): unknown {
+  try {
+    return JSON.parse(body.toString("utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 export function productionStaticRoot(): string {

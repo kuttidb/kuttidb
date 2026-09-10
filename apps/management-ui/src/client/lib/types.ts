@@ -1,5 +1,7 @@
 /** Response shapes observed from the live Management API v1. Additive fields are tolerated. */
 
+import type { JobCompletionStatus } from "@/lib/job-completion";
+
 export type StatusShape = {
   uptime_seconds: number;
   ready: boolean;
@@ -13,6 +15,8 @@ export type StatusShape = {
   management: { active_tails: number; active_deliveries: number; active_claims: number; queued_jobs: number; running_jobs: number; mutation_attempts: number; audit_failures: number; rate_limit_rejections: number; operation_in_doubt: number };
   audit: { healthy: boolean };
   persistence_healthy: boolean;
+  /** Present only when the server supports atomic job completion. */
+  job_completion?: JobCompletionStatus;
 };
 
 export type MaintenanceEntry = { engine: string; checkpoint_available: boolean };

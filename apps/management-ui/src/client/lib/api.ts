@@ -56,6 +56,11 @@ export class ApiError extends Error {
       case "audit_unavailable": return "The audit trail is unavailable; all mutations are blocked until it recovers.";
       case "operation_in_doubt": return "The operation outcome is unknown. Reconcile the target before retrying — never repeat blindly.";
       case "delivery_expired": return "This delivery lease expired. Its receipt is now immutable.";
+      case "delivery_not_owned": return "This delivery proof does not own the message delivery. Consume again for a fresh delivery.";
+      case "no_delivery": return "No ready message was available. The queue may be empty or the lease was taken elsewhere.";
+      case "idempotency_key_mismatch": return "The Completion ID must match the Idempotency-Key header. Compose the completion again.";
+      case "request_too_large": return "This operation exceeds the server's configured job-completion size limit.";
+      case "unsupported_feature": return "Atomic job completion is not enabled on this server.";
       case "rate_limited": return "The server rate-limited this action. Wait for the retry window.";
       case "resource_exhausted": return "A server limit from capabilities was reached.";
       case "idempotency_conflict": return "This idempotency key was already used for a different request. Retry with a fresh key.";
@@ -70,6 +75,8 @@ export type AdminRequest = {
   body?: unknown;
   idempotencyKey?: string | undefined;
   ifMatch?: string | undefined;
+  /** Create-only precondition (If-None-Match: *), e.g. durable state PUT. */
+  ifNoneMatch?: string | undefined;
   confirm?: string | undefined;
   accept?: string | undefined;
   signal?: AbortSignal | undefined;
@@ -87,6 +94,7 @@ export async function admin<T = unknown>(profileId: string, path: string, reques
   if (request.body !== undefined) headers["content-type"] = "application/json";
   if (request.idempotencyKey) headers["idempotency-key"] = request.idempotencyKey;
   if (request.ifMatch) headers["if-match"] = request.ifMatch;
+  if (request.ifNoneMatch) headers["if-none-match"] = request.ifNoneMatch;
   if (request.confirm) headers["x-kuttidb-confirm"] = request.confirm;
   if (request.accept) headers["accept"] = request.accept;
   const response = await fetch(`/ui-api/connections/${encodeURIComponent(profileId)}/admin/${path}`, {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Trash2, Send, Inbox, Users, Lock, Eraser } from "lucide-react";
+import { Plus, Trash2, Send, Inbox, Users, Lock, Eraser, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { usePolling } from "@/hooks/use-polling";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { BinaryValue, decodedPreview, encodeDraft, type BinaryField } from "@/components/binary-value";
+import { LeaseCountdown } from "@/components/lease-countdown";
 import { ConfirmDestructive } from "@/components/confirm";
 import { ErrorBanner } from "@/components/error-banner";
 import { CopyId, CursorPager, DetailGrid, EmptyState, LastRefreshed, PageHeader, Section, StateBadge, ConnectionContextLine } from "@/components/shared";
@@ -22,6 +23,8 @@ import { admin, ApiError, list, newIdempotencyKey } from "@/lib/api";
 import { nameFromId } from "@/lib/codec";
 import { formatBytes } from "@/lib/format";
 import { useConnections } from "@/state/connections";
+import { jobCompletionCapability, jobDeliveryAcquisitionSchema, type JobDeliveryAcquisition } from "@/lib/job-completion";
+import { setPendingDelivery, useClearPendingOnDisconnect } from "@/lib/job-intent-store";
 import type { DeliveryDetail, DeliveryReceipt, QueueConsumer, QueueDetail, QueueMessage, QueueSummary } from "@/lib/types";
 
 type MessageStateFilter = "all" | "ready" | "delayed" | "in-flight";
@@ -145,7 +148,7 @@ function DeclareQueueDialog({ open, onOpenChange, profileId, onDone }: { open: b
   );
 }
 
-export function QueueDetailView({ profileId, queueId, onBack }: { profileId: string; queueId: string; onBack: () => void }) {
+export function QueueDetailView({ profileId, queueId, onBack, onComposeCompletion }: { profileId: string; queueId: string; onBack: () => void; onComposeCompletion?: () => void }) {
   const [detail, setDetail] = useState<QueueDetail | null>(null);
   const [etag, setEtag] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -243,6 +246,9 @@ export function QueueDetailView({ profileId, queueId, onBack }: { profileId: str
             <TabsTrigger value="publish"><Send className="size-3.5 mr-1" />Publish</TabsTrigger>
             <TabsTrigger value="deliveries"><Lock className="size-3.5 mr-1" />Deliveries</TabsTrigger>
             <TabsTrigger value="consumers"><Users className="size-3.5 mr-1" />Consumers</TabsTrigger>
+            {detail.durable && (
+              <TabsTrigger value="complete"><CheckCircle2 className="size-3.5 mr-1" />Complete job</TabsTrigger>
+            )}
           </TabsList>
           <TabsContent value="overview">
             <Section title="Queue facts">
@@ -263,6 +269,11 @@ export function QueueDetailView({ profileId, queueId, onBack }: { profileId: str
           <TabsContent value="publish"><PublishTab profileId={profileId} queueId={queueId} onPublished={refresh} /></TabsContent>
           <TabsContent value="deliveries"><DeliveriesTab profileId={profileId} queueId={queueId} onChanged={refresh} /></TabsContent>
           <TabsContent value="consumers"><ConsumersTab profileId={profileId} queueId={queueId} /></TabsContent>
+          {detail.durable && (
+            <TabsContent value="complete">
+              <CompleteJobTab profileId={profileId} queueId={queueId} queueName={detail.name} {...(onComposeCompletion ? { onComposeCompletion } : {})} />
+            </TabsContent>
+          )}
         </Tabs>
       )}
       <ConfirmDestructive
@@ -629,6 +640,185 @@ function ConsumersTab({ profileId, queueId }: { profileId: string; queueId: stri
           onConfirm={() => void unregister(confirmId)}
         />
       )}
+    </Section>
+  );
+}
+
+/**
+ * Deliberate acquisition for atomic job completion: the operator names a
+ * consumer and clicks "Consume for completion". This tab NEVER consumes on
+ * mount, polling, tab selection, or row expansion — the delivery and its
+ * one-use proof are held in browser memory only.
+ */
+export function CompleteJobTab({ profileId, queueId, queueName, onComposeCompletion }: {
+  profileId: string;
+  queueId: string;
+  queueName: string;
+  onComposeCompletion?: () => void;
+}) {
+  const { capabilities, live } = useConnections();
+  const capability = jobCompletionCapability(capabilities.get(profileId));
+  const enabled = Boolean(capability?.enabled);
+  const [consumers, setConsumers] = useState<QueueConsumer[]>([]);
+  const [consumerId, setConsumerId] = useState<string>("");
+  const [newConsumerName, setNewConsumerName] = useState("");
+  const [visibilityMs, setVisibilityMs] = useState("30000");
+  const [delivery, setDelivery] = useState<JobDeliveryAcquisition | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [consumersLoaded, setConsumersLoaded] = useState(false);
+
+  useClearPendingOnDisconnect(profileId, live.has(profileId));
+
+  const loadConsumers = useCallback(async () => {
+    try {
+      const response = await list<QueueConsumer>(profileId, "queue-consumers");
+      setConsumers(response.data);
+    } catch (reason) {
+      setConsumers([]);
+      setError(reason instanceof Error ? reason : new Error(String(reason)));
+    } finally {
+      setConsumersLoaded(true);
+    }
+  }, [profileId]);
+  useEffect(() => { void loadConsumers(); }, [loadConsumers]);
+
+  // Convenience only — selecting a consumer is not consuming; the explicit
+  // button below is the only path that acquires a delivery.
+  useEffect(() => {
+    if (!consumerId && consumers.length > 0) {
+      const first = consumers[0];
+      if (first) setConsumerId(first.id);
+    }
+  }, [consumers, consumerId]);
+
+  const registerConsumer = async () => {
+    setBusy(true); setError(null);
+    try {
+      const response = await admin<{ data: QueueConsumer }>(profileId, "queue-consumers", {
+        method: "POST", idempotencyKey: newIdempotencyKey(), body: { name: newConsumerName.trim() }
+      });
+      toast.success(`Consumer ${newConsumerName.trim()} registered`);
+      setNewConsumerName("");
+      await loadConsumers();
+      setConsumerId(response.json.data.id);
+    } catch (reason) { setError(reason instanceof Error ? reason : new Error(String(reason))); }
+    finally { setBusy(false); }
+  };
+
+  /**
+   * The only path that acquires a completion delivery. Explicit, named,
+   * manual — no automatic consumption anywhere in this view.
+   */
+  const consumeForCompletion = async () => {
+    if (!consumerId) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await admin<unknown>(profileId, `queue-consumers/${consumerId}/deliveries`, {
+        method: "POST",
+        idempotencyKey: newIdempotencyKey(),
+        body: { queue_id: queueId, visibility_ms: Number(visibilityMs) || 30000, mode: "completion" }
+      });
+      const parsed = jobDeliveryAcquisitionSchema.safeParse(response.json);
+      if (!parsed.success) throw new ApiError("upstream_contract", "The completion delivery response was not understood.", 502);
+      setDelivery(parsed.data);
+      toast.success("Delivery acquired for completion");
+    } catch (reason) {
+      setDelivery(null);
+      setError(reason instanceof Error ? reason : new Error(String(reason)));
+    } finally { setBusy(false); }
+  };
+
+  const composeCompletion = () => {
+    if (!delivery) return;
+    setPendingDelivery(profileId, {
+      queue: delivery.delivery.queue,
+      queueId,
+      storeId: delivery.delivery.store_id,
+      queueIncarnation: delivery.delivery.queue_incarnation,
+      messageId: delivery.delivery.message_id,
+      attempts: delivery.delivery.attempts,
+      redelivered: delivery.delivery.redelivered,
+      leaseDeadlineMs: delivery.delivery.lease_deadline_ms,
+      deliveryProof: delivery.delivery.proof,
+      acquiredAt: Date.now()
+    });
+    onComposeCompletion?.();
+  };
+
+  return (
+    <Section title="Consume for completion">
+      <div className="grid gap-3">
+        <p className="text-xs text-muted-foreground">
+          Acquires one message from this durable Queue with a one-use completion proof. Consumption happens only when
+          you click the button — never by opening this page. Hold the delivery in this tab and compose its completion;
+          the commit will ACK it, so never send a separate ACK for it.
+        </p>
+        {!enabled && (
+          <ErrorBanner
+            error={new ApiError("unsupported_feature", capability ? "This server supports atomic job completion but was started without it (--job-completion)." : "This server does not advertise atomic job completion. Completion-capable consumption needs an enabled server.", 503)}
+          />
+        )}
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="grid w-72 gap-1.5">
+            <Label htmlFor="complete-consumer">Consumer</Label>
+            <Select value={consumerId} onValueChange={setConsumerId} disabled={!enabled || consumers.length === 0}>
+              <SelectTrigger id="complete-consumer" aria-label="Named consumer for completion"><SelectValue placeholder={consumers.length === 0 ? "No consumers registered" : "Choose consumer"} /></SelectTrigger>
+              <SelectContent>
+                {consumers.map((consumer) => (
+                  <SelectItem key={consumer.id} value={consumer.id}>{consumer.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="grid w-36 gap-1.5">
+            <Label htmlFor="complete-visibility">Visibility (ms)</Label>
+            <Input id="complete-visibility" value={visibilityMs} onChange={(event) => setVisibilityMs(event.target.value)} inputMode="numeric" className="w-36" />
+          </div>
+          <Button className="ml-auto" onClick={() => void consumeForCompletion()} disabled={!enabled || busy || !consumerId}>
+            <Inbox className="size-4 mr-1" />{busy ? "Consuming…" : "Consume for completion"}
+          </Button>
+        </div>
+        {consumersLoaded && consumers.length === 0 && (
+          <div className="flex flex-wrap items-end gap-2 border px-3 py-2.5">
+            <div className="grid flex-1 gap-1.5">
+              <Label htmlFor="complete-register-consumer">Register a named consumer</Label>
+              <Input id="complete-register-consumer" value={newConsumerName} onChange={(event) => setNewConsumerName(event.target.value)} placeholder="console-operator" spellCheck={false} />
+            </div>
+            <Button variant="outline" onClick={() => void registerConsumer()} disabled={busy || !enabled || newConsumerName.trim().length === 0}>Register</Button>
+          </div>
+        )}
+        {error && <ErrorBanner error={error} />}
+        {delivery && (
+          <div className="grid gap-2 border p-3" data-testid="acquired-delivery">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" className="font-mono text-xs">msg {delivery.delivery.message_id}</Badge>
+              {delivery.delivery.redelivered && <Badge variant="outline" className="text-xs">redelivered</Badge>}
+              <Badge variant="outline" className="font-mono text-xs">attempts {delivery.delivery.attempts}</Badge>
+              <LeaseCountdown leaseDeadlineMs={delivery.delivery.lease_deadline_ms} className="ml-auto text-xs" />
+            </div>
+            <DetailGrid rows={[
+              { label: "Queue", value: delivery.delivery.queue || queueName, mono: true },
+              { label: "Queue ID", value: <CopyId id={queueId} />, mono: true },
+              { label: "Incarnation", value: delivery.delivery.queue_incarnation, mono: true },
+              { label: "Message ID", value: delivery.delivery.message_id, mono: true },
+              { label: "Store ID", value: delivery.delivery.store_id, mono: true }
+            ]} />
+            <p className="text-xs text-muted-foreground">
+              The one-use delivery proof is held in this browser tab's memory only. Compose the completion before the
+              lease expires.
+            </p>
+            <div>
+              <Button onClick={composeCompletion} disabled={busy}>
+                <CheckCircle2 className="size-4 mr-1" />Compose completion
+              </Button>
+            </div>
+          </div>
+        )}
+        {!delivery && (
+          <p className="text-sm text-muted-foreground">No delivery held. Consuming reserves one message under the named consumer's lease.</p>
+        )}
+      </div>
     </Section>
   );
 }

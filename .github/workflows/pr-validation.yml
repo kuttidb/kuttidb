@@ -1,0 +1,135 @@
+# Pull-request validation for the C server and every client surface.
+#
+# The release workflows (release*.yml) run the same gates at tag time; this
+# workflow makes them run on every push/PR touching code so a regression is
+# caught before a tag exists, not after.
+#
+# Coverage follows docs/operations/RELEASE.md#release-gates-atomic-job-completion:
+# core + job completion suites (state, completion, crash matrix with the
+# test-only failpoints), protocol/SDK suites, and per-client job tests.
+# Crash/recovery runs natively on the runner architecture (x86_64 Linux);
+# other matrix cells stay gated by the release process, not this workflow.
+name: PR validation
+
+on:
+  push:
+    branches: ['*']
+    paths-ignore:
+      - 'landing/**'
+      - 'docs/**'
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - 'landing/**'
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch: {}
+
+concurrency:
+  group: pr-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core, jobs, protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build everything
+        run: make -j4
+
+      - name: Core + job completion + crash matrix (make test, C suites)
+        run: |
+          set -e
+          ./core_test
+          ./job_state_test
+          ./job_completion_test
+          make job_crash_test_jobfailpoints
+          ./job_crash_test_jobfailpoints
+          ./queue_test && ./queue_crash_test && ./atomic_test
+
+      - name: Protocol and client suites (Python)
+        run: |
+          set -e
+          tmp=$(mktemp -d)
+          trap 'rm -rf $tmp' EXIT
+          KUTTIDB_JOB_TEST_PORT=0 python3 src/test_job_protocol.py
+          KUTTIDB_JOB_SDK_PORT=0 python3 src/test_job_client.py
+
+      - name: Release CMake build (tests under -UNDEBUG)
+        run: |
+          set -e
+          cmake -S . -B build-pr -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-pr -j4
+          ctest --test-dir build-pr --output-on-failure
+
+  go:
+    name: Go client (incl. job completion)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build and test
+        run: |
+          set -e
+          make -j4 kuttidb
+          cd clients/go
+          go vet ./...
+          go test -run 'TestJobCompletion' -count=1 -v .
+
+  java:
+    name: Java client (incl. job completion)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build and test
+        run: |
+          set -e
+          make -j4 kuttidb
+          cd clients/java
+          mkdir -p target/classes target/test-classes
+          javac -encoding UTF-8 -d target/classes $(find src/main/java -name '*.java')
+          javac -encoding UTF-8 -cp target/classes -d target/test-classes Smoke.java JobSmoke.java
+          java -cp target/classes:target/test-classes JobSmoke
+
+  rust:
+    name: Rust client (incl. job completion)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and test
+        run: |
+          set -e
+          make -j4 kuttidb
+          cd clients/rust
+          cargo test --test job_completion
+
+  node:
+    name: Node.js client (incl. job completion)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build and test
+        run: |
+          set -e
+          make -j4 kuttidb
+          cd clients/nodejs
+          node job_smoke.js

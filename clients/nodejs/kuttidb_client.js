@@ -15,6 +15,7 @@ const net = require("net");
 const tls = require("tls");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
@@ -41,6 +42,9 @@ const OP = {
   STREAM_GROUP_LAG: 0x66, STREAM_APPEND_BATCH: 0x67, STREAM_GROUP_LEAVE: 0x68,
   STREAM_LIST: 0x69, STREAM_GROUP_LIST: 0x6a,
   STREAM_COMMIT_BATCH: 0x6b, STREAM_FETCH_KEYS: 0x6c,
+  JOB_CONSUME: 0x70, JOB_COMPLETE: 0x71, JOB_RECEIPT: 0x72, STATE_GET: 0x73,
+  STATE_PUT: 0x74, STATE_DELETE: 0x75, DURABLE_OPERATION: 0x76,
+  QUEUE_MANIFEST: 0x77,
 };
 
 const STATUS_OK = 0x00, STATUS_MISS = 0x01, STATUS_ERR = 0x02;
@@ -58,6 +62,7 @@ const CAP = {
   QUEUE_BATCH: 1n << 12n, STREAM_COMMIT_BATCH: 1n << 13n,
   STREAM_KEYS: 1n << 14n,
   SERVER_INFO: 1n << 15n,
+  JOBS: 1n << 16n,
 };
 
 class KuttiDBError extends Error {}
@@ -91,6 +96,238 @@ function probeTcp(host, port) {
     socket.once("connect", () => { socket.destroy(); resolve(); });
     socket.once("error", (error) => { socket.destroy(); reject(error); });
   });
+}
+
+// ---- atomic job completion: errors -----------------------------------------
+// The native error envelope for the new opcodes is [code:1][outcome:1]
+// [detail]. The outcome byte separates "definitely not committed" from
+// "unknown" (a possibly committed append whose durability could not be
+// resolved): never conflate a conflict, an absence, and an unknown outcome.
+
+const JOB_STATUS_CODES = {
+  1: "unsupported_feature", 2: "validation_failed", 3: "request_too_large",
+  4: "idempotency_conflict", 5: "state_version_conflict", 6: "delivery_expired",
+  7: "delivery_not_owned", 8: "resource_exhausted", 9: "operation_in_progress",
+  10: "operation_in_doubt", 11: "persistence_unavailable", 12: "not_found",
+};
+
+class KuttiDBJobError extends KuttiDBError {
+  /** code is the stable wire name, outcome is "not_committed" or "unknown",
+   * and detail carries the server's optional text. On an unknown outcome the
+   * original intent (operation id and semantic request) must be preserved
+   * for reconciliation; the receipt lookup (jobCompletion) is the safe next
+   * step. */
+  constructor(code, outcome, detail = null) {
+    const name = JOB_STATUS_CODES[code] || `code_${code}`;
+    const resolved = outcome ? "unknown" : "not_committed";
+    const text = detail && detail.length ? detail.toString() : null;
+    super(`job operation failed: ${name} (${resolved})` + (text ? `: ${text}` : ""));
+    this.code = name;
+    this.outcome = resolved;
+    this.detail = text;
+  }
+}
+
+class JobUnsupportedFeatureError extends KuttiDBJobError {}
+class JobValidationFailedError extends KuttiDBJobError {}
+class JobRequestTooLargeError extends KuttiDBJobError {}
+class JobIdempotencyConflictError extends KuttiDBJobError {}
+class JobStateVersionConflictError extends KuttiDBJobError {}
+class JobDeliveryExpiredError extends KuttiDBJobError {}
+class JobDeliveryNotOwnedError extends KuttiDBJobError {}
+class JobResourceExhaustedError extends KuttiDBJobError {}
+class JobOperationInDoubtError extends KuttiDBJobError {}
+class JobPersistenceUnavailableError extends KuttiDBJobError {}
+
+const JOB_ERROR_TYPES = {
+  1: JobUnsupportedFeatureError, 2: JobValidationFailedError,
+  3: JobRequestTooLargeError, 4: JobIdempotencyConflictError,
+  5: JobStateVersionConflictError, 6: JobDeliveryExpiredError,
+  7: JobDeliveryNotOwnedError, 8: JobResourceExhaustedError,
+  10: JobOperationInDoubtError, 11: JobPersistenceUnavailableError,
+};
+
+// ---- atomic job completion: values -----------------------------------------
+// 64-bit wire identity/version fields are BigInt; the JSON intent encoding
+// carries them as lossless decimal strings and byte spans as base64.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function uuidString(bytes) {
+  const h = bytes.toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+function uuidBytes(uuid) {
+  const hex = typeof uuid === "string" ? uuid.toLowerCase() : "";
+  if (!UUID_RE.test(hex)) throw new KuttiDBError("operation id must be 16 bytes or a UUID string");
+  return Buffer.from(hex.replace(/-/g, ""), "hex");
+}
+
+// RFC 4122 v4 identity from 16 random bytes (dependency-free). The caller
+// owns the operation id: it is generated ONCE at intent composition and
+// must be preserved across retries.
+function randomOperationId() {
+  const b = crypto.randomBytes(16);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  return b;
+}
+
+function operationIdBytes(operationId) {
+  if (operationId == null) return randomOperationId();
+  if (Buffer.isBuffer(operationId) && operationId.length === 16)
+    return Buffer.from(operationId);
+  if (typeof operationId === "string") return uuidBytes(operationId);
+  throw new KuttiDBError("operation id must be 16 bytes or a UUID string");
+}
+
+function toU64(value, what) {
+  const n = BigInt(value);
+  if (n < 0n || n > 0xffffffffffffffffn) throw new KuttiDBError(what);
+  return n;
+}
+
+class JobDelivery {
+  /** Completion-capable delivery. The opaque proof is the only credential;
+   * native owner tokens and delivery tags stay private to the server. The
+   * lease deadline is a wall-clock mirror for display and logging only —
+   * fencing uses the server's monotonic lease. */
+  constructor({ storeId, queue, queueIncarnation, messageId, attempts,
+                redelivered, leaseDeadlineMs, proof, value }) {
+    this.storeId = storeId;                    // Buffer(16): stable store identity
+    this.queue = queue;                        // input queue name
+    this.queueIncarnation = queueIncarnation;  // BigInt, stable across restarts
+    this.messageId = messageId;                // BigInt
+    this.attempts = attempts;                  // number
+    this.redelivered = redelivered;            // boolean
+    this.leaseDeadlineMs = leaseDeadlineMs;    // BigInt wall clock
+    this.proof = proof;                        // Buffer(16), one-use credential
+    this.value = value;                        // Buffer payload
+  }
+
+  /** Compose one completion intent from this delivery. The operation id is
+   * generated here, once (pass operationId to pin your own); persist the
+   * intent before submitting and reuse the exact same intent on retries. */
+  toIntent({ stateKey, expectedVersion = 0, stateValue = Buffer.alloc(0),
+             outputQueue = null, outputIncarnation = 0,
+             outputValue = Buffer.alloc(0), operationId = null } = {}) {
+    if (stateKey == null) throw new KuttiDBError("stateKey is required");
+    return new JobCompletionIntent({
+      operationId: operationIdBytes(operationId),
+      queue: this.queue,
+      queueIncarnation: this.queueIncarnation,
+      messageId: this.messageId,
+      stateKey,
+      expectedVersion,
+      stateValue,
+      outputQueue,
+      outputIncarnation,
+      outputValue,
+    });
+  }
+}
+
+class JobCompletionIntent {
+  /** One stable logical completion: caller-owned operation id plus the full
+   * semantic request. Serializing this object before submission is the
+   * supported recovery path for lost responses; retries must reuse the same
+   * id and the same fields. toJS()/fromJS() are lossless: 64-bit identity
+   * and version fields are decimal strings, byte spans are base64. The
+   * ephemeral delivery proof is deliberately not serialized. */
+  constructor({ operationId, queue, queueIncarnation, messageId, stateKey,
+                expectedVersion, stateValue, outputQueue = null,
+                outputIncarnation = 0, outputValue = Buffer.alloc(0) }) {
+    this.operationId = operationIdBytes(operationId);
+    this.queue = queue;
+    this.queueIncarnation = toU64(queueIncarnation, "invalid queue incarnation");
+    this.messageId = toU64(messageId, "invalid message id");
+    this.stateKey = asBuf(stateKey);
+    this.expectedVersion = toU64(expectedVersion, "invalid expected version");
+    this.stateValue = asBuf(stateValue || Buffer.alloc(0));
+    this.outputQueue = outputQueue == null ? null : String(outputQueue);
+    this.outputIncarnation = toU64(outputIncarnation, "invalid output queue incarnation");
+    this.outputValue = asBuf(outputValue || Buffer.alloc(0));
+  }
+
+  get operationUuid() { return uuidString(this.operationId); }
+
+  toJS() {
+    return {
+      operationId: this.operationUuid,
+      input: { queue: this.queue,
+               queueIncarnation: this.queueIncarnation.toString(),
+               messageId: this.messageId.toString() },
+      state: { key: this.stateKey.toString("base64"),
+               expectedVersion: this.expectedVersion.toString(),
+               value: this.stateValue.toString("base64") },
+      output: this.outputQueue == null ? null :
+        { queue: this.outputQueue,
+          queueIncarnation: this.outputIncarnation.toString(),
+          value: this.outputValue.toString("base64") },
+    };
+  }
+
+  toJSON() { return this.toJS(); }
+
+  static fromJS(data) {
+    const output = data.output;
+    return new JobCompletionIntent({
+      operationId: uuidBytes(data.operationId),
+      queue: data.input.queue,
+      queueIncarnation: BigInt(data.input.queueIncarnation),
+      messageId: BigInt(data.input.messageId),
+      stateKey: Buffer.from(data.state.key, "base64"),
+      expectedVersion: BigInt(data.state.expectedVersion),
+      stateValue: Buffer.from(data.state.value, "base64"),
+      outputQueue: output == null ? null : output.queue,
+      outputIncarnation: output == null ? 0 : BigInt(output.queueIncarnation),
+      outputValue: output == null ? Buffer.alloc(0)
+        : Buffer.from(output.value, "base64"),
+    });
+  }
+}
+
+class JobCompletionResult {
+  /** Immutable original result of one committed completion. replayed may
+   * differ between the first success and a matched retry; every other field
+   * is identical across retries while the receipt is retained. */
+  constructor({ commitId, stateVersion, outputMessageId, completedAtMs,
+                receiptExpiresMs, replayed }) {
+    this.commitId = commitId;                  // BigInt
+    this.stateVersion = stateVersion;          // BigInt
+    this.outputMessageId = outputMessageId;    // BigInt, 0n = no output
+    this.completedAtMs = completedAtMs;        // BigInt wall clock
+    this.receiptExpiresMs = receiptExpiresMs;  // BigInt wall clock
+    this.replayed = replayed;                  // boolean
+  }
+}
+
+class JobMutationReceipt {
+  /** Receipt of one direct durable-state mutation. */
+  constructor({ operationId, kind, commitId, stateVersion, completedAtMs,
+                receiptExpiresMs, replayed }) {
+    this.operationId = operationId;            // Buffer(16)
+    this.kind = kind;                          // "state_put" | "state_delete"
+    this.commitId = commitId;                  // BigInt
+    this.stateVersion = stateVersion;          // BigInt
+    this.completedAtMs = completedAtMs;        // BigInt wall clock
+    this.receiptExpiresMs = receiptExpiresMs;  // BigInt wall clock
+    this.replayed = replayed;                  // boolean
+  }
+}
+
+class JobReceipt {
+  /** Retained receipt of a committed completion, returned by lookup. */
+  constructor({ operationId, commitId, stateVersion, outputMessageId,
+                completedAtMs, receiptExpiresMs }) {
+    this.operationId = operationId;            // Buffer(16)
+    this.commitId = commitId;                  // BigInt
+    this.stateVersion = stateVersion;          // BigInt
+    this.outputMessageId = outputMessageId;    // BigInt
+    this.completedAtMs = completedAtMs;        // BigInt wall clock
+    this.receiptExpiresMs = receiptExpiresMs;  // BigInt wall clock
+  }
 }
 
 // ---- one pipelined connection: frames in, responses resolved in order -----
@@ -305,6 +542,30 @@ class Client {
       const args = ["ensure", "--data-dir", dataDir, "--listen", endpoint,
         "--idle-timeout-ms", String(Math.max(1, Number(options.idleTimeout || options.idle_timeout || 60) * 1000)),
         "--startup-timeout-ms", String(Math.max(1, timeout)), "--json"];
+      // Atomic job completion flags (allowlisted by `ensure`): the boolean
+      // enablement flag takes no value; the budget flags take positive
+      // integers. The durable Queue WAL is the completion commit authority,
+      // so enabling the feature requires an explicit queueWal.
+      if (options.jobCompletion) {
+        const queueWal = options.queueWal || options.queue_wal;
+        if (!queueWal)
+          throw new KuttiDBError("managed jobCompletion requires an explicit queueWal (the durable Queue WAL is the completion commit authority)");
+        args.push("--job-completion", "--queue-wal", String(queueWal));
+      }
+      const jobSettings = [
+        ["jobStateMaxMemoryMb", "--job-state-max-memory-mb", 1],
+        ["jobReceiptsMaxMemoryMb", "--job-receipts-max-memory-mb", 1],
+        ["jobReceiptsMaxCount", "--job-receipts-max-count", 1],
+        ["jobReceiptRetentionMs", "--job-receipt-retention-ms", 1000],
+        ["jobCompletionMaxBytes", "--job-completion-max-bytes", 1],
+      ];
+      for (const [key, flag, minimum] of jobSettings) {
+        const value = options[key];
+        if (value == null) continue;
+        if (!Number.isInteger(value) || value < minimum)
+          throw new KuttiDBError(`managed ${key} must be an integer >= ${minimum}`);
+        args.push(flag, String(value));
+      }
       let response;
       try {
         const result = await execFileAsync(executable, args, { timeout: timeout + 1000, maxBuffer: 8192 });
@@ -1109,6 +1370,233 @@ class Client {
       Buffer.concat([u16(gb.length), gb])), "streamGroupLeave");
   }
 
+  // ---- atomic job completion (durable state + completion) ---------------------
+  _jobErrorFromBody(body) {
+    const code = body.length >= 1 ? body[0] : 0;
+    const outcome = body.length >= 2 ? body[1] : 0;
+    const detail = body.length > 2 ? body.subarray(2) : null;
+    const ErrorType = JOB_ERROR_TYPES[code] || KuttiDBJobError;
+    return new ErrorType(code, outcome, detail);
+  }
+
+  async _jobReq(op, key, payload) {
+    const r = await this._req(op, key, payload);
+    if (r.status === STATUS_ERR) throw this._jobErrorFromBody(r.payload);
+    return r;
+  }
+
+  // Require the feature explicitly rather than assume it: without it the
+  // server answers the typed unsupported_feature envelope and never emulates
+  // the operation with separate writes.
+  async _requireJobs() {
+    const caps = await this.capabilities();
+    if (!(caps.features & CAP.JOBS)) throw new JobUnsupportedFeatureError(1, 0);
+  }
+
+  async queueManifest() {
+    // Additive Queue discovery: stable identity (incarnation), durability,
+    // capacity, and revision per live Queue. Bounded at 256 entries.
+    // Incarnation ids are required to compose completion intents for output
+    // queues and are stable across restarts, changing only when a Queue is
+    // deleted and recreated.
+    await this._requireJobs();
+    const r = this._ok(await this._jobReq(OP.QUEUE_MANIFEST), "queueManifest");
+    if (r.payload.length < 2) throw new KuttiDBError("invalid queueManifest response");
+    const count = r.payload.readUInt16LE(0), queues = [];
+    let at = 2;
+    for (let i = 0; i < count; i++) {
+      if (at + 2 > r.payload.length) throw new KuttiDBError("invalid queueManifest response");
+      const len = r.payload.readUInt16LE(at); at += 2;
+      if (at + len + 41 > r.payload.length) throw new KuttiDBError("invalid queueManifest response");
+      queues.push({ name: r.payload.subarray(at, at + len).toString(),
+        durable: r.payload[at + len] !== 0,
+        incarnation: r.payload.readBigUInt64LE(at + len + 1),
+        depth: r.payload.readBigUInt64LE(at + len + 9),
+        inflight: r.payload.readBigUInt64LE(at + len + 17),
+        maxDepth: r.payload.readBigUInt64LE(at + len + 25),
+        revision: r.payload.readBigUInt64LE(at + len + 33) });
+      at += len + 41;
+    }
+    if (at !== r.payload.length) throw new KuttiDBError("invalid queueManifest response");
+    return queues;
+  }
+
+  async jobConsume(name, consumer, { visibility = 30.0 } = {}) {
+    // Deliver one message with a completion proof. Requires a durable Queue
+    // and a registered named consumer (queueConsumerRegister); the
+    // consumer's stable owner token owns the delivery, so pooled
+    // connections stay interchangeable and a disconnected worker's
+    // deliveries follow their visibility deadlines. The returned proof is
+    // one-use: a committed completion retires it. Closing the connection
+    // does not unregister the consumer.
+    await this._requireJobs();
+    const kb = asBuf(name), gb = asBuf(consumer);
+    this._checkKey(kb);
+    if (!gb.length || gb.length > 255 || visibility < 0)
+      throw new KuttiDBError("invalid jobConsume request");
+    const r = await this._jobReq(OP.JOB_CONSUME, kb,
+      Buffer.concat([u16(gb.length), gb, u64(Math.round(visibility * 1000))]));
+    if (r.status === STATUS_MISS) return null;
+    if (r.payload.length < 61) throw new KuttiDBError("jobConsume failed");
+    return new JobDelivery({
+      storeId: r.payload.subarray(0, 16),
+      queue: name,
+      queueIncarnation: r.payload.readBigUInt64LE(16),
+      messageId: r.payload.readBigUInt64LE(24),
+      attempts: r.payload.readUInt32LE(32),
+      redelivered: r.payload[36] !== 0,
+      leaseDeadlineMs: r.payload.readBigUInt64LE(37),
+      proof: r.payload.subarray(45, 61),
+      value: r.payload.subarray(61),
+    });
+  }
+
+  async jobComplete(intent, proof) {
+    // Submit one atomic completion: durable-state PUT + input ACK + optional
+    // output publish + receipt, committed together. The intent carries the
+    // stable identity and the full semantic request; proof is the opaque
+    // credential from the current jobConsume delivery. On a timeout or
+    // disconnect keep the exact intent and id, then retry the same call or
+    // use jobCompletion to query the receipt — never regenerate the id and
+    // never issue a separate ACK after a success.
+    await this._requireJobs();
+    const pb = asBuf(proof);
+    if (pb.length !== 16) throw new KuttiDBError("delivery proof must be 16 bytes");
+    const outInc = BigInt(intent.outputIncarnation);
+    if (intent.outputQueue != null && outInc === 0n)
+      throw new KuttiDBError("output intent requires its queue incarnation");
+    const q = asBuf(intent.queue), sk = asBuf(intent.stateKey),
+          sv = asBuf(intent.stateValue);
+    this._checkVal(sv);
+    const parts = [intent.operationId, u64(intent.queueIncarnation),
+      u64(intent.messageId), pb, u16(sk.length), sk,
+      u64(intent.expectedVersion), u32(sv.length), sv];
+    if (intent.outputQueue == null) {
+      parts.push(Buffer.from([0]));
+    } else {
+      const oq = asBuf(intent.outputQueue), ov = asBuf(intent.outputValue);
+      this._checkVal(ov);
+      parts.push(Buffer.from([1]), u16(oq.length), oq, u64(outInc),
+        u32(ov.length), ov);
+    }
+    const r = await this._jobReq(OP.JOB_COMPLETE, q, Buffer.concat(parts));
+    if (r.payload.length !== 41) throw new KuttiDBError("jobComplete failed");
+    return new JobCompletionResult({
+      commitId: r.payload.readBigUInt64LE(0),
+      stateVersion: r.payload.readBigUInt64LE(8),
+      outputMessageId: r.payload.readBigUInt64LE(16),
+      completedAtMs: r.payload.readBigUInt64LE(24),
+      receiptExpiresMs: r.payload.readBigUInt64LE(32),
+      replayed: r.payload[40] !== 0,
+    });
+  }
+
+  async jobCompletion(operationId) {
+    // Look up a retained completion receipt by operation id. Authenticated
+    // lookup never requires the (now stale) delivery proof and works after
+    // a restart. A miss means "no retained receipt" — absence is never
+    // proof that the operation never executed.
+    await this._requireJobs();
+    const op = operationIdBytes(operationId);
+    const r = await this._jobReq(OP.JOB_RECEIPT, Buffer.alloc(0), op);
+    if (r.status === STATUS_MISS) return null;
+    if (r.payload.length !== 41) throw new KuttiDBError("jobCompletion lookup failed");
+    return new JobReceipt({
+      operationId: op,
+      commitId: r.payload.readBigUInt64LE(0),
+      stateVersion: r.payload.readBigUInt64LE(8),
+      outputMessageId: r.payload.readBigUInt64LE(16),
+      completedAtMs: r.payload.readBigUInt64LE(24),
+      receiptExpiresMs: r.payload.readBigUInt64LE(32),
+    });
+  }
+
+  async stateGet(key) {
+    // Read one durable-state entry: exact value bytes, its version, and the
+    // commit id that last wrote it. The "durable" keyspace is fixed,
+    // non-evictable, and never expires.
+    await this._requireJobs();
+    const kb = asBuf(key);
+    if (!kb.length || kb.length > MAX_KEY) throw new KuttiDBError("invalid durable state key");
+    const r = await this._jobReq(OP.STATE_GET, kb);
+    if (r.status === STATUS_MISS) return null;
+    if (r.payload.length < 16) throw new KuttiDBError("stateGet failed");
+    return { version: r.payload.readBigUInt64LE(0),
+             commitId: r.payload.readBigUInt64LE(8),
+             value: r.payload.subarray(16) };
+  }
+
+  async statePut(key, value, { expectedVersion = 0, operationId = null } = {}) {
+    // Version-checked direct durable-state PUT with its own receipt.
+    // expectedVersion=0 creates only; a positive value must match the
+    // current version exactly (no unchecked overwrite path exists). The
+    // same operation id may be retried unchanged to reconcile a lost
+    // response; a reused id with different content raises
+    // JobIdempotencyConflictError.
+    await this._requireJobs();
+    const kb = asBuf(key), vb = asBuf(value || Buffer.alloc(0));
+    if (!kb.length || kb.length > MAX_KEY || expectedVersion < 0)
+      throw new KuttiDBError("invalid statePut request");
+    this._checkVal(vb);
+    const op = operationIdBytes(operationId);
+    const r = await this._jobReq(OP.STATE_PUT, kb,
+      Buffer.concat([op, u64(expectedVersion), vb]));
+    if (r.payload.length !== 33) throw new KuttiDBError("statePut failed");
+    return new JobMutationReceipt({
+      operationId: op,
+      kind: "state_put",
+      commitId: r.payload.readBigUInt64LE(0),
+      stateVersion: r.payload.readBigUInt64LE(8),
+      completedAtMs: r.payload.readBigUInt64LE(16),
+      receiptExpiresMs: r.payload.readBigUInt64LE(24),
+      replayed: r.payload[32] !== 0,
+    });
+  }
+
+  async stateDelete(key, { expectedVersion, operationId = null } = {}) {
+    // Version-checked direct durable-state DELETE with its own receipt.
+    // Requires the entry's current positive version. Retrying a committed
+    // delete with the same id returns its retained receipt even though the
+    // entry is already absent; deleting an absent key without a retained
+    // receipt is a definite not-found.
+    await this._requireJobs();
+    const kb = asBuf(key);
+    if (!kb.length || kb.length > MAX_KEY ||
+        !(toU64(expectedVersion, "invalid expected version") > 0n))
+      throw new KuttiDBError("invalid stateDelete request");
+    const op = operationIdBytes(operationId);
+    const r = await this._jobReq(OP.STATE_DELETE, kb,
+      Buffer.concat([op, u64(expectedVersion)]));
+    if (r.status === STATUS_MISS || r.payload.length !== 33)
+      throw new KuttiDBError("stateDelete failed");
+    return new JobMutationReceipt({
+      operationId: op,
+      kind: "state_delete",
+      commitId: r.payload.readBigUInt64LE(0),
+      stateVersion: r.payload.readBigUInt64LE(8),
+      completedAtMs: r.payload.readBigUInt64LE(16),
+      receiptExpiresMs: r.payload.readBigUInt64LE(24),
+      replayed: r.payload[32] !== 0,
+    });
+  }
+
+  async durableOperation(operationId) {
+    // Look up a retained direct-state mutation receipt (shared
+    // operation-id ledger). kind is "state_put" or "state_delete".
+    await this._requireJobs();
+    const op = operationIdBytes(operationId);
+    const r = await this._jobReq(OP.DURABLE_OPERATION, Buffer.alloc(0), op);
+    if (r.status === STATUS_MISS) return null;
+    if (r.payload.length !== 33) throw new KuttiDBError("durableOperation lookup failed");
+    const kind = { 2: "state_put", 3: "state_delete" }[r.payload[0]] ||
+      `kind_${r.payload[0]}`;
+    return { kind,
+             commitId: r.payload.readBigUInt64LE(1),
+             stateVersion: r.payload.readBigUInt64LE(9),
+             completedAtMs: r.payload.readBigUInt64LE(17),
+             receiptExpiresMs: r.payload.readBigUInt64LE(25) };
+  }
+
   async close() {
     this.closed = true;
     const all = this.idle;
@@ -1119,4 +1607,14 @@ class Client {
   }
 }
 
-module.exports = { Client, KuttiDBError, OP, CAP };
+module.exports = {
+  Client, KuttiDBError,
+  KuttiDBJobError,
+  JobUnsupportedFeatureError, JobValidationFailedError, JobRequestTooLargeError,
+  JobIdempotencyConflictError, JobStateVersionConflictError,
+  JobDeliveryExpiredError, JobDeliveryNotOwnedError, JobResourceExhaustedError,
+  JobOperationInDoubtError, JobPersistenceUnavailableError,
+  JobDelivery, JobCompletionIntent, JobCompletionResult, JobMutationReceipt,
+  JobReceipt,
+  OP, CAP,
+};

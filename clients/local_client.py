@@ -3,6 +3,15 @@
 `LocalKuttiDB` first attempts CEMBv3 shared memory when `embed_path` is given.
 If the region is unavailable or cannot be attached, it opens the normal TCP/TLS
 client instead. It never changes transport after an operation has started.
+
+Durable work (atomic job completion) always goes through the server via the
+native network client: the shared-memory region is a cache ABI and has no
+queue delivery/commit coordinator. Access it through the explicit
+:attr:`jobs` companion — the same connection this class uses when it fell
+back to the network — never by writing completion state through shared
+memory. :meth:`jobs_companion` raises when only the shared-memory transport
+is active, so a caller can never silently split cache and durable work
+across different instances.
 """
 
 from __future__ import annotations
@@ -52,6 +61,55 @@ class LocalKuttiDB:
                                     server_hostname=server_hostname,
                                     unix_path=unix_path, server=server)
         self.transport = "unix_socket" if unix_path else "tcp"
+
+    def jobs_companion(self):
+        """Explicit server-coordinated client for atomic job completion.
+
+        Returns the underlying network :class:`KuttiDBClient` (the one this
+        local client already talks to, so cache and durable work share one
+        instance). Raises ``RuntimeError`` when the active transport is
+        shared memory — open the local client without ``embed_path`` (or
+        attach a real server endpoint) to use job completion."""
+        if self._network is None:
+            raise RuntimeError(
+                "LocalKuttiDB is using shared memory for cache operations; "
+                "atomic job completion requires the server-coordinated "
+                "network client. Construct LocalKuttiDB without embed_path "
+                "(or with server=/unix_path= pointing at the same instance).")
+        return self._network
+
+    @property
+    def job_consume(self):
+        """Forwarded to :meth:`jobs_companion` (see that method's guard)."""
+        return self.jobs_companion().job_consume
+
+    @property
+    def job_complete(self):
+        return self.jobs_companion().job_complete
+
+    @property
+    def job_completion(self):
+        return self.jobs_companion().job_completion
+
+    @property
+    def state_get(self):
+        return self.jobs_companion().state_get
+
+    @property
+    def state_put(self):
+        return self.jobs_companion().state_put
+
+    @property
+    def state_delete(self):
+        return self.jobs_companion().state_delete
+
+    @property
+    def durable_operation(self):
+        return self.jobs_companion().durable_operation
+
+    @property
+    def queue_manifest(self):
+        return self.jobs_companion().queue_manifest
 
     def put(self, key, value, ttl=None):
         if self._direct:

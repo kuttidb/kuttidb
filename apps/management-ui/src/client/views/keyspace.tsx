@@ -18,11 +18,59 @@ import { ConnectionContextLine, CursorPager, CopyId, LastRefreshed, PageHeader, 
 import { admin, ApiError, list, newIdempotencyKey } from "@/lib/api";
 import { base64FromUtf8, isValidB64uId, nameFromId, idFromName } from "@/lib/codec";
 import { formatBytes, formatRelative } from "@/lib/format";
+import { useConnections } from "@/state/connections";
+import { DurableStateBrowser } from "@/views/durable-state";
 import type { KeyspaceEntry, KeyspaceEntrySummary, KeyspaceInfo } from "@/lib/types";
 
 type ExpiresFilter = "all" | "present" | "none";
 
-export function KeyspaceView({ profileId }: { profileId: string }) {
+/**
+ * The Keyspace destination covers the default cache AND the `durable` state
+ * keyspace of atomic job completion. The selector — never a merged table —
+ * keeps Durable state clearly separate from the evictable default cache, and
+ * the cache stays the default selection.
+ */
+export function KeyspaceView({ profileId, keyspaceId = "default", onKeyspaceChange }: {
+  profileId: string;
+  keyspaceId?: "default" | "durable";
+  onKeyspaceChange?: (keyspaceId: "default" | "durable") => void;
+}) {
+  if (keyspaceId === "durable") {
+    return (
+      <div>
+        <div className="mb-4 flex flex-wrap items-end gap-2">
+          <KeyspaceSelector keyspaceId={keyspaceId} {...(onKeyspaceChange ? { onKeyspaceChange } : {})} />
+        </div>
+        <DurableStateBrowser profileId={profileId} />
+      </div>
+    );
+  }
+  return <DefaultKeyspaceView profileId={profileId} keyspaceId={keyspaceId} {...(onKeyspaceChange ? { onKeyspaceChange } : {})} />;
+}
+
+function KeyspaceSelector({ keyspaceId, onKeyspaceChange }: {
+  keyspaceId: "default" | "durable";
+  onKeyspaceChange?: (keyspaceId: "default" | "durable") => void;
+}) {
+  return (
+    <div className="grid gap-1.5">
+      <Label htmlFor="keyspace-destination">Keyspace</Label>
+      <Select value={keyspaceId} onValueChange={(value) => onKeyspaceChange?.(value === "durable" ? "durable" : "default")}>
+        <SelectTrigger id="keyspace-destination" className="w-72"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="default">default — cache (evictable, TTL)</SelectItem>
+          <SelectItem value="durable">Durable state — atomic job completion</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function DefaultKeyspaceView({ profileId, keyspaceId, onKeyspaceChange }: {
+  profileId: string;
+  keyspaceId: "default" | "durable";
+  onKeyspaceChange?: (keyspaceId: "default" | "durable") => void;
+}) {
   const [keyspace, setKeyspace] = useState<KeyspaceInfo | null>(null);
   const [entries, setEntries] = useState<KeyspaceEntrySummary[]>([]);
   const [meta, setMeta] = useState<{ nextCursor: string | null; weak: boolean } | null>(null);
@@ -57,6 +105,9 @@ export function KeyspaceView({ profileId }: { profileId: string }) {
 
   return (
     <div>
+      <div className="mb-4 flex flex-wrap items-end gap-2">
+        <KeyspaceSelector keyspaceId={keyspaceId} {...(onKeyspaceChange ? { onKeyspaceChange } : {})} />
+      </div>
       <PageHeader
         title="Keyspace"
         description="Default keyspace entries. Listing is metadata-only and weakly consistent; cursors expire after ten minutes and on server restart."

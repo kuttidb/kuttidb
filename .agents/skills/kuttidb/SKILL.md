@@ -17,7 +17,9 @@ API. One server, one data directory, macOS and Linux only.
 | `src/server.c` | Server CLI parsing, event loops, metrics/ready HTTP |
 | `src/managed_launcher.c` | `kuttidb ensure` managed local launcher |
 | `src/embed.h`, `src/kuttidb.h` | C embedded shared-memory and core library API |
-| `clients/python/kuttidb/` | Reference Python SDK (`client.py` is canonical) |
+| `src/kuttidb_client.py` | Canonical Python SDK source (`clients/python/prepare.py` copies it into the package; the staged `client.py` is generated, never edit it directly) |
+| `src/job_state.c/.h`, `src/job_completion.c/.h` | Durable state, receipts, and atomic job completion core |
+| `src/kuttidb_client.h/.c` | Public C companion client (`libkuttidb_client`; network jobs, not shared memory) |
 | `clients/nodejs/`, `clients/go/`, `clients/java/`, `clients/rust/` | Other SDKs |
 | `openapi/management-v1.yaml` | Versioned Management API contract |
 | `docs/design/PROTOCOL.md` | Binary wire protocol, CLI flags, limits |
@@ -72,6 +74,12 @@ Unknown args print usage and exit `2`. `--help` and `--features` exit `0`.
 | `--threads N` | min(CPUs, 4) | 1..64 event loops |
 | `--embed-region-mb N` | `1024` | Sparse embed region size; minimum 16 |
 | `--queue-wal PATH\|-` | `<WAL>.queues` | Durable queue WAL; `-` disables durable declarations (non-durable queues still allowed) |
+| `--job-completion` | off | Enables atomic job completion + the `durable` state keyspace; requires a durable Queue WAL (refuses otherwise with exit 2). Capability bit 16. |
+| `--job-state-max-memory-mb N` | `64` | 1..65536; reaching it rejects new state growth, never evicts. |
+| `--job-receipts-max-memory-mb N` | `64` | 1..65536; receipt/index budget, never evicts unexpired receipts. |
+| `--job-receipts-max-count N` | `100000` | 1..100000000; additional receipt count ceiling. |
+| `--job-receipt-retention-ms N` | `86400000` | 1000..315360000000; per-receipt retry window assigned at commit. |
+| `--job-completion-max-bytes N` | `131072` | 1024..67108864; aggregate canonical operation bound (state + completion). |
 | `--stream-wal PATH\|-` | `<WAL>.streams` | Durable stream WAL; `-` disables stream declarations (streams are durable-only — no volatile fallback) |
 | `--no-tcp` | off | Disable the TCP listener (Unix/embed only) |
 
@@ -129,6 +137,9 @@ kuttidb ensure --data-dir /abs/path/data --listen /abs/path/data/kuttidb.sock --
   `--admin-token-file`, `--admin-allow-origin`, `--admin-tls-cert`,
   `--admin-tls-key`, `--admin-audit-log`, `--admin-max-clients`,
   `--admin-max-tail-clients`, `--admin-session-limit`, `--admin-job-limit`,
+  `--job-completion` (boolean), `--job-state-max-memory-mb`,
+  `--job-receipts-max-memory-mb`, `--job-receipts-max-count`,
+  `--job-receipt-retention-ms`, `--job-completion-max-bytes`,
   plus `--idle-timeout-ms`, `--startup-timeout-ms`,
   `--startup-orphan-timeout-ms`, `--json`.
 - JSON result: `{"status": "started"|"existing"|"starting", "instance_id":
@@ -148,18 +159,26 @@ Binary, little-endian, request/response over TCP or Unix; pipelining is safe.
 When auth is configured, `AUTH` must be the first request on every connection.
 
 - Statuses: `0x00` OK/HIT, `0x01` MISS, `0x02` ERROR. `0x02` is fail-closed:
-  treat it as "the durable effect did not happen".
+  treat it as "the durable effect did not happen" — legacy atomic ops
+  (`0x40`–`0x43`) can be in doubt across an interrupted commit window, and the
+  job family (0x70+) carries a typed `[code:1][outcome:1][detail]` error body
+  (`outcome`: 0 `not_committed`, 1 `unknown`).
 - Layout: `[op:1][klen:2][vlen:4][key][value]`; max key 65535 bytes; values
   binary, server limit 64 MiB by default.
 - Opcode ranges: `0x01`–`0x0C` cache/AUTH/HEALTH/CAPABILITIES/SERVER_INFO,
   `0x11`–`0x13` KV batches, `0x20`–`0x2F` queues, `0x30`–`0x33` exchanges,
   `0x40`–`0x43` atomic cache+message, `0x50`–`0x54` single-flight/SWR,
-  `0x60`–`0x6C` streams. Details in `docs/design/PROTOCOL.md`.
+  `0x60`–`0x6C` streams, `0x70`–`0x77` atomic job completion (capability bit
+  16, protocol 1.8+). Details in `docs/design/PROTOCOL.md`.
 - `CAPABILITIES` returns a feature bitset; clients should require absent
   features explicitly rather than assume.
 - `STATS` returns JSON with `mem_bytes`, `allocated_bytes`, `wal_failed`,
   `event_loops`, `event_backend` (`kqueue`/`epoll`), `durability`, queue /
-  exchange / stream counters, and single-flight/SWR counters.
+  exchange / stream counters, single-flight/SWR counters, and — with
+  `--job-completion` — `job_enabled`, `job_state_entries`, `job_state_bytes`,
+  `job_receipts`, `job_receipt_bytes`, `job_completions`,
+  `job_completions_replayed`, `job_id_conflicts`, `job_state_conflicts`,
+  `job_delivery_rejects`, `job_receipt_gc`, and `job_wal_failed`.
 
 ## 5. Clients
 
@@ -222,11 +241,15 @@ KuttiDBClient db = new KuttiDBClient(host, port, authToken, sslContext, poolSize
 ### Method surface (Python names; other SDKs mirror them)
 
 All of Python, Node.js, Go, Java, and Rust cover cache, KV batches, queues,
-exchanges, atomic operations, and streams. Single-flight/SWR is not in the
-CLI. Naming: Node.js camelCase (`putMany`, `queueAck`), Go PascalCase methods
-with options structs (`QueueOptions{…}`), Java builder-style options
-(`new QueueOptions().durable(true)`), Rust snake_case with
-`std::time::Duration` TTLs.
+exchanges, atomic operations, streams, and atomic job completion.
+Single-flight/SWR is not in the CLI. Naming: Node.js camelCase (`putMany`,
+`queueAck`), Go PascalCase methods with options structs (`QueueOptions{…}`),
+Java builder-style options (`new QueueOptions().durable(true)`), Rust
+snake_case with `std::time::Duration` TTLs. The C companion
+(`libkuttidb_client`, `src/kuttidb_client.h`) exposes
+`kuttidb_job_consume`, `kuttidb_job_complete`, `kuttidb_job_completion`,
+`kuttidb_state_get/put/delete`, `kuttidb_durable_operation`,
+`kuttidb_queue_manifest` over TCP/Unix with AUTH and verified TLS.
 
 **Cache:** `put(key, value, ttl=None)` · `get(key)` · `delete(key)` ·
 `stats()` · `health()` · `capabilities()` · `put_many([(k, v), …])` ·
@@ -278,17 +301,57 @@ On generation change with a changed assignment: finish in-flight work for
 partitions still owned, drain the rest; commits for lost partitions are
 refused by the server.
 
+**Atomic job completion (capability bit 16; requires `--job-completion` on the
+server and a durable queue):**
+`queue_manifest()` → per-queue stable identity (incarnation, depth, limits) ·
+`job_consume(queue, consumer, visibility=30.0)` → `JobDelivery`
+(store id, queue + incarnation, stable message id, attempts, redelivered,
+lease deadline, opaque one-use `proof`, payload) ·
+`job_complete(intent, proof)` → `JobCompletionResult(commit_id, state_version,
+output_message_id, completed_at, receipt_expires_at, replayed)` — commits the
+durable-state PUT, the input ACK, the optional output publish, and the receipt
+together; **never ACK separately after a success** ·
+`job_completion(operation_id)` → retained receipt lookup (no proof needed,
+works after restart; miss = "not retained", not "never executed") ·
+`state_get(key)` → `{version, commit_id, value}` ·
+`state_put(key, value, expected_version=…, operation_id=…)` → mutation
+receipt (0 = create-only; positive = exact CAS) ·
+`state_delete(key, expected_version=…, operation_id=…)` → receipt ·
+`durable_operation(operation_id)` → state-mutation receipt lookup.
+Intents are serializable (`to_json`/`from_json` — 64-bit fields as lossless
+decimal strings, bytes as Base64); the operation id is generated once at
+composition and must be reused on retries. Typed errors carry
+`code` + `outcome` (`not_committed` vs `unknown`):
+`unsupported_feature`, `validation_failed`, `request_too_large`,
+`idempotency_conflict`, `state_version_conflict`, `delivery_expired`,
+`delivery_not_owned`, `resource_exhausted`, `operation_in_doubt`,
+`persistence_unavailable`, `not_found` (`operation_in_progress` reserved).
+Guide: `docs/guides/ATOMIC_JOB_COMPLETION.md`.
+
 ### CLI client — `kuttidb-cli`
 
 ```
 put KEY VALUE [-] | get KEY | del KEY | mget KEY… | mput
-queues | topics | groups | stats | health | capabilities
+queues | topics | groups | stats | health | capabilities | manifest
+consumer-register NAME | consumer-unregister NAME
+job-consume QUEUE CONSUMER [--visibility S] [--output FILE]
+job-complete --delivery FILE [--request FILE] | job-completion UUID
+state-get KEY | state-put KEY --expected-version N [--value SPEC]
+state-delete KEY --expected-version N | durable-operation UUID
   -H/--host (env KUTTIDB_HOST)      -p/--port (env KUTTIDB_PORT, default 7379)
   --auth-file (env KUTTIDB_AUTH_FILE)   --tls (env KUTTIDB_TLS=1)
   --ca-file (env KUTTIDB_CA_FILE)   --server-name NAME
+  --unix-path PATH (env KUTTIDB_UNIX)
 ```
 
-Exit codes: `0` ok, `1` miss/not found, `2` connection or server error.
+Value SPEC: `-` stdin, `b64:...` Base64, `@FILE` file bytes, else literal.
+New structured commands emit JSON with lossless decimal-string ids;
+delivery/intent files (`--output`, `--request`) are owner-only `0600` and
+carry the sensitive proof/payload — never printed to routine output.
+
+Exit codes: `0` ok, `1` miss/not found, `2` connection/server/validation,
+`3` conflict (idempotency or state version), `4` unknown outcome
+(`operation_in_doubt`).
 
 ## 6. Client configuration reference
 
@@ -327,8 +390,14 @@ together), `metrics_bind`/`metrics_token_file`, `admin_bind`/
 `admin_token_file`/`admin_audit_log` (both required with `admin_bind`),
 `admin_allow_origins=()`, `admin_tls_cert`/`admin_tls_key`,
 `admin_max_clients`, `admin_max_tail_clients`, `admin_session_limit`,
-`admin_job_limit`. Token values are never passed to the launcher — only file
-paths.
+`admin_job_limit`, `job_completion=False` (requires an explicit `queue_wal`),
+`job_state_max_memory_mb`, `job_receipts_max_memory_mb`,
+`job_receipts_max_count`, `job_receipt_retention_ms`,
+`job_completion_max_bytes`. Token values are never passed to the launcher —
+only file paths. Every SDK's managed options expose the same job settings
+(Node `Client.managed`, Go `ManagedOptions`, Java `ManagedServerOptions`,
+Rust `ManagedOptions`); all forward them through the `kuttidb ensure`
+allowlist.
 
 Executable discovery order: `executable` param → `KUTTIDB_SERVER` env →
 `kuttidb` on PATH. After connecting, the SDK verifies the instance identity

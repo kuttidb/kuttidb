@@ -144,10 +144,22 @@ export function AppShell() {
   const content = (() => {
     switch (view) {
       case "overview": return <OverviewView profileId={activeProfile.id} onNavigate={go} />;
-      case "keyspace": return <KeyspaceView profileId={activeProfile.id} />;
+      case "keyspace":
+        return (
+          <KeyspaceView
+            profileId={activeProfile.id}
+            keyspaceId={segments[3] === "durable" ? "durable" : "default"}
+            onKeyspaceChange={(id) => go(id === "durable" ? ["keyspace", "durable"] : ["keyspace"])}
+          />
+        );
       case "queues":
         return segments[3]
-          ? <QueueDetailView profileId={activeProfile.id} queueId={decodeURIComponent(segments[3])} onBack={() => go(["queues"])} />
+          ? <QueueDetailView
+              profileId={activeProfile.id}
+              queueId={decodeURIComponent(segments[3])}
+              onBack={() => go(["queues"])}
+              onComposeCompletion={() => go(["operations", "atomic"])}
+            />
           : <QueuesView profileId={activeProfile.id} onOpenQueue={(queueId) => go(["queues", queueId])} />;
       case "streams":
         return segments[3]
@@ -162,7 +174,9 @@ export function AppShell() {
           ? <RouterDetailView profileId={activeProfile.id} routerId={decodeURIComponent(segments[3])} onBack={() => go(["routing"])} />
           : <RoutingView profileId={activeProfile.id} onOpenRouter={(routerId) => go(["routing", routerId])} />;
       case "operations":
-        return segments[3] === "maintenance" ? <MaintenanceView profileId={activeProfile.id} /> : <AtomicView profileId={activeProfile.id} />;
+        return segments[3] === "maintenance"
+          ? <MaintenanceView profileId={activeProfile.id} />
+          : <AtomicView profileId={activeProfile.id} onOpenQueues={() => go(["queues"])} />;
       default: return <OverviewView profileId={activeProfile.id} onNavigate={go} />;
     }
   })();

@@ -33,15 +33,26 @@ something else" list matters more than a feature checklist:
 - Use `get_or_load` (or the single-flight opcodes) to replace ad-hoc lock-key
   stampede protection; leases replace Redlock-style patterns.
 - Cache-aside invalidation through pub/sub maps to the atomic
-  `put_and_publish`/`delete_and_publish` operations, which add the
-  durability Redis lacks: after recovery, either both the cache mutation and
-  the event exist, or neither does.
+  `put_and_publish`/`delete_and_publish` operations: after recovery, either
+  both the cache mutation and the event exist, or neither does. (Redis
+  remains a strong choice for rich data structures and its own persistence
+  modes; this comparison is about the combined cache-plus-event commit, not
+  a durability ranking.)
+- When a work item must produce a correctness-critical result, atomic job
+  completion (`--job-completion`) commits the durable state write, the input
+  ACK, the next message, and a retryable receipt together — a durable
+  version of the Redis "finish + record + enqueue" pattern that otherwise
+  needs Lua scripting and careful key design.
 
 ### From RabbitMQ (work queues)
 
 - Declare durable queues with `queue_declare`; publish/consume with manual
   ACK. Visibility timeout replaces RabbitMQ's consumer ack-timeout; NACK with
-  `requeue=false` routes to the declared dead-letter queue.
+  `requeue=false` routes to the declared dead-letter queue. For
+  result-critical jobs, completion-capable consumption + `job_complete`
+  commits the result state, the ACK, and the next message in one durable
+  commit — RabbitMQ's closest analogues (publisher confirms + manual acks)
+  stay separate operations.
 - Exchange types direct/fanout/topic with routing keys map conceptually; the
   topic matcher uses AMQP-style `*`/`#` words with a bounded matcher.
 - What does not carry over: AMQP channels, per-message publisher confirms

@@ -19,6 +19,10 @@ services:
       - "always"
       - "--queue-wal"
       - "/var/lib/kuttidb/queue.wal"
+      # Opt-in atomic job completion: add KUTTIDB_JOB_COMPLETION=1 to the
+      # environment to enable the durable keyspace + completion surface.
+      # The feature appends new record types to queue.wal — back it up
+      # before first use (see docs/operations/DEPLOYMENT.md).
       # Loopback-only scrape: no metrics token required on 127.0.0.1.
       - "--metrics-bind"
       - "127.0.0.1:9099"
@@ -28,6 +32,7 @@ services:
       - kuttidb-token
     environment:
       KUTTIDB_AUTH_SOURCE: /run/secrets/kuttidb-token
+      KUTTIDB_JOB_COMPLETION: ${KUTTIDB_JOB_COMPLETION:-0}
     restart: unless-stopped
 
 secrets:

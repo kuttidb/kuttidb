@@ -4,13 +4,15 @@ import errno
 import ipaddress
 import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 import socket
 import ssl
 import struct
 import subprocess
 import stat
+import uuid as _uuid
+import base64 as _base64
+from dataclasses import dataclass
 from typing import NamedTuple
 
 OP_PUT = 0x01
@@ -64,6 +66,15 @@ OP_STREAM_LIST = 0x69
 OP_STREAM_GROUP_LIST = 0x6a
 OP_STREAM_COMMIT_BATCH = 0x6b
 OP_STREAM_FETCH_KEYS = 0x6c
+# Atomic job completion (capability-gated; docs/design/PROTOCOL.md).
+OP_JOB_CONSUME = 0x70
+OP_JOB_COMPLETE = 0x71
+OP_JOB_RECEIPT = 0x72
+OP_STATE_GET = 0x73
+OP_STATE_PUT = 0x74
+OP_STATE_DELETE = 0x75
+OP_DURABLE_OPERATION = 0x76
+OP_QUEUE_MANIFEST = 0x77
 OP_QUEUE_LIST = 0x2c
 OP_QUEUE_PUBLISH_BATCH = 0x2d
 OP_QUEUE_CONSUME_BATCH = 0x2e
@@ -95,6 +106,7 @@ CAP_ATOMIC_UPDATE = 1 << 10
 CAP_SWR = 1 << 11
 CAP_STREAM_KEYS = 1 << 14
 CAP_SERVER_INFO = 1 << 15
+CAP_JOBS = 1 << 16
 
 
 class StreamAssignment(NamedTuple):
@@ -110,6 +122,160 @@ class StreamAssignment(NamedTuple):
     partitions: list
     generation: int
 
+def _b64e(data: bytes) -> str:
+    return _base64.b64encode(data).decode("ascii")
+
+
+def _b64d(text: str) -> bytes:
+    return _base64.b64decode(text.encode("ascii"))
+
+
+def _opid_bytes(operation_id) -> bytes:
+    """Normalize a caller-owned operation id: 16 raw bytes, a UUID string,
+    or a uuid.UUID. None generates one ONCE at intent composition; retries
+    must retain the same value."""
+    if operation_id is None:
+        return _uuid.uuid4().bytes
+    if isinstance(operation_id, _uuid.UUID):
+        return operation_id.bytes
+    if isinstance(operation_id, str):
+        return _uuid.UUID(operation_id).bytes
+    if isinstance(operation_id, (bytes, bytearray)) and len(operation_id) == 16:
+        return bytes(operation_id)
+    raise KuttiDBError("operation id must be 16 bytes or a UUID")
+
+
+@dataclass(frozen=True)
+class JobDelivery:
+    """Completion-capable delivery. The opaque ``proof`` is the only
+    credential; native owner tokens and delivery tags stay private to the
+    server. The lease deadline is a wall-clock mirror for display and
+    logging only — fencing uses the server's monotonic lease."""
+
+    store_id: bytes
+    queue: str
+    queue_incarnation: int
+    message_id: int
+    attempts: int
+    redelivered: bool
+    lease_deadline_ms: int
+    proof: bytes
+    value: bytes
+
+    def to_intent(self, *, state_key, expected_version: int, state_value: bytes,
+                  output_queue: str | None = None,
+                  output_incarnation: int = 0, output_value: bytes = b"",
+                  operation_id=None) -> "JobCompletionIntent":
+        """Compose one completion intent from this delivery. The operation
+        id is generated here, once; persist it before submitting."""
+        return JobCompletionIntent(
+            operation_id=_opid_bytes(operation_id),
+            queue=self.queue,
+            queue_incarnation=self.queue_incarnation,
+            message_id=self.message_id,
+            state_key=state_key.encode() if isinstance(state_key, str) else bytes(state_key),
+            expected_version=int(expected_version),
+            state_value=bytes(state_value),
+            output_queue=output_queue,
+            output_incarnation=int(output_incarnation),
+            output_value=bytes(output_value),
+        )
+
+
+@dataclass(frozen=True)
+class JobCompletionIntent:
+    """One stable logical completion: caller-owned operation id plus the
+    full semantic request. Serializing this object before submission is the
+    supported recovery path for lost responses; retries must reuse the same
+    id and the same fields. JSON encoding is lossless: 64-bit identity and
+    version fields are decimal strings, byte spans are base64. The
+    ephemeral delivery proof is deliberately not serialized."""
+
+    operation_id: bytes
+    queue: str
+    queue_incarnation: int
+    message_id: int
+    state_key: bytes
+    expected_version: int
+    state_value: bytes
+    output_queue: str | None
+    output_incarnation: int
+    output_value: bytes
+
+    @property
+    def operation_uuid(self) -> str:
+        return str(_uuid.UUID(bytes=self.operation_id))
+
+    def to_json(self) -> dict:
+        return {
+            "operation_id": self.operation_uuid,
+            "input": {"queue": self.queue,
+                      "queue_incarnation": str(self.queue_incarnation),
+                      "message_id": str(self.message_id)},
+            "state": {"key": _b64e(self.state_key),
+                      "expected_version": str(self.expected_version),
+                      "value": _b64e(self.state_value)},
+            "output": None if self.output_queue is None else
+                      {"queue": self.output_queue,
+                       "queue_incarnation": str(self.output_incarnation),
+                       "value": _b64e(self.output_value)},
+        }
+
+    @classmethod
+    def from_json(cls, data: dict) -> "JobCompletionIntent":
+        output = data.get("output")
+        return cls(
+            operation_id=_uuid.UUID(data["operation_id"]).bytes,
+            queue=data["input"]["queue"],
+            queue_incarnation=int(data["input"]["queue_incarnation"]),
+            message_id=int(data["input"]["message_id"]),
+            state_key=_b64d(data["state"]["key"]),
+            expected_version=int(data["state"]["expected_version"]),
+            state_value=_b64d(data["state"]["value"]),
+            output_queue=None if output is None else output["queue"],
+            output_incarnation=0 if output is None else int(output["queue_incarnation"]),
+            output_value=b"" if output is None else _b64d(output["value"]),
+        )
+
+
+@dataclass(frozen=True)
+class JobCompletionResult:
+    """Immutable original result of one committed completion. ``replayed``
+    may differ between the first success and a matched retry; every other
+    field is identical across retries while the receipt is retained."""
+
+    commit_id: int
+    state_version: int
+    output_message_id: int
+    completed_at_ms: int
+    receipt_expires_ms: int
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class JobMutationReceipt:
+    """Receipt of one direct durable-state mutation."""
+
+    operation_id: bytes
+    kind: str
+    commit_id: int
+    state_version: int
+    completed_at_ms: int
+    receipt_expires_ms: int
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class JobReceipt:
+    """Retained receipt of a committed completion, returned by lookup."""
+
+    operation_id: bytes
+    commit_id: int
+    state_version: int
+    output_message_id: int
+    completed_at_ms: int
+    receipt_expires_ms: int
+
 _HDR = struct.Struct("<BHI")
 _U32 = struct.Struct("<I")
 _U16 = struct.Struct("<H")
@@ -118,6 +284,105 @@ _U64 = struct.Struct("<Q")
 
 class KuttiDBError(Exception):
     pass
+
+
+# -- atomic job completion errors -------------------------------------------
+# The native error envelope is [code:1][outcome:1][detail]. The outcome
+# byte separates "definitely not committed" from "unknown" (a possibly
+# committed append whose durability could not be resolved): never conflate
+# a conflict, an absence, and an unknown outcome.
+
+JOB_STATUS_CODES = {
+    1: "unsupported_feature",
+    2: "validation_failed",
+    3: "request_too_large",
+    4: "idempotency_conflict",
+    5: "state_version_conflict",
+    6: "delivery_expired",
+    7: "delivery_not_owned",
+    8: "resource_exhausted",
+    9: "operation_in_progress",
+    10: "operation_in_doubt",
+    11: "persistence_unavailable",
+    12: "not_found",
+}
+
+
+class JobError(KuttiDBError):
+    """Typed atomic-job-completion failure.
+
+    ``code`` is the stable wire name, ``outcome`` is ``"not_committed"``
+    or ``"unknown"``, and ``detail`` carries the server's optional text.
+    On an unknown outcome the original intent (operation id and semantic
+    request) must be preserved for reconciliation; the receipt lookup
+    (:meth:`job_completion`) is the safe next step."""
+
+    def __init__(self, code: int, outcome: int, detail: bytes | None = None):
+        self.code = JOB_STATUS_CODES.get(code, f"code_{code}")
+        self.outcome = "unknown" if outcome else "not_committed"
+        self.detail = detail.decode(errors="replace") if detail else None
+        text = f"job operation failed: {self.code} ({self.outcome})"
+        if self.detail:
+            text += f": {self.detail}"
+        super().__init__(text)
+
+
+class JobUnsupportedFeatureError(JobError):
+    """The server lacks the feature or runs with --job-completion off."""
+
+
+class JobValidationFailedError(JobError):
+    pass
+
+
+class JobRequestTooLargeError(JobError):
+    pass
+
+
+class JobIdempotencyConflictError(JobError):
+    """A retained operation id was reused for a different request. Stop:
+    never generate a replacement id automatically."""
+
+
+class JobStateVersionConflictError(JobError):
+    """The version-checked state write was rejected. Re-read the state and
+    let the application decide; the input delivery is untouched."""
+
+
+class JobDeliveryExpiredError(JobError):
+    """The delivery's visibility lease expired before the commit."""
+
+
+class JobDeliveryNotOwnedError(JobError):
+    """The proof does not belong to the current live delivery. Obtain a
+    valid attempt; never guess credentials."""
+
+
+class JobResourceExhaustedError(JobError):
+    """Admission was refused before any record was appended."""
+
+
+class JobOperationInDoubtError(JobError):
+    """The commit outcome is unknown: the same-id lookup or an exact retry
+    of the preserved intent is the only safe continuation."""
+
+
+class JobPersistenceUnavailableError(JobError):
+    pass
+
+
+_JOB_ERROR_TYPES = {
+    1: JobUnsupportedFeatureError,
+    2: JobValidationFailedError,
+    3: JobRequestTooLargeError,
+    4: JobIdempotencyConflictError,
+    5: JobStateVersionConflictError,
+    6: JobDeliveryExpiredError,
+    7: JobDeliveryNotOwnedError,
+    8: JobResourceExhaustedError,
+    10: JobOperationInDoubtError,
+    11: JobPersistenceUnavailableError,
+}
 
 
 class ManagedServerConfigurationError(KuttiDBError):
@@ -181,6 +446,12 @@ class ServerParams:
     admin_max_tail_clients: int | None = None
     admin_session_limit: int | None = None
     admin_job_limit: int | None = None
+    job_completion: bool = False
+    job_state_max_memory_mb: int | None = None
+    job_receipts_max_memory_mb: int | None = None
+    job_receipts_max_count: int | None = None
+    job_receipt_retention_ms: int | None = None
+    job_completion_max_bytes: int | None = None
 
     def __post_init__(self):
         data_dir = os.path.abspath(os.fspath(self.data_dir))
@@ -193,10 +464,22 @@ class ServerParams:
         if self.durability not in {"periodic", "always"}:
             raise ManagedServerConfigurationError("durability must be periodic or always")
         for name in ("max_memory_mb", "max_value_mb", "max_batch_mb", "max_clients", "threads",
-                     "admin_max_clients", "admin_max_tail_clients", "admin_session_limit", "admin_job_limit"):
+                     "admin_max_clients", "admin_max_tail_clients", "admin_session_limit", "admin_job_limit",
+                     "job_state_max_memory_mb", "job_receipts_max_memory_mb",
+                     "job_receipts_max_count", "job_completion_max_bytes"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, int) or value <= 0):
                 raise ManagedServerConfigurationError(f"{name} must be a positive integer")
+        if not isinstance(self.job_completion, bool):
+            raise ManagedServerConfigurationError("job_completion must be a boolean")
+        if self.job_receipt_retention_ms is not None and \
+                (not isinstance(self.job_receipt_retention_ms, int) or
+                 self.job_receipt_retention_ms < 1000):
+            raise ManagedServerConfigurationError("job_receipt_retention_ms must be an integer >= 1000")
+        if self.job_completion and not self.queue_wal:
+            raise ManagedServerConfigurationError(
+                "job_completion requires an explicit queue_wal (the durable "
+                "Queue WAL is the completion commit authority)")
         if self.fsync_ms is not None and (not isinstance(self.fsync_ms, int) or self.fsync_ms < 0):
             raise ManagedServerConfigurationError("fsync_ms must be a non-negative integer")
         for name in ("auth_file", "queue_wal", "stream_wal", "tls_cert", "tls_key", "metrics_token_file",
@@ -475,6 +758,15 @@ class KuttiDBClient:
         if status == ST_ERR:
             raise KuttiDBError("server error")
         return status, value
+
+    def _recv_job_response(self):
+        """Response reader for the atomic-job-completion family: the typed
+        error envelope ([code:1][outcome:1][detail]) must stay reachable so
+        failures map to typed exceptions instead of a generic error."""
+        status, vlen = struct.unpack("<BI", self._recv_exact(5))
+        if vlen > MAX_VALUE:
+            raise KuttiDBError("invalid response length")
+        return status, (self._recv_exact(vlen) if vlen else b"")
 
     # -- single ops ----------------------------------------------------------
 
@@ -1508,3 +1800,239 @@ class KuttiDBClient:
         if status != ST_OK or len(response) != 8:
             raise KuttiDBError("stream group lag failed")
         return _U64.unpack(response)[0]
+
+    # -- atomic job completion (durable state + completion) -------------------
+
+    def _job_error(self, status: int, body: bytes):
+        code = body[0] if len(body) >= 1 else 0
+        outcome = body[1] if len(body) >= 2 else 0
+        detail = body[2:] if len(body) > 2 else b""
+        error_type = _JOB_ERROR_TYPES.get(code, JobError)
+        return error_type(code, outcome, detail or None)
+
+    def queue_manifest(self) -> list[dict]:
+        """Additive Queue discovery: stable identity (incarnation),
+        durability, capacity, and revision per live Queue. Bounded at 256
+        entries. Incarnation ids are required to compose completion intents
+        for output queues and are stable across restarts, changing only when
+        a Queue is deleted and recreated."""
+        self._send(OP_QUEUE_MANIFEST, b"", b"")
+        status, response = self._recv_job_response()
+        if status != ST_OK:
+            raise KuttiDBError("queue manifest failed")
+        n = struct.unpack("<H", response[:2])[0]
+        out, at = [], 2
+        for _ in range(n):
+            nlen = struct.unpack("<H", response[at:at + 2])[0]
+            at += 2
+            name = response[at:at + nlen].decode()
+            at += nlen
+            durable = bool(response[at]); at += 1
+            inc, depth, inflight, max_depth, revision = struct.unpack(
+                "<QQQQQ", response[at:at + 40])
+            at += 40
+            out.append({"name": name, "durable": durable,
+                        "incarnation": inc, "depth": depth,
+                        "inflight": inflight, "max_depth": max_depth,
+                        "revision": revision})
+        return out
+
+    def job_consume(self, name: str, consumer: str, *,
+                    visibility: float = 30.0) -> JobDelivery | None:
+        """Deliver one message with a completion proof.
+
+        Requires a durable Queue and a registered named consumer
+        (:meth:`queue_consumer_register`); the consumer's stable owner token
+        owns the delivery, so pooled connections stay interchangeable and a
+        disconnected worker's deliveries follow their visibility deadlines.
+        The returned proof is one-use: a committed completion retires it.
+        Closing the connection does not unregister the consumer."""
+        gb = consumer.encode()
+        if not gb or len(gb) > 255 or visibility < 0 or not name:
+            raise KuttiDBError("invalid job consume request")
+        self._send(OP_JOB_CONSUME, name.encode(),
+                   _U16.pack(len(gb)) + gb + _U64.pack(int(visibility * 1000)))
+        status, response = self._recv_job_response()
+        if status == ST_MISS:
+            return None
+        if status == ST_ERR:
+            raise self._job_error(status, response)
+        if status != ST_OK or len(response) < 61:
+            raise KuttiDBError("job consume failed")
+        return JobDelivery(
+            store_id=response[0:16],
+            queue=name,
+            queue_incarnation=struct.unpack("<Q", response[16:24])[0],
+            message_id=struct.unpack("<Q", response[24:32])[0],
+            attempts=struct.unpack("<I", response[32:36])[0],
+            redelivered=bool(response[36]),
+            lease_deadline_ms=struct.unpack("<Q", response[37:45])[0],
+            proof=response[45:61],
+            value=response[61:],
+        )
+
+    def job_complete(self, intent: JobCompletionIntent, *, proof: bytes) \
+            -> JobCompletionResult:
+        """Submit one atomic completion: durable-state PUT + input ACK +
+        optional output publish + receipt, committed together.
+
+        ``intent`` carries the stable identity and the full semantic
+        request; ``proof`` is the opaque credential from the current
+        :meth:`job_consume` delivery. On a timeout or disconnect keep the
+        exact intent and id, then retry the same call or use
+        :meth:`job_completion` to query the receipt — never regenerate the
+        id and never issue a separate ACK after a success."""
+        if len(proof) != 16:
+            raise KuttiDBError("delivery proof must be 16 bytes")
+        if intent.output_queue is not None and intent.output_incarnation == 0:
+            raise KuttiDBError("output intent requires its queue incarnation")
+        q = intent.queue.encode()
+        sk = intent.state_key
+        oq = intent.output_queue.encode() if intent.output_queue else b""
+        value = (intent.operation_id +
+                 _U64.pack(intent.queue_incarnation) +
+                 _U64.pack(intent.message_id) + proof +
+                 _U16.pack(len(sk)) + sk +
+                 _U64.pack(intent.expected_version) +
+                 _U32.pack(len(intent.state_value)) + intent.state_value)
+        if intent.output_queue is None:
+            value += b"\x00"
+        else:
+            value += (b"\x01" + _U16.pack(len(oq)) + oq +
+                      _U64.pack(intent.output_incarnation) +
+                      _U32.pack(len(intent.output_value)) + intent.output_value)
+        self._send(OP_JOB_COMPLETE, q, value)
+        status, response = self._recv_job_response()
+        if status == ST_ERR:
+            raise self._job_error(status, response)
+        if status != ST_OK or len(response) != 41:
+            raise KuttiDBError("job completion failed")
+        commit_id, state_version, output_message_id, completed, expires = \
+            struct.unpack("<QQQQQ", response[:40])
+        return JobCompletionResult(
+            commit_id=commit_id,
+            state_version=state_version,
+            output_message_id=output_message_id,
+            completed_at_ms=completed,
+            receipt_expires_ms=expires,
+            replayed=bool(response[40]),
+        )
+
+    def job_completion(self, operation_id) -> JobReceipt | None:
+        """Look up a retained completion receipt by operation id.
+
+        Authenticated lookup never requires the (now stale) delivery proof
+        and works after a restart. A miss means "no retained receipt" —
+        absence is never proof that the operation never executed."""
+        op = _opid_bytes(operation_id)
+        self._send(OP_JOB_RECEIPT, b"", op)
+        status, response = self._recv_job_response()
+        if status == ST_MISS:
+            return None
+        if status == ST_ERR:
+            raise self._job_error(status, response)
+        if status != ST_OK or len(response) != 41:
+            raise KuttiDBError("job receipt lookup failed")
+        commit_id, state_version, output_message_id, completed, expires = \
+            struct.unpack("<QQQQQ", response[:40])
+        return JobReceipt(operation_id=op, commit_id=commit_id,
+                          state_version=state_version,
+                          output_message_id=output_message_id,
+                          completed_at_ms=completed,
+                          receipt_expires_ms=expires)
+
+    def state_get(self, key) -> dict | None:
+        """Read one durable-state entry: exact value bytes, its version, and
+        the commit id that last wrote it. The ``durable`` keyspace is fixed,
+        non-evictable, and never expires."""
+        kb = key.encode() if isinstance(key, str) else bytes(key)
+        if not kb or len(kb) > MAX_KEY:
+            raise KuttiDBError("invalid durable state key")
+        self._send(OP_STATE_GET, kb)
+        status, response = self._recv_job_response()
+        if status == ST_MISS:
+            return None
+        if status == ST_ERR:
+            raise self._job_error(status, response)
+        if status != ST_OK or len(response) < 16:
+            raise KuttiDBError("durable state read failed")
+        version, commit_id = struct.unpack("<QQ", response[:16])
+        return {"version": version, "commit_id": commit_id,
+                "value": response[16:]}
+
+    def state_put(self, key, value: bytes, *, expected_version: int,
+                  operation_id=None) -> JobMutationReceipt:
+        """Version-checked direct durable-state PUT with its own receipt.
+
+        ``expected_version=0`` creates only; a positive value must match the
+        current version exactly (no unchecked overwrite path exists). The
+        same operation id may be retried unchanged to reconcile a lost
+        response; a reused id with different content raises
+        JobIdempotencyConflictError."""
+        kb = key.encode() if isinstance(key, str) else bytes(key)
+        if not kb or len(kb) > MAX_KEY or expected_version < 0 or \
+                (value is None and False):
+            raise KuttiDBError("invalid durable state put")
+        value = bytes(value or b"")
+        op = _opid_bytes(operation_id)
+        self._send(OP_STATE_PUT, kb,
+                   op + _U64.pack(expected_version) + value)
+        status, response = self._recv_job_response()
+        if status == ST_ERR:
+            raise self._job_error(status, response)
+        if status != ST_OK or len(response) != 33:
+            raise KuttiDBError("durable state put failed")
+        commit_id, version, completed, expires = struct.unpack(
+            "<QQQQ", response[:32])
+        return JobMutationReceipt(operation_id=op, kind="state_put",
+                                  commit_id=commit_id, state_version=version,
+                                  completed_at_ms=completed,
+                                  receipt_expires_ms=expires,
+                                  replayed=bool(response[32]))
+
+    def state_delete(self, key, *, expected_version: int,
+                     operation_id=None) -> JobMutationReceipt:
+        """Version-checked direct durable-state DELETE with its own receipt.
+
+        Requires the entry's current positive version. Retrying a committed
+        delete with the same id returns its retained receipt even though the
+        entry is already absent; deleting an absent key without a retained
+        receipt is a definite not-found (JobError, code "not_found")."""
+        kb = key.encode() if isinstance(key, str) else bytes(key)
+        if not kb or len(kb) > MAX_KEY or expected_version <= 0:
+            raise KuttiDBError("invalid durable state delete")
+        op = _opid_bytes(operation_id)
+        self._send(OP_STATE_DELETE, kb, op + _U64.pack(expected_version))
+        status, response = self._recv_job_response()
+        if status == ST_ERR:
+            raise self._job_error(status, response)
+        if status != ST_OK or len(response) != 33:
+            raise KuttiDBError("durable state delete failed")
+        commit_id, version, completed, expires = struct.unpack(
+            "<QQQQ", response[:32])
+        return JobMutationReceipt(operation_id=op, kind="state_delete",
+                                  commit_id=commit_id, state_version=version,
+                                  completed_at_ms=completed,
+                                  receipt_expires_ms=expires,
+                                  replayed=bool(response[32]))
+
+    def durable_operation(self, operation_id) -> dict | None:
+        """Look up a retained direct-state mutation receipt (shared
+        operation-id ledger). ``kind`` is ``"state_put"`` or
+        ``"state_delete"``."""
+        op = _opid_bytes(operation_id)
+        self._send(OP_DURABLE_OPERATION, b"", op)
+        status, response = self._recv_job_response()
+        if status == ST_MISS:
+            return None
+        if status == ST_ERR:
+            raise self._job_error(status, response)
+        if status != ST_OK or len(response) != 33:
+            raise KuttiDBError("durable operation lookup failed")
+        kind_code = response[0]
+        kind = {2: "state_put", 3: "state_delete"}.get(kind_code, f"kind_{kind_code}")
+        return {"kind": kind,
+                "commit_id": struct.unpack("<Q", response[1:9])[0],
+                "state_version": struct.unpack("<Q", response[9:17])[0],
+                "completed_at_ms": struct.unpack("<Q", response[17:25])[0],
+                "receipt_expires_ms": struct.unpack("<Q", response[25:33])[0]}

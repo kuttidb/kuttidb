@@ -7,6 +7,7 @@
 typedef struct KuttiDB KuttiDB;
 typedef struct QueueStore QueueStore;
 typedef struct StreamStore StreamStore;
+typedef struct JobEngine JobEngine;
 typedef struct AdminHttp AdminHttp;
 
 typedef struct AdminHttpStatus {
@@ -75,6 +76,11 @@ typedef struct AdminHttpConfig {
     KuttiDB *keyspace;
     QueueStore *queues;
     StreamStore *streams;
+    /* Optional atomic job completion engine (present only with
+     * --job-completion); the HTTP layer calls the shared core directly on
+     * it, exactly like the Queue and Stream engines, and never duplicates
+     * WAL logic. NULL disables every job-completion resource. */
+    JobEngine *jobs;
     AdminHttpStatusFn status;
     void *status_ud;
     AdminHttpAuthFailureFn auth_failure;

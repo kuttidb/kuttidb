@@ -30,7 +30,7 @@ else
 EMBED_LIB = libkuttidb_embed.so
 endif
 
-all: kuttidb kuttidb-bench $(EMBED_LIB)
+all: kuttidb kuttidb-bench $(EMBED_LIB) $(CLIENT_LIB)
 
 # The embedded shared library is platform-shaped: a dylib on macOS, an so on
 # Linux/Alpine. CMake produces the same artifacts natively.
@@ -79,14 +79,50 @@ fuzz_test: src/test_fuzz.c src/stream.c src/queue.c src/stream.h src/queue.h
 embed_aslr_test: src/test_embed_aslr.c src/kuttidb.c src/embed.c src/embed_kuttidb.c src/embed.h src/embed_int.h
 	$(CC) $(CFLAGS) -Isrc -o $@ src/test_embed_aslr.c src/kuttidb.c src/embed.c src/embed_kuttidb.c $(LDFLAGS)
 
-kuttidb: src/kuttidb.o src/server.o src/admin_http.o src/admin_json.o src/embed.o src/embed_kuttidb.o src/platform.o src/queue.o src/stream.o src/instance_lock.o src/managed_lifecycle.o src/managed_launcher.o
+kuttidb: src/kuttidb.o src/server.o src/admin_http.o src/admin_json.o src/embed.o src/embed_kuttidb.o src/platform.o src/queue.o src/stream.o src/job_state.o src/job_completion.o src/instance_lock.o src/managed_lifecycle.o src/managed_launcher.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(TLS_LIBS)
+
+job_state_test: src/test_job_state.c src/job_state.c src/queue.c src/job_state.h src/job_completion.h src/job_int.h src/queue.h
+	$(CC) $(CFLAGS) -Isrc -o $@ src/test_job_state.c src/job_state.c src/queue.c $(LDFLAGS)
+
+job_completion_test: src/test_job_completion.c src/job_state.c src/job_completion.c src/queue.c src/job_state.h src/job_completion.h src/job_int.h src/queue.h
+	$(CC) $(CFLAGS) -Isrc -o $@ src/test_job_completion.c src/job_state.c src/job_completion.c src/queue.c $(LDFLAGS)
+
+job_crash_test: src/test_job_crash.c src/job_state.c src/job_completion.c src/queue.c src/job_state.h src/job_completion.h src/job_int.h src/queue.h
+	$(CC) $(CFLAGS) -Isrc -o $@ src/test_job_crash.c src/job_state.c src/job_completion.c src/queue.c $(LDFLAGS)
+
+# The crash matrix is only meaningful with the test-only failpoints; this
+# variant builds them in and is what `make test` executes.
+job_crash_test_jobfailpoints: src/test_job_crash.c src/job_state.c src/job_completion.c src/queue.c src/job_state.h src/job_completion.h src/job_int.h src/queue.h
+	$(CC) $(CFLAGS) -DKUTTIDB_JOB_FAILPOINTS -Isrc -o $@ src/test_job_crash.c src/job_state.c src/job_completion.c src/queue.c $(LDFLAGS)
+
+test_atomic_job_protocol: src/test_job_protocol.py kuttidb
+	./test_atomic_job_protocol.py
 
 libkuttidb_embed.dylib: src/kuttidb.o src/embed.o src/embed_kuttidb.o
 	$(CC) $(CFLAGS) -dynamiclib -Wl,-install_name,@rpath/libkuttidb_embed.dylib -o $@ $^ $(LDFLAGS)
 
 libkuttidb_embed.so: src/kuttidb.c src/embed.c src/embed_kuttidb.c src/kuttidb.h src/kuttidb_int.h src/embed_int.h
 	$(CC) $(CFLAGS) -fPIC -shared -o $@ src/kuttidb.c src/embed.c src/embed_kuttidb.c $(LDFLAGS)
+
+# Public C companion client for the atomic job completion surface.
+ifeq ($(shell uname -s),Darwin)
+CLIENT_LIB = libkuttidb_client.dylib
+else
+CLIENT_LIB = libkuttidb_client.so
+endif
+
+libkuttidb_client.dylib: src/kuttidb_client.c src/kuttidb_client.h
+	$(CC) $(CFLAGS) -dynamiclib -Wl,-install_name,@rpath/libkuttidb_client.dylib -o $@ src/kuttidb_client.c $(LDFLAGS) $(TLS_LIBS)
+
+libkuttidb_client.so: src/kuttidb_client.c src/kuttidb_client.h
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ src/kuttidb_client.c $(LDFLAGS) $(TLS_LIBS)
+
+job_client_test: src/test_job_client_c.c src/kuttidb_client.c src/kuttidb_client.h
+	$(CC) $(CFLAGS) -Isrc -o $@ src/test_job_client_c.c src/kuttidb_client.c $(LDFLAGS) $(TLS_LIBS)
+
+job_client_cpp_test: src/test_job_client_cpp.cpp src/kuttidb_client.c src/kuttidb_client.h
+	$(CXX) -O2 -Wall -Wextra -std=c++17 -Isrc -o $@ src/test_job_client_cpp.cpp src/kuttidb_client.c $(LDFLAGS) $(TLS_LIBS)
 
 kuttidb-bench: src/kuttidb_bench.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
@@ -95,7 +131,7 @@ src/%.o: src/%.c src/kuttidb.h src/kuttidb_int.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/server.o: src/server.c src/kuttidb.h src/kuttidb_int.h src/embed.h src/platform.h src/queue.h src/stream.h src/admin_http.h
-src/admin_http.o: src/admin_http.c src/admin_http.h src/admin_json.h src/kuttidb.h src/queue.h src/stream.h
+src/admin_http.o: src/admin_http.c src/admin_http.h src/admin_json.h src/kuttidb.h src/queue.h src/stream.h src/job_state.h src/job_completion.h
 src/admin_json.o: src/admin_json.c src/admin_json.h
 src/platform.o: src/platform.c src/platform.h
 src/instance_lock.o: src/instance_lock.c src/instance_lock.h
@@ -103,14 +139,17 @@ src/managed_lifecycle.o: src/managed_lifecycle.c src/managed_lifecycle.h
 src/managed_launcher.o: src/managed_launcher.c src/managed_launcher.h src/instance_lock.h
 
 clean:
-	rm -f kuttidb kuttidb_sanitize kuttidb-bench core_test core_test_sanitize platform_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test stream_test stream_test_sanitize fuzz_test fuzz_test_sanitize embed_aslr_test \
+	rm -f libkuttidb_client.dylib libkuttidb_client.so job_client_test job_client_cpp_test
+	rm -f kuttidb kuttidb_sanitize kuttidb-bench core_test core_test_sanitize platform_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test job_state_test job_completion_test job_crash_test job_crash_test_jobfailpoints stream_test stream_test_sanitize fuzz_test fuzz_test_sanitize embed_aslr_test \
 		libkuttidb_embed.dylib libkuttidb_embed.so managed_lifecycle_test managed_lock_test src/*.o clients/java/target
 
 install: all
 	install -m 0755 kuttidb /usr/local/bin/kuttidb
 	install -m 0755 kuttidb-cli /usr/local/bin/kuttidb-cli
+	install -m 0644 src/kuttidb_client.h /usr/local/include/kuttidb_client.h
+	install -m 0755 $(CLIENT_LIB) /usr/local/lib/$(CLIENT_LIB)
 
-test: all core_test platform_test managed_lifecycle_test managed_lock_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test stream_test fuzz_test embed_aslr_test
+test: all core_test platform_test managed_lifecycle_test managed_lock_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test job_state_test job_completion_test job_crash_test stream_test fuzz_test embed_aslr_test
 	@./core_test
 	@./platform_test
 	@./managed_lifecycle_test
@@ -121,6 +160,10 @@ test: all core_test platform_test managed_lifecycle_test managed_lock_test queue
 	@./queue_concurrency_test
 	@./exchange_test
 	@./atomic_test
+	@./job_state_test
+	@./job_completion_test
+	@JOB_FAILPOINT_FLAGS= $(MAKE) --no-print-directory job_crash_test_jobfailpoints
+	@./job_crash_test_jobfailpoints
 	@./stream_test
 	@./fuzz_test
 	@python3 src/test_stream_protocol.py
@@ -130,6 +173,11 @@ test: all core_test platform_test managed_lifecycle_test managed_lock_test queue
 	@python3 src/test_queue_protocol.py
 	@python3 src/test_exchange_protocol.py
 	@python3 src/test_atomic_protocol.py
+	@python3 src/test_job_protocol.py
+	@python3 src/test_job_client.py
+	@$(MAKE) --no-print-directory job_client_test job_client_cpp_test
+	@./job_client_test
+	@./job_client_cpp_test
 	@python3 src/test_stampede_protocol.py
 	@python3 src/test_persistence.py
 	@python3 src/test_ttl.py
@@ -148,6 +196,11 @@ test: all core_test platform_test managed_lifecycle_test managed_lock_test queue
 	cd ../rust && cargo build --quiet && ./target/debug/smoketest; \
 	if command -v node >/dev/null 2>&1; then cd ../nodejs && node smoke.js 7394; else echo "node not installed: skipping Node.js client smoke"; fi; \
 	kill $$server_pid; wait $$server_pid || true
+	@echo "=== atomic job completion client suites ==="
+	cd clients/go && go test -run 'TestJobCompletion' -count=1 .; \
+	cd ../java && mkdir -p target/classes target/test-classes && javac -encoding UTF-8 -d target/classes $$(find src/main/java -name '*.java') && javac -encoding UTF-8 -cp target/classes -d target/test-classes JobSmoke.java && java -cp target/classes:target/test-classes JobSmoke; \
+	cd ../rust && cargo test --test job_completion --quiet; \
+	if command -v node >/dev/null 2>&1; then cd ../nodejs && node job_smoke.js; else echo "node not installed: skipping Node.js job smoke"; fi
 
 # The default C/Python gate deliberately has no SDK toolchain requirement.
 # Run this target in release CI images to exercise the opt-in lifecycle through
@@ -240,3 +293,7 @@ sanitize-server: src/server.c src/admin_http.c src/admin_json.c src/kuttidb.c sr
 		python3 src/test_management_api.py
 
 .PHONY: all clean test managed-sdk-test bench bench-matrix bench-quick bench-single bench-exchange bench-stream bench-queue sanitize sanitize-stream sanitize-fuzz sanitize-tsan-queue sanitize-tsan-server sanitize-server
+
+src/test_job_state.o: src/job_int.h
+src/test_job_completion.o: src/job_int.h
+src/test_job_crash.o: src/job_int.h

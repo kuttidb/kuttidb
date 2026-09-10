@@ -982,6 +982,428 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/keyspaces/durable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read aggregate state for the durable Keyspace (atomic job completion)
+         * @description Only available when the server was started with --job-completion; the response is 404 otherwise. The durable Keyspace is non-evictable, never expires, and its commit authority is the Queue WAL.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Durable Keyspace aggregate state */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/keyspaces/durable/entries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List bounded durable Keyspace entry metadata sorted by key
+         * @description Bounded metadata inventory of the durable state map. The keyset cursor is the b64u entry identifier of the last returned entry and stays valid across restarts, but it must be combined with the same prefix filter.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Bounded result count; no cursor is provided. */
+                    limit?: components["parameters"]["Limit"];
+                    /** @description Exact binary-key prefix */
+                    prefix?: string;
+                    /** @description Keyset position from meta.next_cursor; the entry identifier after which the page starts. */
+                    cursor?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Sorted entry metadata page */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/keyspaces/durable/entries/{entry_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one exact durable Keyspace entry */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    entry_id: components["parameters"]["EntryId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Entry value with its version envelope */
+                200: {
+                    headers: {
+                        /** @description Current durable state version; reuse it as the mutation If-Match value. */
+                        ETag?: string;
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /**
+         * Version-checked durable state PUT through the atomic job completion engine
+         * @description The Idempotency-Key must be a UUID and becomes the core operation id. Use If-None-Match: * for create-only (expected version 0) or If-Match: "s-<version>" for an exact match; missing precondition headers are rejected with 428. HTTP 200 covers both the first commit and a matched replay (replayed: true); the core receipt ledger is authoritative and the process-local idempotency cache is bypassed.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header: {
+                    "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+                    /** @description Create-only precondition (expected version 0). */
+                    "If-None-Match"?: "*";
+                    /** @description Exact current version envelope. */
+                    "If-Match"?: string;
+                };
+                path: {
+                    entry_id: components["parameters"]["EntryId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DurableEntryPut"];
+                };
+            };
+            responses: {
+                /** @description Durable mutation receipt with the new version ETag */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                /** @description Idempotency conflict — this operation id was used for different content */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                412: components["responses"]["PreconditionFailed"];
+                /** @description Operation exceeds the configured job-completion size limit */
+                413: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                428: components["responses"]["PreconditionRequired"];
+                /** @description Durable job engine at capacity */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Operation in doubt (outcome unknown) or persistence unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        /**
+         * Version-checked durable state DELETE through the atomic job completion engine
+         * @description Requires the exact current If-Match version envelope, the exact X-KuttiDB-Confirm: durable-state-delete confirmation, and a UUID Idempotency-Key that becomes the core operation id. Retrying a committed delete returns its retained receipt; deleting an absent entry without a retained receipt is a definite 404.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header: {
+                    "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+                    "If-Match": string;
+                    "X-KuttiDB-Confirm": "durable-state-delete";
+                };
+                path: {
+                    entry_id: components["parameters"]["EntryId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            responses: {
+                /** @description Durable mutation receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+                /** @description Idempotency conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                412: components["responses"]["PreconditionFailed"];
+                428: components["responses"]["PreconditionRequired"];
+                /** @description Operation in doubt (outcome unknown) or persistence unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/job-completions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List bounded retained completion receipts ordered by completion time
+         * @description Bounded inventory of retained completion-kind receipts. The keyset cursor is the b64u encoding of "<completed_at_ms decimal>:<32 hex operation id>"; malformed cursors are rejected with 400 cursor_invalid. A missing receipt means "not retained", never "never executed".
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Bounded result count; no cursor is provided. */
+                    limit?: components["parameters"]["Limit"];
+                    /** @description Keyset position from meta.next_cursor. */
+                    cursor?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Ordered completion-receipt page */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /**
+         * Submit one atomic job completion (state PUT + input ACK + optional output publish)
+         * @description The Idempotency-Key header must equal the body operation_id. The core receipt ledger is consulted first, so a matched retry returns the original receipt with replayed: true and never requires a live delivery proof; expired proofs are rejected only for new commits. HTTP 200 covers both the first commit and a matched replay.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["JobCompletionSubmit"];
+                };
+            };
+            responses: {
+                /** @description Committed completion receipt (first commit or matched replay) */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                /** @description Idempotency conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Durable state version conflict */
+                412: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Operation exceeds the configured job-completion size limit */
+                413: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Durable job engine at capacity */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Operation in doubt (outcome unknown) */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/job-completions/{operation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Look up one retained completion receipt by operation id
+         * @description The lookup never requires the delivery proof and keeps working after a server restart. A 404 means no retained receipt (not retained), never that the operation did not execute. Completion-kind ids only: state mutation ids belong under /durable-operations.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    operation_id: components["parameters"]["OperationId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Retained completion receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/durable-operations/{operation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Look up one retained direct durable-state mutation receipt by operation id
+         * @description Kind-filtered receipt lookup over the shared operation-id ledger (state_put and state_delete kinds). Completion-kind ids return 404 on this path.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    operation_id: components["parameters"]["OperationId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Retained state mutation receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/queue-consumers": {
         parameters: {
             query?: never;
@@ -1126,7 +1548,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Consume one Queue message through a named durable consumer */
+        /**
+         * Consume one Queue message through a named durable consumer
+         * @description The default (standard or omitted mode) returns an opaque Management delivery whose acknowledgement stays inside the Management API. mode: completion returns the stable input identity plus an opaque one-use delivery proof that must be presented to POST /job-completions; the proof is the only credential and native owner tokens are never exposed.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1144,10 +1569,22 @@ export interface paths {
                         queue_id: string;
                         /** @default 30000 */
                         visibility_ms?: number;
+                        /**
+                         * @default standard
+                         * @enum {string}
+                         */
+                        mode?: "standard" | "completion";
                     };
                 };
             };
             responses: {
+                /** @description Completion-capable delivery with stable identity and opaque proof */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 /** @description Opaque delivery receipt and Base64 body */
                 201: {
                     headers: {
@@ -1155,10 +1592,23 @@ export interface paths {
                     };
                     content?: never;
                 };
-                404: components["responses"]["NotFound"];
+                /** @description Queue */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
                 409: components["responses"]["Conflict"];
                 /** @description Delivery registry exhausted */
                 429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Feature unavailable */
+                503: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -3684,8 +4134,13 @@ export interface components {
         Error: {
             error: {
                 /** @enum {string} */
-                code: "bad_request" | "unauthorized" | "forbidden_origin" | "not_found" | "method_not_allowed" | "request_too_large" | "unsupported_media_type" | "validation_failed" | "resource_exhausted" | "rate_limited" | "conflict" | "idempotency_conflict" | "precondition_required" | "precondition_failed" | "persistence_unavailable" | "engine_unavailable" | "audit_unavailable" | "delivery_expired" | "operation_in_doubt" | "internal_error";
+                code: "bad_request" | "unauthorized" | "forbidden_origin" | "not_found" | "method_not_allowed" | "request_too_large" | "unsupported_media_type" | "validation_failed" | "resource_exhausted" | "rate_limited" | "conflict" | "idempotency_conflict" | "idempotency_key_mismatch" | "precondition_required" | "precondition_failed" | "persistence_unavailable" | "engine_unavailable" | "audit_unavailable" | "delivery_expired" | "delivery_not_owned" | "no_delivery" | "unsupported_feature" | "cursor_invalid" | "operation_in_doubt" | "internal_error";
                 message: string;
+                /**
+                 * @description Present only when the durable effect of the operation is unknown (never a definite rollback).
+                 * @enum {string}
+                 */
+                outcome?: "unknown";
                 request_id: string;
             };
         };
@@ -3793,6 +4248,50 @@ export interface components {
             requeue: boolean;
             delay_ms?: number;
         };
+        DurableEntryPut: {
+            value: {
+                /** @constant */
+                encoding: "base64";
+                /** @description Canonical padded Base64 value bytes; empty values are valid. */
+                data: string;
+            };
+        };
+        JobCompletionSubmit: {
+            /** @description Caller-owned UUID; must equal the Idempotency-Key header and stays stable across retries. */
+            operation_id: string;
+            input: {
+                /** @description Exact input Queue name. */
+                queue: string;
+                /** @description Stable Queue identity from the completion delivery */
+                queue_incarnation: string;
+                /** @description Delivered message id */
+                message_id: string;
+                /** @description Opaque Base64 proof from the completion delivery; required for new commits */
+                delivery_proof: string;
+            };
+            state: {
+                /** @description Durable state key as a canonical opaque binary identifier. */
+                key: string;
+                /** @description 0 creates only; a positive value must match the current version exactly, as a decimal string. */
+                expected_version: string;
+                value: {
+                    /** @constant */
+                    encoding: "base64";
+                    data: string;
+                };
+            };
+            outgoing?: null | {
+                /** @description Durable output Queue name. */
+                queue: string;
+                /** @description Output Queue identity */
+                queue_incarnation: string;
+                value: {
+                    /** @constant */
+                    encoding: "base64";
+                    data: string;
+                };
+            };
+        };
     };
     responses: {
         /** @description Missing or invalid bearer token */
@@ -3870,6 +4369,7 @@ export interface components {
         ConsumerId: string;
         RouterId: string;
         DeliveryId: string;
+        OperationId: string;
         IdempotencyKey: string;
     };
     requestBodies: never;

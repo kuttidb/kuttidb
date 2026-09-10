@@ -15,6 +15,9 @@ does not protect against disk, machine, or node destruction.
 | Durable ACK | fsync of the queue WAL ACK record before the response | The message is not removed before its ACK record is durable. |
 | Exchange-routed copy | fsync of the target queue's publish record (single fsync per publish) | Same as a durable queue message, per target queue. |
 | Atomic cache-plus-message operation | fsync of the cache WAL commit marker, which sits between the queue WAL prepare and commit records | Both sides are visible after recovery, or neither is. |
+| Atomic job completion (state PUT + input ACK + optional output + receipt) | fsync of the single queue-WAL `LOG_JOB_COMPLETION` record before the response | All four effects are visible after recovery, or none is. Replay is idempotent; a consumed output is never republished and a newer state value is never overwritten. |
+| Durable state mutation (`durable` keyspace PUT/DELETE) | fsync of the queue-WAL `LOG_JOB_STATE` record before the response | Present after recovery with its durable version; delete/recreate cannot validate an old version (tombstone high-water mark). |
+| Completion receipt | stored in the same commit record; retained until its absolute wall-clock deadline | Same-id retries return the original result while retained; after forgetting, lookup returns "no retained receipt" (never "never executed"). |
 
 Queue and stream durable writes use group fsync: publish and delivery
 records may become visible before the covering fsync lands (in one
@@ -38,6 +41,33 @@ the WALs, then releases ownership locks. It therefore preserves the same
 acknowledgement points in this document as a signal-driven clean shutdown. A
 process crash or forced kill remains a crash case and relies on normal WAL
 recovery instead.
+
+## Atomic job completion
+
+With `--job-completion`, the durable Queue WAL is also the commit authority
+for the `durable` keyspace, operation receipts, and atomic job completion
+(ADR 0002). One CRC-checked `LOG_JOB_COMPLETION` record carries the state
+PUT, the input message id, the output queue with its pre-reserved message id
+and payload, and the receipt metadata; the response is released only after
+that record's fsync — cache `periodic` durability never weakens it because
+the commit never touches the cache WAL. Fencing revalidates the live
+delivery (tag, owner, monotonic lease) under the input queue lock at the
+serialized admission point; the reaper cannot interleave. Retry semantics:
+the same operation id and semantic request replay the original result while
+the receipt is retained (`replayed` may differ, nothing else does); a
+conflicting request for a retained id is a typed `idempotency_conflict`; an
+expired/superseded attempt cannot commit (`delivery_expired` /
+`delivery_not_owned`). A failed append or fsync after an attempted commit
+latches the engine failed and reports `operation_in_doubt` (outcome
+`unknown`) — never a false "nothing happened".
+
+Recovery replays feature records in WAL order without re-checking CAS
+versions or leases, preserves later ACKs/state changes, and reproduces queue
+incarnations and id high-water marks through checkpoints (records
+`LOG_JOB_META` / `LOG_QUEUE_META`). Feature records in a WAL opened with the
+feature disabled refuse startup (never silent truncation); a CRC-valid
+record with an unknown encoding version is an unsupported format, not tail
+corruption. Full design: [ATOMIC_JOB_COMPLETION.md](ATOMIC_JOB_COMPLETION.md).
 
 ## Atomic cache-plus-message operations
 

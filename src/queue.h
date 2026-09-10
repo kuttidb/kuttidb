@@ -23,10 +23,15 @@ enum { EXCHANGE_DIRECT = 0, EXCHANGE_FANOUT = 1, EXCHANGE_TOPIC = 2 };
 typedef struct QueueMessage {
     uint64_t id;           /* durable message ID */
     uint64_t delivery_tag; /* one-use lease token for ACK/NACK */
+    uint64_t owner;        /* native owner token (engine-private; internal C
+                            * struct only, never serialized to clients) */
     void *data;
     uint32_t len;
     uint32_t delivery_count;
     unsigned redelivered : 1;
+    /* Monotonic visibility deadline of this delivery (0 when not
+     * in-flight). Lets callers mirror the lease without re-deriving it. */
+    uint64_t visibility_deadline_ms;
 } QueueMessage;
 
 /* A non-mutating, bounded view of one retained message.  The native delivery
@@ -107,6 +112,23 @@ int queue_delivery_snapshot(QueueStore *store, const char *name, uint32_t name_l
 typedef void (*QueueStatsFn)(const char *name, uint32_t name_len,
                              uint64_t depth, uint64_t inflight, void *ud);
 void queue_foreach_stats(QueueStore *store, QueueStatsFn fn, void *ud);
+
+/* Bounded Queue manifest for additive discovery of stable identities:
+ * incarnation ids, durability, capacity, and revision per live Queue.
+ * Callback data is valid only during the call. */
+typedef struct QueueManifestEntry {
+    const char *name;
+    uint32_t name_len;
+    int durable;
+    uint64_t incarnation;
+    uint64_t depth;
+    uint64_t inflight;
+    uint64_t max_depth;
+    uint64_t revision;
+} QueueManifestEntry;
+typedef void (*QueueManifestFn)(const QueueManifestEntry *entry, void *ud);
+void queue_manifest_foreach(QueueStore *store, QueueManifestFn fn, void *ud,
+                            uint32_t max_entries);
 
 int queue_ack(QueueStore *store, const char *name, uint32_t name_len,
               uint64_t delivery_tag);
@@ -228,6 +250,7 @@ typedef struct QueueConfigSnapshot {
     uint32_t dead_letter_queue_len;
     char dead_letter_queue[QUEUE_NAME_MAX];
     uint64_t revision;
+    uint64_t incarnation; /* stable Queue identity (new on recreation) */
 } QueueConfigSnapshot;
 /* Copy Queue declaration options and revision under the Queue lock. The
  * dead-letter name is byte-exact and valid only in this output structure. */
@@ -248,6 +271,9 @@ int queue_persistence_failed(QueueStore *store);
  * previous WAL stays valid either way). Maintenance calls this periodically;
  * exposed for tests and tooling. */
 int queue_checkpoint_maybe(QueueStore *store);
+/* As queue_checkpoint_maybe, but skips the size heuristic: always rewrites
+ * the WAL (used by maintenance jobs and tests; equally crash-safe). */
+int queue_checkpoint_force(QueueStore *store);
 
 /* ---- Exchanges and routing ----
  *
@@ -397,5 +423,181 @@ int queue_tx_resolve(QueueStore *store, uint64_t tx_id, int committed);
 /* Non-zero when the store has a durable queue WAL (required for atomic
  * transactions). */
 int queue_wal_enabled(QueueStore *store);
+
+/* ---- Atomic job completion support (feature-gated) ----
+ *
+ * The durable Queue WAL is the commit authority for durable state,
+ * operation receipts, and completion operations (ADR 0002). The job engine
+ * (src/job_state.c, src/job_completion.c) owns their indexes; the Queue
+ * engine owns the record framing, replay ordering, queue effects, and
+ * checkpoint emission. All record types are versioned and CRC-checked;
+ * replay distinguishes unsupported feature formats from corruption and
+ * never silently truncates a feature record. */
+
+/* Feature record op codes (the Queue WAL op byte) and their fixed
+ * pseudo-names for payload-self-describing records. */
+enum {
+    QUEUE_WAL_JOB_STATE = 17,
+    QUEUE_WAL_JOB_COMPLETION = 18,
+    QUEUE_WAL_JOB_RECEIPT = 19,
+    QUEUE_WAL_JOB_META = 20,
+    QUEUE_WAL_QUEUE_META = 21
+};
+#define QUEUE_WAL_JOB_STATE_NAME "*job-state"
+#define QUEUE_WAL_JOB_RECEIPT_NAME "*job-receipt"
+#define QUEUE_WAL_JOB_META_NAME "*job-meta"
+#define QUEUE_WAL_JOB_FMT 1u
+
+/* queue_store_open_ex error kinds (*error is left untouched on success). */
+enum {
+    QUEUE_OPEN_OK = 0,
+    QUEUE_OPEN_FAILED = 1,
+    /* The WAL contains job-completion feature records but the caller opened
+     * the store with the feature disabled. Never truncate; refuse. */
+    QUEUE_OPEN_JOB_DISABLED = 2,
+    /* A CRC-valid feature record carries an unsupported encoding version:
+     * an unsupported format, not media corruption. */
+    QUEUE_OPEN_JOB_FORMAT = 3
+};
+
+/* Replay/checkpoint callbacks supplied by the job engine when the feature
+ * is enabled. Queue effects of a completion record (input removal, output
+ * insert) are applied by the Queue engine itself; the hooks apply durable
+ * state and receipts. Applies are in WAL order and never re-validate CAS
+ * versions or leases. */
+typedef struct QueueJobReplayHooks {
+    void *ud;
+    /* LOG_JOB_STATE: one durable-state mutation. kind: 1=put 2=delete.
+     * `expires_at` 0 restores state without a receipt (checkpoint
+     * emission of entries whose receipt was already forgotten). */
+    int (*state_apply)(void *ud, int kind, const unsigned char *op_id,
+                       uint64_t version, uint64_t commit_id,
+                       uint64_t expected_version, const char *key,
+                       uint32_t key_len, const void *value, uint32_t value_len,
+                       uint64_t completed_at, uint64_t expires_at);
+    /* LOG_JOB_COMPLETION engine-side effects: durable state put + receipt.
+     * The Queue engine materializes the output message and removes the
+     * input message around this call, in WAL order. Every field needed to
+     * recompute the canonical request digest exactly is supplied. */
+    int (*completion_apply)(void *ud, const unsigned char *op_id,
+                            uint64_t commit_id, uint64_t state_version,
+                            uint64_t expected_version, const char *key,
+                            uint32_t key_len, const void *value,
+                            uint32_t value_len, const char *in_name,
+                            uint32_t in_len, uint64_t in_incarnation,
+                            uint64_t in_msg_id, const char *out_name,
+                            uint32_t out_len, uint64_t out_incarnation,
+                            uint64_t out_msg_id, const void *out_value,
+                            uint32_t out_value_len, uint64_t completed_at,
+                            uint64_t expires_at);
+    /* LOG_JOB_RECEIPT: restore one historical receipt; no effects. */
+    int (*receipt_apply)(void *ud, int kind, const unsigned char *op_id,
+                         const unsigned char *digest, uint64_t commit_id,
+                         uint64_t state_version, const char *in_name,
+                         uint32_t in_len, uint64_t in_msg_id,
+                         const char *out_name, uint32_t out_len,
+                         uint64_t out_msg_id, uint64_t completed_at,
+                         uint64_t expires_at);
+    /* LOG_JOB_META: adopt identity and allocation high-water marks. */
+    int (*meta_apply)(void *ud, const unsigned char *store_id,
+                      uint64_t next_msg_id, uint64_t next_incarnation,
+                      uint64_t version_hwm, uint64_t commit_hwm);
+    /* One consistent checkpoint cut: emit every live durable-state entry
+     * and unexpired receipt through `emit` under the engine locks. */
+    int (*checkpoint_emit)(void *ud, void *emit_ud,
+                           int (*emit)(void *emit_ud, unsigned op,
+                                       const char *name, uint32_t name_len,
+                                       uint64_t id, uint64_t aux,
+                                       const void *data, uint32_t len));
+    /* Durable-state + receipt bytes for the checkpoint trigger. */
+    uint64_t (*live_bytes)(void *ud);
+    /* Identity snapshot for the checkpoint meta record (NULL when absent). */
+    const unsigned char *(*store_id)(void *ud);
+    uint64_t (*version_hwm)(void *ud);
+    uint64_t (*commit_hwm)(void *ud);
+} QueueJobReplayHooks;
+
+/* As queue_store_open, with explicit job-feature participation. With
+ * `job_enabled` zero, any job feature record in the WAL fails the open
+ * with QUEUE_OPEN_JOB_DISABLED (the pre-feature open truncates nothing).
+ * `hooks` may be NULL only when the feature is disabled. */
+QueueStore *queue_store_open_ex(const char *path, int job_enabled,
+                                const QueueJobReplayHooks *hooks, int *error);
+
+/* Append one job feature record and fsync before returning: the caller's
+ * acknowledgement point for a direct durable mutation. The record is
+ * written under wal_lock (byte order equals sequence order). Returns 0,
+ * or -1 on failure — the store latches failed and the record's durability
+ * is unknown (it may still be recovered). */
+int queue_job_record_append_sync(QueueStore *store, unsigned op,
+                                 const char *name, uint32_t name_len,
+                                 uint64_t id, uint64_t aux,
+                                 const void *data, uint32_t len);
+
+/* One atomic completion commit, the only multi-effect Queue mutation:
+ * resolve both queues, take the input/output Queue locks in creation
+ * order (deduplicated), fence the live delivery, reserve the output
+ * message id, run the caller's validate/encode callbacks, append one
+ * LOG_JOB_COMPLETION record, fsync, then apply queue and engine effects
+ * under the same lock window before releasing.
+ *
+ * Returns 1 committed; 0 rejected before any write (*out_status is the
+ * typed outcome, or JOB_OK with *out_replayed set when a matching receipt
+ * appeared while admission was serialized); -1 after an attempted append
+ * failed (outcome unknown, store latched failed); -2 invalid arguments. */
+typedef struct QueueJobCommit {
+    const char *input_queue;
+    uint32_t input_queue_len;
+    uint64_t input_message_id;
+    uint64_t input_tag;          /* from the delivery proof registry */
+    uint64_t input_owner;        /* native owner; stays engine-private */
+    const char *output_queue;    /* NULL = no output message */
+    uint32_t output_queue_len;
+    const void *output_data;
+    uint32_t output_len;
+    void *ud;
+    /* Receipt re-check under the queue locks, before delivery validation:
+     * 1 = a matching receipt exists (replay; nothing written), 0 =
+     * continue, otherwise the rejecting JobStatus. Implements the
+     * replay-before-lease-validation dispatch order. */
+    int (*recheck)(void *ud);
+    /* Called after the fence check. Returns JOB_OK (0) to proceed or the
+     * rejecting JobStatus. On JOB_OK the callback RETURNS HOLDING the
+     * engine's serialization lock; the Queue engine keeps it across the
+     * record append and hands control to `apply` (which releases it) or
+     * `cancel` (which releases it) exactly once. Reservations are written
+     * to the out params and must survive until `apply`. */
+    int (*prepare)(void *ud, uint64_t output_msg_id,
+                   uint64_t *out_commit_id, uint64_t *out_state_version);
+    /* Encode the record payload into buf (<= cap). Returns the length or
+     * -1 (rejects as JOB_VALIDATION_FAILED with nothing written). */
+    int (*encode)(void *ud, uint64_t output_msg_id, uint64_t commit_id,
+                  uint64_t state_version, unsigned char *buf, uint32_t cap);
+    /* Engine-side effects after the record is durable, still under the
+     * queue locks. Must not fail (infallible application). Called instead
+     * of `apply` when the commit aborts after a successful prepare
+     * (encode failure or record-append failure). */
+    void (*apply)(void *ud, uint64_t output_msg_id, uint64_t commit_id,
+                  uint64_t state_version);
+    /* Releases what `prepare` holds/reserved on the abort paths above.
+     * Called at most once, and never after `apply`. */
+    void (*cancel)(void *ud);
+    uint32_t record_cap;
+} QueueJobCommit;
+
+int queue_job_commit(QueueStore *store, const QueueJobCommit *spec,
+                     /* JobStatus numeric value (job_state.h); int here to
+                      * keep queue.h independent of the job headers. */
+                     int *out_status, int *out_replayed);
+
+/* Current incarnation of a live Queue (0 when absent). New incarnations
+ * are assigned on every (re)creation and never reused. */
+int queue_incarnation(QueueStore *store, const char *name, uint32_t name_len,
+                      uint64_t *out_incarnation);
+/* Monotonic incarnation allocator for a new Queue (metadata lock held). */
+uint64_t queue_incarnation_next(QueueStore *store);
+/* High-water marks for the durable meta record (id = next to allocate). */
+uint64_t queue_msg_id_hwm(QueueStore *store);
+uint64_t queue_incarnation_hwm(QueueStore *store);
 
 #endif

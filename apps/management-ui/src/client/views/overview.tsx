@@ -112,6 +112,17 @@ export function OverviewView({ profileId, onNavigate }: { profileId: string; onN
               quantity={status.streams.count}
               facts={`Partitions ${status.streams.partition_count} · Retained ${formatBytes(status.streams.retained_bytes)} · Groups ${status.streams.group_count}`}
             />
+            {status.job_completion && (
+              <SummaryCell
+                label={<SummaryLink href={hrefFor(["keyspace", "durable"])}>Durable state</SummaryLink>}
+                quantity={status.job_completion.state_entries}
+                facts={
+                  status.job_completion.enabled
+                    ? `Live bytes ${formatBytes(status.job_completion.state_bytes)} · Receipts ${status.job_completion.receipts} · ${status.job_completion.healthy ? "healthy" : "unhealthy"}`
+                    : "Disabled on this server"
+                }
+              />
+            )}
           </SummaryStrip>
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

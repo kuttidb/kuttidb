@@ -94,6 +94,19 @@ final class KuttiDBProtocol {
     static final int OP_STREAM_COMMIT_BATCH = 0x6B;
     static final int OP_STREAM_FETCH_KEYS = 0x6C;
 
+    // ---- atomic job completion ----------------------------------------------
+    // Typed error envelope ([0x02][len:4][code:1][outcome:1][detail]) on these
+    // opcodes only; legacy framing untouched. See
+    // docs/design/ATOMIC_JOB_COMPLETION.md and docs/design/PROTOCOL.md.
+    static final int OP_JOB_CONSUME = 0x70;
+    static final int OP_JOB_COMPLETE = 0x71;
+    static final int OP_JOB_RECEIPT = 0x72;
+    static final int OP_STATE_GET = 0x73;
+    static final int OP_STATE_PUT = 0x74;
+    static final int OP_STATE_DELETE = 0x75;
+    static final int OP_DURABLE_OPERATION = 0x76;
+    static final int OP_QUEUE_MANIFEST = 0x77;
+
     /** Single-flight / SWR envelope states. */
     static final int SF_VALUE = 0, SF_CLAIMED = 1, SF_WAIT = 2, SF_NEGATIVE = 3,
             SF_RELEASED = 4, SF_TIMEOUT = 5, SF_LOST = 6, SF_STALE = 7, SF_REFRESH = 8;
@@ -115,6 +128,7 @@ final class KuttiDBProtocol {
     static final long FEAT_STREAM_COMMIT_BATCH = 1L << 13;
     static final long FEAT_STREAM_KEYS = 1L << 14;
     static final long FEAT_SERVER_INFO = 1L << 15;
+    static final long FEAT_JOBS = 1L << 16;
 
     // ---- little-endian encoders --------------------------------------------
 

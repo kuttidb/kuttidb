@@ -134,6 +134,15 @@ with KuttiDBClient(port=7379) as db:
 Start with one partition unless you need more write throughput. Ordering is
 guaranteed within a partition, not across several partitions.
 
+## Finishing jobs atomically (optional)
+
+When a background job's result must survive every restart — and a retry must
+never double-apply — enable `--job-completion` and use
+`job_consume` + `job_complete`: one durable commit writes the result to the
+non-evictable `durable` keyspace, ACKs the input, publishes the next
+message, and stores a retryable receipt. See
+[ATOMIC_JOB_COMPLETION.md](ATOMIC_JOB_COMPLETION.md) for the walkthrough.
+
 ## The three things to remember
 
 | Need | Use |
@@ -146,6 +155,7 @@ guaranteed within a partition, not across several partitions.
 
 - [README.md](../../README.md) for the project overview and all supported clients.
 - [QUEUES.md](../messaging/QUEUES.md) for retry, dead-letter, and delivery details.
+- [ATOMIC_JOB_COMPLETION.md](ATOMIC_JOB_COMPLETION.md) for result-critical jobs.
 - [STREAMS.md](../messaging/STREAMS.md) for partitions, retention, and Consumer Groups.
 - [MANAGEMENT_API.md](../api/MANAGEMENT_API.md) when you need an authenticated admin
   API for dashboards or automation.

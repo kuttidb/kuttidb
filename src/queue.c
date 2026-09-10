@@ -12,6 +12,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "job_status.h"
+
 #define QUEUE_MESSAGE_MAX (64u << 20)
 #define LOG_HEADER 28u
 
@@ -58,6 +60,15 @@ enum { LOG_DECLARE = 1, LOG_PUBLISH = 2, LOG_ACK = 3, LOG_DELIVER = 4,
        /* Empty durable router tombstone. */
        LOG_EXDELETE = 15,
        LOG_EXUPDATE = 16 };
+/* Queue WAL feature records for atomic job completion (ops 17-21; see
+ * queue.h and docs/design/ATOMIC_JOB_COMPLETION.md). Aliased to the shared
+ * constants so replay and the job modules agree on one numbering. */
+#define LOG_JOB_STATE QUEUE_WAL_JOB_STATE
+#define LOG_JOB_COMPLETION QUEUE_WAL_JOB_COMPLETION
+#define LOG_JOB_RECEIPT QUEUE_WAL_JOB_RECEIPT
+#define LOG_JOB_META QUEUE_WAL_JOB_META
+#define LOG_QUEUE_META QUEUE_WAL_QUEUE_META
+#define JOB_RECORD_FMT QUEUE_WAL_JOB_FMT
 enum { MESSAGE_READY = 0, MESSAGE_INFLIGHT = 1 };
 
 typedef struct QueueConsumer {
@@ -88,6 +99,7 @@ typedef struct Queue {
     struct Queue *next;
     pthread_mutex_t lock;         /* per-queue message state */
     uint64_t lock_id;             /* creation order; fanout locks ascending */
+    uint64_t incarnation;         /* stable identity; new on every create */
     char *name;
     uint32_t name_len;
     uint64_t max_depth;
@@ -196,6 +208,9 @@ struct QueueStore {
     uint64_t next_id;
     uint64_t next_owner;
     uint64_t next_delivery_tag;
+    uint64_t next_incarnation;    /* Queue identity allocator */
+    int job_enabled;              /* atomic job completion participation */
+    QueueJobReplayHooks job_hooks;
     uint64_t redeliveries;
     uint64_t deadlettered;
     uint64_t unroutable;
@@ -208,6 +223,21 @@ struct QueueStore {
     char *path;               /* NULL for in-memory stores */
 };
 
+/* Test-only fault injection at named commit boundaries (ADR 0002 test
+ * plan). Compiled out of every production build: without
+ * KUTTIDB_JOB_FAILPOINTS no environment variable is even read. */
+#ifdef KUTTIDB_JOB_FAILPOINTS
+static void job_failpoint(const char *name) {
+    const char *want = getenv("KUTTIDB_JOB_FAILPOINT");
+    if (want && strcmp(want, name) == 0) {
+        fprintf(stderr, "failpoint %s\n", name);
+        fflush(stderr);
+        _exit(137);
+    }
+}
+#else
+static inline void job_failpoint(const char *name) { (void)name; }
+#endif
 static uint32_t crc_table[256];
 static pthread_once_t crc_once = PTHREAD_ONCE_INIT;
 
@@ -386,6 +416,8 @@ static Queue *create_queue(QueueStore *store, const char *name, uint32_t name_le
     if (durable)
         queue->live_bytes = LOG_HEADER + name_len + 9 +
                             (dlq_len ? 8 + dlq_len : 0);
+    queue->incarnation = ++store->next_incarnation;
+    if (!queue->incarnation) queue->incarnation = ++store->next_incarnation;
     /* Called under the metadata lock: creation order gives fanout a
      * deadlock-free multi-lock acquisition order. */
     static uint64_t next_lock_id;
@@ -643,10 +675,17 @@ static int append_record(QueueStore *store, unsigned op, int durable,
      * The do_fsync variant (transaction and consumer records) keeps the lock
      * across the fsync; those records acknowledge nothing else. */
     QLOCK(&store->wal_lock);
-    if (write_all(store->log_fd, header, sizeof(header)) < 0 ||
-        write_all(store->log_fd, name, name_len) < 0 ||
-        (len && write_all(store->log_fd, data, len) < 0) ||
-        (do_fsync && fsync(store->log_fd) < 0)) {
+    int wrote_fail = write_all(store->log_fd, header, sizeof(header)) < 0 ||
+                     write_all(store->log_fd, name, name_len) < 0 ||
+                     (len && write_all(store->log_fd, data, len) < 0);
+    if (wrote_fail) {
+        __atomic_store_n(&store->failed, 1, __ATOMIC_RELAXED);
+        pthread_cond_broadcast(&store->sync_cond);
+        QUNLOCK(&store->wal_lock);
+        return -1;
+    }
+    if (op == LOG_JOB_COMPLETION) job_failpoint("job_after_write");
+    if (do_fsync && fsync(store->log_fd) < 0) {
         __atomic_store_n(&store->failed, 1, __ATOMIC_RELAXED);
         pthread_cond_broadcast(&store->sync_cond);
         QUNLOCK(&store->wal_lock);
@@ -758,21 +797,20 @@ static int append_log(QueueStore *store, unsigned op, Queue *queue, uint64_t id,
                          id, expires_ms, data, len, 0);
 }
 
-static int append_message(Queue *queue, uint64_t id, uint64_t expires_ms,
-                          const void *data, uint32_t len) {
+static Message *message_create(uint64_t id, uint64_t expires_ms,
+                               const void *data, uint32_t len) {
     Message *message = malloc(sizeof(*message) + len);
-    if (!message) return -1;
-    message->next = NULL;
+    if (!message) return NULL;
+    memset(message, 0, sizeof(*message));
     message->id = id;
-    message->delivery_tag = 0;
-    message->owner = 0;
     message->expires_ms = expires_ms;
-    message->not_before_ms = 0;
-    message->visibility_deadline_ms = 0;
     message->len = len;
-    message->deliveries = 0;
     message->state = MESSAGE_READY;
     if (len) memcpy(message->data, data, len);
+    return message;
+}
+
+static void message_link(Queue *queue, Message *message) {
     if (queue->tail) {
         message->prev = queue->tail;
         queue->tail->next = message;
@@ -783,12 +821,19 @@ static int append_message(Queue *queue, uint64_t id, uint64_t expires_ms,
     queue->tail = message;
     queue->depth++;
     queue->revision++;
-    if (expires_ms) queue->ttl_count++;
+    if (message->expires_ms) queue->ttl_count++;
     if (!queue->ready_hint) queue->ready_hint = message;
     if (queue->durable) {
-        message->wal_footprint = LOG_HEADER + queue->name_len + len;
+        message->wal_footprint = LOG_HEADER + queue->name_len + message->len;
         queue->live_bytes += message->wal_footprint;
     }
+}
+
+static int append_message(Queue *queue, uint64_t id, uint64_t expires_ms,
+                          const void *data, uint32_t len) {
+    Message *message = message_create(id, expires_ms, data, len);
+    if (!message) return -1;
+    message_link(queue, message);
     return 0;
 }
 
@@ -1191,7 +1236,221 @@ static int apply_tx_commit(QueueStore *store, const unsigned char *payload,
     return 0; /* unknown or already-materialized commit: ignore */
 }
 
-static int replay_log(QueueStore *store) {
+
+/* ---- job feature record application (replay side) ----
+ *
+ * Applies are in WAL order, idempotent, and never re-validate CAS versions
+ * or leases (a surviving record is committed history). Missing resources
+ * are skipped leniently so replay stays monotone across later deletes,
+ * purges, and recreations; a hook failure refuses the open instead of
+ * truncating the log. */
+static int job_parse_state(const unsigned char *d, uint32_t len, int *kind,
+                           const unsigned char **op_id,
+                           uint64_t *expected_version, const char **key,
+                           uint32_t *key_len, const void **value,
+                           uint32_t *value_len, uint64_t *completed_at,
+                           uint64_t *expires_at) {
+    if (len < 48) return -1;
+    *kind = d[1];
+    if (*kind != JOB_KIND_STATE_PUT && *kind != JOB_KIND_STATE_DELETE)
+        return -1;
+    *op_id = d + 2;
+    *expected_version = get64(d + 18);
+    *key_len = (uint32_t)d[26] | ((uint32_t)d[27] << 8);
+    if (*key_len > 65535 || 28 + (size_t)*key_len + 4 > len) return -1;
+    *key = (const char *)(d + 28);
+    *value_len = get32(d + 28 + *key_len);
+    if (32 + (size_t)*key_len + (size_t)*value_len + 16 != len) return -1;
+    if (*kind == JOB_KIND_STATE_DELETE && *value_len) return -1;
+    *value = d + 32 + *key_len;
+    *completed_at = get64(d + 32 + *key_len + *value_len);
+    *expires_at = get64(d + 40 + *key_len + *value_len);
+    return 0;
+}
+
+static int apply_job_record(QueueStore *store, unsigned op, const char *name,
+                            uint32_t name_len, uint64_t id, uint64_t aux,
+                            const unsigned char *d, uint32_t len,
+                            int *open_error) {
+    const QueueJobReplayHooks *h = &store->job_hooks;
+    if (op == LOG_JOB_META) {
+        if (len != 1 + 16 + 8 * 4) {
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -1;
+        }
+        if (get64(d + 17) > store->next_id) store->next_id = get64(d + 17);
+        if (get64(d + 25) > store->next_incarnation)
+            store->next_incarnation = get64(d + 25);
+        if (h->meta_apply &&
+            h->meta_apply(h->ud, d + 1, get64(d + 17), get64(d + 25),
+                          get64(d + 33), get64(d + 41)) < 0) {
+            if (open_error) *open_error = QUEUE_OPEN_FAILED;
+            return -1;
+        }
+        return 0;
+    }
+    if (op == LOG_QUEUE_META) {
+        if (len != 0 || id == 0) {
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -1;
+        }
+        Queue *queue = find_queue(store, name, name_len);
+        if (queue) {
+            queue->incarnation = id;
+            if (id > store->next_incarnation)
+                store->next_incarnation = id;
+        }
+        return 0; /* lenient when the Queue no longer exists */
+    }
+    if (op == LOG_JOB_STATE) {
+        int kind;
+        const unsigned char *op_id;
+        uint64_t expected_version, completed_at, expires_at;
+        const char *key;
+        uint32_t key_len;
+        const void *value;
+        uint32_t value_len;
+        if (job_parse_state(d, len, &kind, &op_id, &expected_version, &key,
+                            &key_len, &value, &value_len, &completed_at,
+                            &expires_at) < 0) {
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -1;
+        }
+        if (!h->state_apply) return 0;
+        if (h->state_apply(h->ud, kind, op_id, id, /* version */
+                           aux,                    /* commit id (header aux) */
+                           expected_version, key, key_len, value, value_len,
+                           completed_at, expires_at) < 0) {
+            if (open_error) *open_error = QUEUE_OPEN_FAILED;
+            return -1;
+        }
+        return 0;
+    }
+    if (op == LOG_JOB_RECEIPT) {
+        if (len < 87) {
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -1;
+        }
+        int kind = d[1];
+        if (kind != JOB_KIND_COMPLETION && kind != JOB_KIND_STATE_PUT &&
+            kind != JOB_KIND_STATE_DELETE) {
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -1;
+        }
+        uint32_t oql = (uint32_t)d[51] | ((uint32_t)d[52] << 8);
+        if (53 + (size_t)oql + 8 + 2 > len) {
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -1;
+        }
+        uint32_t iql = (uint32_t)d[61 + oql] | ((uint32_t)d[62 + oql] << 8);
+        if (87 + (size_t)oql + (size_t)iql != len) {
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -1;
+        }
+        if (!h->receipt_apply) return 0;
+        if (h->receipt_apply(h->ud, kind, d + 2, d + 18,
+                             id,   /* commit id */
+                             aux,  /* state version (header aux) */
+                             (const char *)(d + 63 + oql), iql,
+                             get64(d + 63 + oql + iql), (const char *)(d + 53),
+                             oql, get64(d + 53 + oql),
+                             get64(d + 71 + oql + iql),
+                             get64(d + 79 + oql + iql)) < 0) {
+            if (open_error) *open_error = QUEUE_OPEN_FAILED;
+            return -1;
+        }
+        return 0;
+    }
+    /* LOG_JOB_COMPLETION */
+    if (len < 78) {
+        if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+        return -1;
+    }
+    const unsigned char *op_id = d + 1;
+    uint64_t in_incarnation = get64(d + 17);
+    uint32_t out_present = d[25];
+    uint32_t oql = (uint32_t)d[26] | ((uint32_t)d[27] << 8);
+    if (oql > QUEUE_NAME_MAX) {
+        if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+        return -1;
+    }
+    if (!out_present && oql) {
+        /* An absent output carries no queue name bytes. */
+        if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+        return -1;
+    }
+    if (28 + (size_t)oql + 8 + 8 + 4 > len) {
+        if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+        return -1;
+    }
+    const char *out_queue = (const char *)(d + 28);
+    uint64_t out_incarnation = get64(d + 28 + oql);
+    uint64_t out_msg_id = get64(d + 36 + oql);
+    uint32_t ovl = get32(d + 44 + oql);
+    if (48 + (size_t)oql + (size_t)ovl + 8 + 2 > len) {
+        if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+        return -1;
+    }
+    const void *out_payload = d + 48 + oql;
+    uint64_t state_version = get64(d + 48 + oql + ovl);
+    uint32_t kl = (uint32_t)d[56 + oql + ovl] | ((uint32_t)d[57 + oql + ovl] << 8);
+    if (kl > 65535) {
+        if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+        return -1;
+    }
+    const char *key = (const char *)(d + 58 + oql + ovl);
+    uint64_t expected_version = get64(d + 58 + oql + ovl + kl);
+    uint32_t vl = get32(d + 66 + oql + ovl + kl);
+    if (70 + (size_t)oql + (size_t)ovl + (size_t)kl + (size_t)vl + 16 != len) {
+        if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+        return -1;
+    }
+    const void *value = d + 70 + oql + ovl + kl;
+    uint64_t completed_at = get64(d + 70 + oql + ovl + kl + vl);
+    uint64_t expires_at = get64(d + 78 + oql + ovl + kl + vl);
+
+    /* Engine-side effects first: the output message must never be visible
+     * before its committed state. */
+    if (h->completion_apply &&
+        h->completion_apply(h->ud, op_id, aux, /* commit id */
+                            state_version, expected_version, key, kl, value,
+                            vl, name, name_len, in_incarnation, id,
+                            out_present ? out_queue : NULL,
+                            out_present ? oql : 0,
+                            out_present ? out_incarnation : 0,
+                            out_present ? out_msg_id : 0,
+                            out_present ? out_payload : NULL,
+                            out_present ? ovl : 0, completed_at,
+                            expires_at) < 0) {
+        if (open_error) *open_error = QUEUE_OPEN_FAILED;
+        return -1;
+    }
+    /* Queue effects in WAL order: insert the output, then remove the
+     * input (an ordinary later ACK must still win on replay). */
+    if (out_present) {
+        Queue *out_q = find_queue(store, out_queue, oql);
+        if (out_q && !out_q->deleted && out_q->durable &&
+            append_message(out_q, out_msg_id, 0, out_payload, ovl) < 0) {
+            if (open_error) *open_error = QUEUE_OPEN_FAILED;
+            return -1;
+        }
+    }
+    if (id >= store->next_id) store->next_id = id + 1;
+    if (out_present && out_msg_id >= store->next_id)
+        store->next_id = out_msg_id + 1;
+    Queue *in_q = find_queue(store, name, name_len);
+    if (in_q) {
+        for (Message *m = in_q->head; m; m = m->next) {
+            if (m->id == id) {
+                remove_message(in_q, m);
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static int replay_log(QueueStore *store, int *open_error) {
     off_t good = 0;
     for (;;) {
         off_t start = lseek(store->log_fd, 0, SEEK_CUR);
@@ -1207,17 +1466,30 @@ static int replay_log(QueueStore *store) {
         uint64_t id = get64(header + 8);
         uint64_t expires_ms = get64(header + 16);
         uint32_t expected = get32(header + 24);
+        int job_record = op == LOG_JOB_STATE || op == LOG_JOB_COMPLETION ||
+                         op == LOG_JOB_RECEIPT || op == LOG_JOB_META ||
+                         op == LOG_QUEUE_META;
+        if (job_record && !store->job_enabled) {
+            /* Feature records exist but the caller disabled the feature:
+             * refuse the open with an enablement instruction; never
+             * silently truncate a feature record. */
+            if (open_error) *open_error = QUEUE_OPEN_JOB_DISABLED;
+            return -2;
+        }
         if ((op != LOG_DECLARE && op != LOG_PUBLISH && op != LOG_ACK &&
              op != LOG_DELIVER && op != LOG_REQUEUE &&
              op != LOG_EXDECLARE && op != LOG_EXBIND && op != LOG_EXUNBIND &&
              op != LOG_TX_PREPARE && op != LOG_TX_COMMIT &&
              op != LOG_CONSUMER && op != LOG_CONSUMER_DEL && op != LOG_PURGE &&
-             op != LOG_DELETE && op != LOG_EXDELETE && op != LOG_EXUPDATE) ||
+             op != LOG_DELETE && op != LOG_EXDELETE && op != LOG_EXUPDATE &&
+             !job_record) ||
             name_len == 0 || name_len > QUEUE_NAME_MAX || len > QUEUE_MESSAGE_MAX ||
             (op != LOG_PUBLISH && op != LOG_DECLARE && op != LOG_EXDECLARE &&
-             op != LOG_EXBIND && op != LOG_EXUNBIND && op != LOG_EXUPDATE && op != LOG_TX_PREPARE &&
-             op != LOG_TX_COMMIT && len != 0) ||
+             op != LOG_EXBIND && op != LOG_EXUNBIND && op != LOG_EXUPDATE &&
+             op != LOG_TX_PREPARE && op != LOG_TX_COMMIT && !job_record &&
+             len != 0) ||
             (op == LOG_DECLARE && len > 6 + QUEUE_NAME_MAX) ||
+            (job_record && op != LOG_QUEUE_META && len == 0) ||
             ((op == LOG_CONSUMER || op == LOG_CONSUMER_DEL) &&
              (op == LOG_CONSUMER ? id == 0 : id != 0))) goto corrupt;
         char name[QUEUE_NAME_MAX];
@@ -1230,6 +1502,14 @@ static int replay_log(QueueStore *store) {
         if (crc32(header, 24, name, name_len, data, len) != expected) {
             free(data);
             goto corrupt;
+        }
+        if (job_record && op != LOG_QUEUE_META &&
+            ((const unsigned char *)data)[0] != JOB_RECORD_FMT) {
+            /* A CRC-valid feature record with an unsupported encoding
+             * version is an unsupported format, not tail corruption. */
+            free(data);
+            if (open_error) *open_error = QUEUE_OPEN_JOB_FORMAT;
+            return -2;
         }
         int result = 0;
         if (op == LOG_DECLARE)
@@ -1290,6 +1570,13 @@ static int replay_log(QueueStore *store) {
                 link = &(*link)->next;
             }
             result = 0; /* delete is idempotent across replayed logs */
+        } else if (job_record) {
+            result = apply_job_record(store, op, name, name_len, id,
+                                      expires_ms, data, len, open_error);
+            /* Job feature records never truncate the log: any failure is a
+             * refused open (unsupported format, hook failure), preserving
+             * every committed byte for diagnosis or a compatible binary. */
+            if (result != 0) { free(data); return -2; }
         } else { /* LOG_TX_COMMIT */
             result = apply_tx_commit(store, data, len);
         }
@@ -1334,12 +1621,20 @@ static void remove_checkpoint_temps(const char *path) {
 }
 
 QueueStore *queue_store_open(const char *path) {
+    return queue_store_open_ex(path, 0, NULL, NULL);
+}
+
+QueueStore *queue_store_open_ex(const char *path, int job_enabled,
+                                const QueueJobReplayHooks *hooks, int *error) {
     QueueStore *store = calloc(1, sizeof(*store));
     if (!store) return NULL;
     store->log_fd = -1;
     store->next_id = 1;
     store->next_owner = 1;
     store->next_delivery_tag = 1;
+    store->next_incarnation = 1;
+    store->job_enabled = job_enabled ? 1 : 0;
+    if (hooks) store->job_hooks = *hooks;
     pthread_mutexattr_t da;
     pthread_mutexattr_init(&da);
     pthread_mutexattr_settype(&da, PTHREAD_MUTEX_ERRORCHECK);
@@ -1367,12 +1662,50 @@ QueueStore *queue_store_open(const char *path) {
         free(store);
         return NULL;
     }
-    if (lseek(store->log_fd, 0, SEEK_SET) < 0 || replay_log(store) < 0 ||
+    int open_error = QUEUE_OPEN_OK;
+    if (lseek(store->log_fd, 0, SEEK_SET) < 0 ||
+        replay_log(store, &open_error) < 0 ||
         lseek(store->log_fd, 0, SEEK_END) < 0) {
+        int kind = open_error ? open_error : QUEUE_OPEN_FAILED;
         queue_store_close(store);
+        if (error) *error = kind;
         return NULL;
     }
     return store;
+}
+
+uint64_t queue_msg_id_hwm(QueueStore *store) {
+    return store ? __atomic_load_n(&store->next_id, __ATOMIC_RELAXED) : 0;
+}
+
+uint64_t queue_incarnation_hwm(QueueStore *store) {
+    return store ? __atomic_load_n(&store->next_incarnation, __ATOMIC_RELAXED)
+                 : 0;
+}
+
+uint64_t queue_incarnation_next(QueueStore *store) {
+    if (!store) return 0;
+    return ++store->next_incarnation;
+}
+
+int queue_incarnation(QueueStore *store, const char *name, uint32_t name_len,
+                      uint64_t *out_incarnation) {
+    if (!store || !name || !name_len || name_len > QUEUE_NAME_MAX) return -1;
+    QLOCK(&store->lock);
+    Queue *queue = find_queue(store, name, name_len);
+    uint64_t incarnation = queue && !queue->deleted ? queue->incarnation : 0;
+    QUNLOCK(&store->lock);
+    if (out_incarnation) *out_incarnation = incarnation;
+    return queue && !queue->deleted ? 1 : 0;
+}
+
+int queue_job_record_append_sync(QueueStore *store, unsigned op,
+                                 const char *name, uint32_t name_len,
+                                 uint64_t id, uint64_t aux,
+                                 const void *data, uint32_t len) {
+    if (!store) return -1;
+    /* Job feature records are always durable-mode records. */
+    return append_record(store, op, 1, name, name_len, id, aux, data, len, 1);
 }
 
 void queue_store_close(QueueStore *store) {
@@ -1657,10 +1990,12 @@ int queue_consume_for_owner(QueueStore *store, const char *name, uint32_t name_l
                               : ready_hint_advance(queue, message->next);
             out->id = message->id;
             out->delivery_tag = message->delivery_tag;
+            out->owner = owner;
             out->data = copy;
             out->len = message->len;
             out->delivery_count = message->deliveries;
             out->redelivered = message->deliveries > 1;
+            out->visibility_deadline_ms = message->visibility_deadline_ms;
             /* The delivery record joins the group fsync; the handoff is
              * acknowledged only once the record is durable. The wait needs
              * wal_lock and no queue lock, so release the queue lock first:
@@ -2398,6 +2733,188 @@ int queue_wal_enabled(QueueStore *store) {
     return enabled;
 }
 
+
+/* ---- atomic completion commit (one Queue WAL record) ----
+ *
+ * Sequence (docs/design/ATOMIC_JOB_COMPLETION.md): resolve under metadata
+ * protection, take input/output Queue locks in creation order (dedupe when
+ * identical), re-check the receipt (replay before lease validation), fence
+ * the live delivery against reaping, prepare + reserve, encode one complete
+ * versioned record, append with fsync under wal_lock, then apply queue and
+ * engine effects under the same lock window before releasing. Fence and
+ * commit share the input Queue lock, so the expiry reaper can never
+ * reassign an admitted attempt; expiry after admission is allowed to finish
+ * while the attempt is reserved. Same-Queue input/output admits on the
+ * projected (net) depth and transiently holds both records in memory. */
+int queue_job_commit(QueueStore *store, const QueueJobCommit *spec,
+                     int *out_status, int *out_replayed) {
+    if (out_status) *out_status = JOB_VALIDATION_FAILED;
+    if (out_replayed) *out_replayed = 0;
+    if (!store || !spec || !spec->input_queue || !spec->input_queue_len ||
+        spec->input_queue_len > QUEUE_NAME_MAX || !spec->input_message_id ||
+        !spec->input_tag || !spec->input_owner || !spec->recheck ||
+        !spec->prepare || !spec->encode || !spec->apply || !spec->cancel)
+        return -2;
+    if (spec->output_queue &&
+        (!spec->output_queue_len || spec->output_queue_len > QUEUE_NAME_MAX ||
+         (spec->output_len && !spec->output_data)))
+        return -2;
+    if (out_status) *out_status = JOB_UNSUPPORTED_FEATURE;
+    if (!queue_wal_enabled(store)) return 0;
+    if (out_status) *out_status = JOB_VALIDATION_FAILED;
+
+    /* 1. Resolve both resources under metadata protection. */
+    QLOCK(&store->lock);
+    Queue *in_q = find_queue(store, spec->input_queue, spec->input_queue_len);
+    Queue *out_q = NULL;
+    if (spec->output_queue)
+        out_q = find_queue(store, spec->output_queue, spec->output_queue_len);
+    int resolved = in_q && !in_q->deleted && in_q->durable &&
+                   (!spec->output_queue ||
+                    (out_q && !out_q->deleted && out_q->durable));
+    QUNLOCK(&store->lock);
+    if (!resolved) return 0; /* validation_failed: unusable resource */
+
+    Queue *out_target = spec->output_queue ? (out_q ? out_q : in_q) : NULL;
+    /* 2. Queue locks in creation order, deduplicated. */
+    Queue *first = in_q, *second = out_target;
+    if (second && first->lock_id > second->lock_id) {
+        first = second;
+        second = in_q;
+    }
+    QLOCK(&first->lock);
+    if (second && second != first) QLOCK(&second->lock);
+
+    /* 3. Receipt re-check precedes every delivery/version check. */
+    int rc = spec->recheck(spec->ud);
+    if (rc != 0) {
+        if (out_status) *out_status = rc == 1 ? JOB_OK : rc;
+        if (out_replayed) *out_replayed = rc == 1 ? 1 : 0;
+        QUNLOCK(&first->lock);
+        if (second && second != first) QUNLOCK(&second->lock);
+        return 0;
+    }
+
+    /* 4. Fence the live delivery: same message, in-flight, same tag and
+     * owner, and not past its (monotonic) visibility deadline. */
+    Message *input_message = NULL;
+    for (Message *m = in_q->head; m; m = m->next)
+        if (m->id == spec->input_message_id) {
+            input_message = m;
+            break;
+        }
+    int fence = input_message && input_message->state == MESSAGE_INFLIGHT &&
+                input_message->delivery_tag == spec->input_tag &&
+                input_message->owner == spec->input_owner &&
+                input_message->visibility_deadline_ms > monotonic_ms();
+    if (!fence) {
+        if (out_status)
+            *out_status = (input_message &&
+                           input_message->state == MESSAGE_INFLIGHT &&
+                           input_message->visibility_deadline_ms <=
+                               monotonic_ms())
+                              ? JOB_DELIVERY_EXPIRED
+                              : JOB_DELIVERY_NOT_OWNED;
+        QUNLOCK(&first->lock);
+        if (second && second != first) QUNLOCK(&second->lock);
+        return 0;
+    }
+
+    /* 5. Net-capacity admission: an output Queue at capacity must not
+     * cause an input ACK. Same-Queue output admits on the projected net
+     * depth (the consumed input offsets the produced output); a distinct
+     * output Queue must have room for one more message. */
+    if (out_target && out_target->max_depth) {
+        uint64_t projected = out_target == in_q ? out_target->depth
+                                                : out_target->depth + 1;
+        if (projected > out_target->max_depth) {
+            if (out_status) *out_status = JOB_RESOURCE_EXHAUSTED;
+            QUNLOCK(&first->lock);
+            if (second && second != first) QUNLOCK(&second->lock);
+            return 0;
+        }
+    }
+
+    /* 6. Reserve the output message id. */
+    uint64_t output_msg_id =
+        out_target ? __atomic_fetch_add(&store->next_id, 1, __ATOMIC_RELAXED)
+                   : 0;
+
+    /* 7. Validate, reserve, and take the engine serialization lock. */
+    uint64_t commit_id = 0, state_version = 0;
+    rc = spec->prepare(spec->ud, output_msg_id, &commit_id, &state_version);
+    if (rc != JOB_OK) {
+        if (out_status) *out_status = rc;
+        QUNLOCK(&first->lock);
+        if (second && second != first) QUNLOCK(&second->lock);
+        return 0;
+    }
+
+    /* 8. Encode one complete record. */
+    unsigned char *payload = malloc(spec->record_cap);
+    if (!payload) {
+        if (out_status) *out_status = JOB_RESOURCE_EXHAUSTED;
+        spec->cancel(spec->ud);
+        QUNLOCK(&first->lock);
+        if (second && second != first) QUNLOCK(&second->lock);
+        return 0;
+    }
+    int plen = spec->encode(spec->ud, output_msg_id, commit_id, state_version,
+                            payload, spec->record_cap);
+    if (plen < 0 || (uint32_t)plen > spec->record_cap) {
+        free(payload);
+        if (out_status) *out_status = JOB_VALIDATION_FAILED;
+        spec->cancel(spec->ud);
+        QUNLOCK(&first->lock);
+        if (second && second != first) QUNLOCK(&second->lock);
+        return 0;
+    }
+
+    /* 9. Append the single completion record and fsync: the commit point.
+     * The fsync runs under wal_lock, so no other record interleaves. */
+    job_failpoint("job_before_append");
+    unsigned char *payload_final = payload;
+    if (append_record(store, LOG_JOB_COMPLETION, 1, in_q->name, in_q->name_len,
+                      spec->input_message_id, commit_id, payload,
+                      (uint32_t)plen, 1) < 0) {
+        free(payload_final);
+        /* Durability unknown: the record may still be recovered. */
+        if (out_status) *out_status = JOB_OPERATION_IN_DOUBT;
+        spec->cancel(spec->ud);
+        QUNLOCK(&first->lock);
+        if (second && second != first) QUNLOCK(&second->lock);
+        return -1;
+    }
+    free(payload_final);
+    job_failpoint("job_after_fsync");
+
+    /* 10. Publish under the same protected visibility boundary: engine
+     * effects first (state + receipt), then the output message, then the
+     * input removal. Pre-allocate the output message: infallible now. */
+    spec->apply(spec->ud, output_msg_id, commit_id, state_version);
+    if (out_target) {
+        Message *message = message_create(output_msg_id, 0,
+                                          spec->output_data, spec->output_len);
+        if (!message) {
+            /* An exhausted heap after a durable commit is an invariant
+             * failure, not a request error: latch and surface it. */
+            __atomic_store_n(&store->failed, 1, __ATOMIC_RELAXED);
+            if (out_status) *out_status = JOB_OPERATION_IN_DOUBT;
+            QUNLOCK(&first->lock);
+            if (second && second != first) QUNLOCK(&second->lock);
+            return -1;
+        }
+        message_link(out_target, message);
+    }
+    remove_message(in_q, input_message);
+    job_failpoint("job_after_apply");
+
+    QUNLOCK(&first->lock);
+    if (second && second != first) QUNLOCK(&second->lock);
+    if (out_replayed) *out_replayed = 0;
+    return 1;
+}
+
 /* ---- crash-safe WAL checkpoint ---- */
 
 #define QUEUE_CHECKPOINT_FLOOR (1ull << 20)
@@ -2424,6 +2941,21 @@ static int ckpt_emit(int fd, unsigned op, int durable, const char *name,
     (*records)++;
     return 0;
 }
+/* Job-engine emit adapter: forwards to ckpt_emit with the shared counters. */
+typedef struct QueueCkptCtx {
+    int fd;
+    uint64_t *bytes;
+    uint64_t *records;
+} QueueCkptCtx;
+
+static int ckpt_emit_job(void *ud, unsigned op, const char *name,
+                         uint32_t name_len, uint64_t id, uint64_t aux,
+                         const void *data, uint32_t len) {
+    QueueCkptCtx *ctx = ud;
+    return ckpt_emit(ctx->fd, op, 1, name, name_len, id, aux, data, len,
+                     ctx->bytes, ctx->records);
+}
+
 
 /* Rewrite the full live state (declarations, exchanges, consumers, pending
  * transactions, retained messages with delivery counts and retry delays)
@@ -2432,7 +2964,20 @@ static int ckpt_emit(int fd, unsigned op, int durable, const char *name,
  * creation order), so no durable operation can interleave; the pause is the
  * checkpoint write. An interruption before the rename leaves the old valid
  * WAL; after the rename, the checkpoint is the WAL. */
+static int queue_checkpoint_body(QueueStore *store, int force);
+
+int queue_checkpoint_force(QueueStore *store) {
+    return queue_checkpoint_body(store, 1);
+}
+
 int queue_checkpoint_maybe(QueueStore *store) {
+    return queue_checkpoint_body(store, 0);
+}
+
+/* Shared checkpoint body. With `force` zero the size heuristic decides;
+ * with it one the WAL is always rewritten. Returns 1 written, 0 skipped,
+ * -1 on failure (the previous WAL stays valid either way). */
+static int queue_checkpoint_body(QueueStore *store, int force) {
     if (!store || !store->path || store->log_fd < 0) return 0;
     struct stat st;
     if (fstat(store->log_fd, &st) < 0) return 0;
@@ -2443,7 +2988,12 @@ int queue_checkpoint_maybe(QueueStore *store) {
         if (!queue->deleted) live_total += queue->live_bytes;
     }
     live_total += store->meta_live;
-    if ((uint64_t)st.st_size <= live_total * 2 + QUEUE_CHECKPOINT_FLOOR) {
+    /* Durable state and receipts occupy real checkpoint bytes; include them
+     * so growing completion history still folds the WAL. */
+    if (store->job_enabled && store->job_hooks.live_bytes)
+        live_total += store->job_hooks.live_bytes(store->job_hooks.ud);
+    if (!force &&
+        (uint64_t)st.st_size <= live_total * 2 + QUEUE_CHECKPOINT_FLOOR) {
         for (Queue *queue = store->queues; queue; queue = queue->next)
             QUNLOCK(&queue->lock);
         QUNLOCK(&store->lock);
@@ -2484,8 +3034,29 @@ int queue_checkpoint_maybe(QueueStore *store) {
     fchmod(fd, 0600);
     uint64_t bytes = 0, records = 0;
     int rc = 0;
+    /* Durable identity and allocation high-water marks come first so a
+     * replayed checkpoint re-asserts them before any state or message. */
+    if (!rc && store->job_enabled && store->job_hooks.store_id) {
+        const unsigned char *store_id =
+            store->job_hooks.store_id(store->job_hooks.ud);
+        if (store_id) {
+            unsigned char mval[49];
+            mval[0] = (unsigned char)JOB_RECORD_FMT;
+            memcpy(mval + 1, store_id, 16);
+            put64(mval + 17, __atomic_load_n(&store->next_id, __ATOMIC_RELAXED));
+            put64(mval + 25, __atomic_load_n(&store->next_incarnation, __ATOMIC_RELAXED));
+            put64(mval + 33, store->job_hooks.version_hwm
+                                 ? store->job_hooks.version_hwm(store->job_hooks.ud) : 0);
+            put64(mval + 41, store->job_hooks.commit_hwm
+                                 ? store->job_hooks.commit_hwm(store->job_hooks.ud) : 0);
+            rc = ckpt_emit(fd, LOG_JOB_META, 1, QUEUE_WAL_JOB_META_NAME,
+                           (uint32_t)(sizeof(QUEUE_WAL_JOB_META_NAME) - 1), 0, 0,
+                           mval, sizeof mval, &bytes, &records);
+        }
+    }
     /* Declarations first (data = DLQ extension only; durable and max_depth
-     * travel in the header), then each queue's retained messages. */
+     * travel in the header), each followed by its incarnation record, then
+     * each queue's retained messages. */
     for (uint32_t i = 0; i < count && !rc; i++) {
         Queue *queue = sorted[i];
         if (queue->deleted) continue;
@@ -2501,6 +3072,10 @@ int queue_checkpoint_maybe(QueueStore *store) {
         rc = ckpt_emit(fd, LOG_DECLARE, queue->durable, queue->name,
                        queue->name_len, 0, queue->max_depth,
                        dlen ? dval : NULL, dlen, &bytes, &records);
+        if (!rc && store->job_enabled)
+            rc = ckpt_emit(fd, LOG_QUEUE_META, 1, queue->name,
+                           queue->name_len, queue->incarnation, 0, NULL, 0,
+                           &bytes, &records);
     }
     for (uint32_t i = 0; i < count && !rc; i++) {
         Queue *queue = sorted[i];
@@ -2515,6 +3090,13 @@ int queue_checkpoint_maybe(QueueStore *store) {
                 rc = ckpt_emit(fd, LOG_REQUEUE, 1, queue->name, queue->name_len,
                                m->id, m->not_before_ms, NULL, 0, &bytes, &records);
         }
+    }
+    /* Durable state and unexpired receipts: one consistent cut, emitted by
+     * the job engine under its own locks while every Queue lock is held. */
+    if (!rc && store->job_enabled && store->job_hooks.checkpoint_emit) {
+        QueueCkptCtx ctx = {fd, &bytes, &records};
+        rc = store->job_hooks.checkpoint_emit(store->job_hooks.ud, &ctx,
+                                              ckpt_emit_job);
     }
     /* Exchanges, bindings, consumers, pending transactions. */
     for (Exchange *exchange = store->exchanges; exchange && !rc; exchange = exchange->next) {
@@ -3218,7 +3800,8 @@ int queue_config_snapshot(QueueStore *store, const char *name, uint32_t name_len
     memset(out,0,sizeof *out);out->durable=queue->durable;out->max_depth=queue->max_depth;
     out->max_deliveries=queue->max_deliveries;out->dead_letter_queue_len=queue->dlq_len;
     if(queue->dlq_len)memcpy(out->dead_letter_queue,queue->dlq_name,queue->dlq_len);
-    out->revision=queue->revision;QUNLOCK(&queue->lock);return 1;
+    out->revision=queue->revision;out->incarnation=queue->incarnation;
+    QUNLOCK(&queue->lock);return 1;
 }
 
 uint64_t queue_owner_inflight(QueueStore *store, uint64_t owner) {
@@ -3284,6 +3867,31 @@ void queue_foreach_stats(QueueStore *store, QueueStatsFn fn, void *ud) {
         uint64_t depth = queue->depth, inflight = queue->inflight;
         QUNLOCK(&queue->lock);
         fn(queue->name, queue->name_len, depth, inflight, ud);
+    }
+    QUNLOCK(&store->lock);
+}
+
+void queue_manifest_foreach(QueueStore *store, QueueManifestFn fn, void *ud,
+                            uint32_t max_entries) {
+    if (!store || !fn || !max_entries) return;
+    uint32_t seen = 0;
+    QLOCK(&store->lock);
+    for (Queue *queue = store->queues; queue && seen < max_entries;
+         queue = queue->next) {
+        if (queue->deleted) continue;
+        QLOCK(&queue->lock);
+        QueueManifestEntry e;
+        e.name = queue->name;
+        e.name_len = queue->name_len;
+        e.durable = queue->durable;
+        e.incarnation = queue->incarnation;
+        e.depth = queue->depth;
+        e.inflight = queue->inflight;
+        e.max_depth = queue->max_depth;
+        e.revision = queue->revision;
+        fn(&e, ud);
+        QUNLOCK(&queue->lock);
+        seen++;
     }
     QUNLOCK(&store->lock);
 }

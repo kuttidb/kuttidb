@@ -70,6 +70,38 @@ flags, expiration, dead-letter queues, retry limits, and crash recovery.
 - Single-node durability does not protect against disk, machine, or node loss.
   Replication remains required for that availability claim.
 
+## Atomic job completion
+
+With `--job-completion` on the server, a durable queue's deliveries can be
+completed atomically: one commit writes the version-checked durable state
+PUT, removes (ACKs) the input message, optionally publishes the next
+message, and stores a retryable receipt. Consume through the
+completion-capable path (`0x70`; SDK `job_consume` with a registered named
+consumer) and submit with `0x71` (`job_complete`) — the response **is** the
+ACK, so never ACK separately after a success. Ordinary consume/ACK/NACK keep
+working unchanged alongside it.
+
+Identity rules to keep straight:
+
+- **Stable job identity** is `(store_id, queue_incarnation, message_id)`.
+  The incarnation changes whenever a queue is deleted and recreated, so an
+  old receipt can never commit against a new queue that reuses the name;
+  discover it through `0x77` (`queue_manifest`) or the typed delivery.
+- **Delivery tags** (`0x22`'s `id` field) remain one-use per process and are
+  never part of job identity. Completion-capable deliveries instead return
+  an opaque, one-use **delivery proof** that fences exactly one attempt.
+- Retrying a completion means resubmitting the **same operation id and
+  semantic request**; a retained receipt replays the original result without
+  re-publishing the output, even after a restart, checkpoint, later output
+  consumption, or a newer state write.
+
+A same-queue output is admitted on the projected net depth (the consumed
+input offsets the produced output), so a full queue can still accept a
+net-zero completion; a distinct output queue without room rejects the whole
+completion with the input left unacknowledged. Full semantics:
+[../design/ATOMIC_JOB_COMPLETION.md](../design/ATOMIC_JOB_COMPLETION.md),
+guide: [../guides/ATOMIC_JOB_COMPLETION.md](../guides/ATOMIC_JOB_COMPLETION.md).
+
 ## Native protocol
 
 All requests retain the existing framing:
