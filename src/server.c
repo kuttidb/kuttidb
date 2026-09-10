@@ -3391,9 +3391,14 @@ static void conn_process(Loop *L, Conn *c) {
                     resp_queue_id(c, rc == 0 ? 0x00 : 0x02, id);
                 } else if (op == QUEUE_STATS) {
                     uint64_t depth = 0, inflight = 0;
-                    resp_queue_stats(c, vlen == 0
-                        ? queue_stats(g_queues, queue, klen, &depth, &inflight) : -1,
-                        depth, inflight);
+                    /* Evaluate queue_stats before reading its out parameters.
+                     * Function-argument evaluation order is unspecified in C;
+                     * passing the call and `depth`/`inflight` together let GCC
+                     * read the zero initializers before queue_stats filled them. */
+                    int stats_rc = vlen == 0
+                        ? queue_stats(g_queues, queue, klen, &depth, &inflight)
+                        : -1;
+                    resp_queue_stats(c, stats_rc, depth, inflight);
                 } else if (op == QUEUE_PREFETCH) {
                     if (vlen != 4) resp_status(c, 0x02);
                     else { c->queue_prefetch = get_u32le(arg); resp_status(c, 0x00); }
