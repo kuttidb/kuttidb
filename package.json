@@ -16,5 +16,10 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "build": "pnpm generate:admin-client && pnpm -r build"
+  },
+  "pnpm": {
+    "overrides": {
+      "js-yaml": "^4.3.2"
+    }
   }
 }
