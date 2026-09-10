@@ -31,6 +31,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Verify release tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          expected="${GITHUB_REF_NAME#java-v}"
+          actual=$(sed -n 's@^[[:space:]]*<version>\([^<]*\)</version>@\1@p' clients/java/pom.xml | head -1)
+          test "$actual" = "$expected" || { echo "tag java-v$expected does not match Maven version $actual"; exit 1; }
+
       # Gate: build the server and run the full native protocol smoke plus the
       # managed lifecycle smokes against it, mirroring the Makefile targets.
       - name: Protocol gate

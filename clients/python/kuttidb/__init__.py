@@ -65,7 +65,7 @@ from .client import (
 from .embed import KuttiEmbed, KuttiEmbedError
 from .local import LocalKuttiDB
 
-__version__ = "0.0.6b0"
+__version__ = "0.0.7b0"
 
 __all__ = [
     "CAP_ATOMIC",

@@ -34,6 +34,13 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
+      - name: Verify release tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          expected="${GITHUB_REF_NAME#node-v}"
+          actual=$(node -p "require('./package.json').version")
+          test "$actual" = "$expected" || { echo "tag node-v$expected does not match package version $actual"; exit 1; }
+
       - name: Syntax gate
         run: node --check kuttidb_client.js && node --check smoke.js && node --check managed_smoke.js
 

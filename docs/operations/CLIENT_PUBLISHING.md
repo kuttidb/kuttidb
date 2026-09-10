@@ -55,7 +55,7 @@ go get github.com/kuttidb/kuttidb/clients/go
    mix an SDK bump into a server release commit.
 2. **Tag and push:**
    ```sh
-   git tag -a node-v0.0.2 -m "@kuttidb/client 0.0.2" && git push origin node-v0.0.2
+   git tag -a node-v0.0.7-beta -m "@kuttidb/client 0.0.7-beta" && git push origin node-v0.0.7-beta
    ```
 3. **The workflow takes over.** Each release workflow runs its language gate
    first and publishes only if the gate passes. A failed gate means nothing
@@ -153,6 +153,10 @@ Go has no registry — `go get` fetches directly from the repository, so:
 
 ## Rules
 
+- **A tag must exactly match its manifest version.** The release workflows
+  reject mismatches before any registry upload: for example,
+  `py-v0.0.7b0`, `node-v0.0.7-beta`, `rust-v0.0.7-beta`, and
+  `java-v0.0.9-beta`.
 - **Never re-push a tag** — registries reject duplicate versions and
   re-publishing is treated as a broken release (same policy as
   [RELEASE.md](RELEASE.md)).

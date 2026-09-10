@@ -158,8 +158,8 @@ Install the client for your language, then connect to your server:
 | **Python** | `python3 -m pip install --pre kuttidb` | [Python client](clients/python) |
 | **Node.js** | `npm install @kuttidb/client@beta` | [Node.js client](clients/nodejs) |
 | **Go** | `go get github.com/kuttidb/kuttidb/clients/go` | [Go module](clients/go) |
-| **Rust** | `cargo add kuttidb@0.0.6-beta` | [Rust crate](clients/rust) |
-| **Java** | Maven: `io.github.kuttidb:kuttidb-client:0.0.8-beta` | [Java client](clients/java) |
+| **Rust** | `cargo add kuttidb@0.0.7-beta` | [Rust crate](clients/rust) |
+| **Java** | Maven: `io.github.kuttidb:kuttidb-client:0.0.9-beta` | [Java client](clients/java) |
 | **C / C++** | `make` builds `libkuttidb_embed.dylib` / `.so` | [Embedded API](src/embed.h) |
 
 <details>
@@ -171,14 +171,14 @@ Maven (`pom.xml`, Java 17+):
 <dependency>
   <groupId>io.github.kuttidb</groupId>
   <artifactId>kuttidb-client</artifactId>
-  <version>0.0.8-beta</version>
+  <version>0.0.9-beta</version>
 </dependency>
 ```
 
 Gradle (Kotlin DSL):
 
 ```kotlin
-implementation("io.github.kuttidb:kuttidb-client:0.0.8-beta")
+implementation("io.github.kuttidb:kuttidb-client:0.0.9-beta")
 ```
 
 </details>

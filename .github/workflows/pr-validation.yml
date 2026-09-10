@@ -44,7 +44,9 @@ jobs:
           python-version: '3.12'
 
       - name: Build everything
-        run: make -j4
+        # `make` is intentionally the full build: the following gate executes
+        # the standalone C test binaries as well as the server.
+        run: make -j4 all core_test queue_test queue_crash_test atomic_test job_state_test job_completion_test
 
       - name: Core + job completion + crash matrix (make test, C suites)
         run: |
@@ -82,7 +84,7 @@ jobs:
       - name: Build and test
         run: |
           set -e
-          make -j4 kuttidb
+          make -j4 kuttidb libkuttidb_embed.so
           cd clients/go
           go vet ./...
           go test -run 'TestJobCompletion' -count=1 -v .

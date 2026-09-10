@@ -189,8 +189,8 @@ When auth is configured, `AUTH` must be the first request on every connection.
 | Python | `python3 -m pip install --pre kuttidb` | `clients/python` |
 | Node.js | `npm install @kuttidb/client@beta` | `clients/nodejs` |
 | Go | `go get github.com/kuttidb/kuttidb/clients/go` | `clients/go` |
-| Rust | `cargo add kuttidb@0.0.6-beta` | `clients/rust` |
-| Java | Maven `io.github.kuttidb:kuttidb-client:0.0.8-beta` (Java 17+) | `clients/java` |
+| Rust | `cargo add kuttidb@0.0.7-beta` | `clients/rust` |
+| Java | Maven `io.github.kuttidb:kuttidb-client:0.0.9-beta` (Java 17+) | `clients/java` |
 | C/C++ | `make` builds `libkuttidb_embed.dylib`/`.so` | `src/embed.h` |
 
 In this repository without the packaged SDKs, import from source:
@@ -296,6 +296,10 @@ partition, offset)` · `stream_commit_batch(topic, group, commits)` ·
 generation)` · `stream_group_leave(topic, group)` ·
 `stream_group_offset(topic, group, partition)` ·
 `stream_group_lag(topic, group, partition)` · `stream_group_list()`
+
+`stream_commit` only advances a group's next offset; a delayed lower commit
+is a successful no-op. Use the generation-checked reset API for an intentional
+rewind.
 
 On generation change with a changed assignment: finish in-flight work for
 partitions still owned, drain the rest; commits for lost partitions are

@@ -32,6 +32,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Verify release tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          expected="${GITHUB_REF_NAME#py-v}"
+          actual=$(python3 -c "import ast; m=ast.parse(open('clients/python/kuttidb/__init__.py').read()); print(next(n.value.value for n in m.body if isinstance(n, ast.Assign) and n.targets[0].id == '__version__'))")
+          test "$actual" = "$expected" || { echo "tag py-v$expected does not match Python package version $actual"; exit 1; }
+
       - name: Stage package sources
         run: python3 clients/python/prepare.py
 

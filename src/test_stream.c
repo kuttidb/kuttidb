@@ -231,6 +231,14 @@ int main(void) {
         fprintf(stderr, "stream fetch/commit failed\n"); return 1;
     }
     stream_fetch_free(r, n);
+    /* Delayed acknowledgements are a no-op: only the explicit reset API may
+     * move a group backward. This also makes concurrent acknowledgements
+     * deterministic. */
+    if (stream_commit(s, "orders", 6, "workers", 7, 0, 1) ||
+        stream_group_offset(s, "orders", 6, "workers", 7, 0, &committed) != 1 ||
+        committed != 2) {
+        fprintf(stderr, "stream commit rewound a group offset\n"); return 1;
+    }
     uint64_t generation = UINT64_MAX;
     if (stream_group_generation(s, "orders", 6, "workers", 7, &generation) != 1 ||
         generation != 0 ||

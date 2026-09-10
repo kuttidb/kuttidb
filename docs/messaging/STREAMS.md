@@ -19,7 +19,9 @@ Ordering is guaranteed only within one partition.
   an offset. The current retained base is returned when an older requested
   offset has expired.
 - `stream_commit(topic, group, partition, offset)` durably records a group's
-  next offset. Group offsets are independent for every topic/partition.
+  next offset. Commits only advance an offset; a delayed lower commit is a
+  successful no-op. Use the generation-checked group-reset operation for an
+  intentional rewind. Group offsets are independent for every topic/partition.
 - `stream_group_offset(topic, group, partition)` reads the saved offset.
 - `stream_group_lag(topic, group, partition)` returns the records between the
   committed next offset and the partition end offset.
