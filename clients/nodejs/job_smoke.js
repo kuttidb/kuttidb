@@ -15,7 +15,7 @@ const os = require("os");
 const path = require("path");
 const { Client, JobCompletionIntent, JobIdempotencyConflictError,
         JobStateVersionConflictError, JobDeliveryExpiredError,
-        JobUnsupportedFeatureError } = require("./kuttidb_client");
+        JobDeliveryNotOwnedError, JobUnsupportedFeatureError } = require("./kuttidb_client");
 
 const executable = process.argv[2] || process.env.KUTTIDB_SERVER ||
   path.join(__dirname, "..", "..", "kuttidb");
@@ -217,24 +217,30 @@ async function main() {
         if (!deleteReplay.replayed || deleteReplay.commitId !== deletion.commitId)
           throw new Error("state delete replay failed");
 
-        // Fencing: a fresh delivery with a tiny lease expires.
+        // Fencing: a fresh delivery with a tiny lease expires. The exact
+        // typed code depends on whether the background sweeper already reaped
+        // the expired in-flight delivery (then the queue fence answers
+        // not_owned); both outcomes are fail-closed, pre-commit, and never
+        // silent (mirrors clients/rust/tests/job_completion.rs).
         await db2.queueConsumerRegister("pdf-worker");
         await db2.queuePublish("extract-pdf", Buffer.from("second"));
         const second = await db2.jobConsume("extract-pdf", "pdf-worker",
           { visibility: 0.001 });
         if (!second) throw new Error("second consume failed");
         await new Promise((r) => setTimeout(r, 50));
-        let expired = null;
+        let fenced = null;
         try {
           await db2.jobComplete(
             second.toIntent({ stateKey: "pdf:42", expectedVersion: 0,
                               stateValue: "late" }),
             second.proof);
         } catch (e) {
-          if (e instanceof JobDeliveryExpiredError) expired = e;
+          if (e instanceof JobDeliveryExpiredError || e instanceof JobDeliveryNotOwnedError) fenced = e;
+          else throw e;
         }
-        if (!expired || expired.code !== "delivery_expired")
-          throw new Error("expired delivery not fenced");
+        if (!fenced || !["delivery_expired", "delivery_not_owned"].includes(fenced.code) ||
+            fenced.outcome !== "not_committed")
+          throw new Error("expired delivery not fenced: " + (fenced ? `${fenced.code} (${fenced.outcome})` : "no error"));
       });
     });
 
