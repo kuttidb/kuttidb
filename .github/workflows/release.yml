@@ -114,12 +114,14 @@ jobs:
             -DKUTTIDB_TLS=ON \
             $PLATFORM_ARGS
           cmake --build build-release -j"$JOBS"
-          # Variant 2 — telemetry-capable (curl + OpenSSL reporter; still off
-          # at runtime until the operator opts in).
+          # Variant 2 — telemetry-capable, the build the installer ships when
+          # a user accepts the community opt-in: reporting is ON by default
+          # (DO_NOT_TRACK=1 or --telemetry off always disable it).
           cmake -S . -B build-telemetry \
             -DCMAKE_BUILD_TYPE=Release \
             -DKUTTIDB_TLS=ON \
             -DKUTTIDB_TELEMETRY=ON \
+            -DKUTTIDB_TELEMETRY_DEFAULT_ON=ON \
             $PLATFORM_ARGS
           cmake --build build-telemetry -j"$JOBS"
 
@@ -145,9 +147,12 @@ jobs:
         run: |
           ./build-release/kuttidb --features | grep -qx 'telemetry=off' \
             || { echo "telemetry-free build must report telemetry=off"; exit 1; }
-          ./build-telemetry/kuttidb --features | grep -qx 'telemetry=v1' \
+          FEAT_T="$(./build-telemetry/kuttidb --features)"
+          printf '%s\n' "$FEAT_T" | grep -qx 'telemetry=v1' \
             || { echo "telemetry build must report telemetry=v1"; exit 1; }
-          echo "telemetry-free build reports telemetry=off; telemetry build reports telemetry=v1"
+          printf '%s\n' "$FEAT_T" | grep -qx 'telemetry-default=on' \
+            || { echo "telemetry build must default to reporting on"; exit 1; }
+          echo "telemetry-free reports telemetry=off; telemetry build reports telemetry=v1 and telemetry-default=on"
 
       - name: Package
         run: |
@@ -216,9 +221,9 @@ jobs:
             The installer asks whether you want to opt in to community
             telemetry: **no** (the default) installs the telemetry-free
             build, **yes** installs the telemetry-capable build
-            (`kuttidb-<version>-telemetry-<os>-<arch>.tar.gz`). Reporting
-            still never runs without your explicit opt-in, and
-            `DO_NOT_TRACK=1` always disables it.
+            (`kuttidb-<version>-telemetry-<os>-<arch>.tar.gz`) whose servers
+            report by default — one delayed, best-effort report per day.
+            Turn it off anytime with `DO_NOT_TRACK=1` or `--telemetry off`.
             Details: https://kuttidb.com/telemetry
 
             Verify a download: `sha256sum -c SHASUMS256.txt`

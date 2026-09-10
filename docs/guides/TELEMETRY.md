@@ -1,9 +1,11 @@
 # Telemetry
 
-KuttiDB telemetry is optional and disabled by default. Normal binaries are built
-without telemetry support. A telemetry-capable server sends one delayed,
-best-effort HTTPS report after explicit opt-in; reporting does not run in SDKs,
-install scripts, the web console, or the public website.
+KuttiDB telemetry is optional. Normal binaries are built without telemetry
+support — reporting is impossible in them. The official telemetry-capable
+build, which the installer ships when a user accepts the community opt-in,
+defaults to reporting on; self-built capable binaries default to off until you
+switch them on. Reporting never runs in SDKs, install scripts, the web
+console, or the public website.
 
 Its sole purpose is to publish a privacy-preserving, community-level view of
 KuttiDB adoption. It is not a diagnostic, support, monitoring, account, or
@@ -12,18 +14,25 @@ specific installation.
 
 ## Enable or disable it
 
-Build a telemetry-capable binary, then provide a private state directory:
+Telemetry mode resolves in this order: the `--telemetry on|off` flag, then the
+`KUTTIDB_TELEMETRY` environment variable, then the build default — and
+`DO_NOT_TRACK=1` always forces it off.
 
 ```sh
-make TELEMETRY=1
+make TELEMETRY=1                      # capable build, reporting off by default
 ./kuttidb --telemetry on --telemetry-state-dir /var/lib/kuttidb/.telemetry
 ```
 
-`--telemetry off` disables reporting. `DO_NOT_TRACK=1` always disables it,
-including when the CLI or `KUTTIDB_TELEMETRY=on` requests it. Restart the server
-after changing a setting. `--telemetry-endpoint HTTPS_URL` changes the sole
-destination; it does not enable telemetry by itself. The URL must be HTTPS with
-a path and cannot contain credentials, a query string, or a fragment.
+`--telemetry off` disables reporting. Restart the server after changing a
+setting. A build compiled with the opt-in default (official installer builds,
+or `make TELEMETRY=1 TELEMETRY_DEFAULT=1`) reports without any flags and picks
+its own private state directory under `${XDG_STATE_HOME:-$HOME/.local/state}`
+unless one is provided; a startup line announces it. An explicitly enabled
+telemetry that cannot resolve a state directory refuses to start (exit 2), a
+build-default enabled telemetry degrades to disabled with a warning instead.
+`--telemetry-endpoint HTTPS_URL` changes the sole destination; it does not
+enable telemetry by itself. The URL must be HTTPS with a path and cannot
+contain credentials, a query string, or a fragment.
 
 Managed local mode accepts `telemetry`, `telemetry_endpoint`, and
 `telemetry_state_dir` in `ServerParams`. Its default state path is
@@ -38,26 +47,28 @@ Every release publishes two tarball variants per platform
 | Tarball | Reporter |
 |---|---|
 | `kuttidb-<version>-<os>-<arch>.tar.gz` | not compiled in — reporting is impossible, even by misconfiguration |
-| `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` | compiled in, still off until you opt in |
+| `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` | compiled in, reporting **on by default** |
 
 The official installer (`curl -fsSL https://kuttidb.com/install.sh | bash`)
 asks once whether you want to contribute to the community adoption
-statistics:
+statistics — that answer is the decision point:
 
 - **No (the default)** — installs the telemetry-not-included build. Nothing
   can ever report from it.
-- **Yes** — installs the telemetry-capable build and writes
+- **Yes** — installs the telemetry-capable build whose servers report by
+  default (one delayed, best-effort HTTPS report per day, first one at least
+  15 minutes after startup). The installer also writes
   `~/.config/kuttidb/telemetry.env` with `KUTTIDB_TELEMETRY=on` plus a private
-  state directory under `~/.local/state/kuttidb/telemetry`. Reporting starts
-  only for servers started with that environment loaded — `source` the file
-  (the installer prints the line to add to your shell profile) or start with
-  `--telemetry on`. Declining later removes the env file again.
+  state directory, which covers servers started from a shell that loads it and
+  telemetry-capable binaries from older releases. Declining later removes the
+  env file again.
 
 Non-interactive installs (CI, no terminal) default to the telemetry-free
 build; pass `--telemetry yes|no` or set `KUTTIDB_TELEMETRY_OPTIN=yes|no` to
-choose explicitly. `DO_NOT_TRACK=1` always wins over the env file, the CLI,
-and this installer. The installer verifies after installing that
-`kuttidb --features` matches the choice it made.
+choose explicitly. `DO_NOT_TRACK=1` always wins — over the build default, the
+env file, the CLI, and this installer. `--telemetry off` likewise disables it.
+The installer verifies after installing that `kuttidb --features` matches the
+choice it made (`telemetry=v1` + `telemetry-default=on` for the opt-in build).
 
 ## What is reported
 

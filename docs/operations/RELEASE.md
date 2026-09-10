@@ -85,8 +85,8 @@ There is no time-based cadence yet; releases follow project milestones.
    with TLS → **full `ctest` suite as a release gate** (all 14 tests,
    including crash-recovery) on the telemetry-free build, the telemetry
    configuration test on the telemetry build → verification that OpenSSL is
-   really linked → `--features` gate (`telemetry=off` / `telemetry=v1`) →
-   two tarballs + SHA-256 each.
+   really linked → `--features` gate (`telemetry=off` / `telemetry=v1` +
+   `telemetry-default=on`) → two tarballs + SHA-256 each.
 
 4. **Release job publishes.** When all builds pass, it aggregates
    `SHASUMS256.txt` (eight tarballs) and creates the GitHub Release with the
@@ -115,11 +115,14 @@ source:
   and reporting is impossible even with `--telemetry on`. The plain name is
   kept so existing scripts and mirrors keep receiving
   telemetry-not-included binaries.
-- `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` — **telemetry-capable**
-  (`-DKUTTIDB_TELEMETRY=ON`, curl + OpenSSL reporter). `kuttidb --features`
-  reports `telemetry=v1`; reporting stays off at runtime until the operator
-  opts in, and `DO_NOT_TRACK=1` always disables it. This is the variant the
-  installer ships when a user accepts the community-telemetry opt-in question
+- `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` — **telemetry-capable,
+  reporting on by default** (`-DKUTTIDB_TELEMETRY=ON
+  -DKUTTIDB_TELEMETRY_DEFAULT_ON=ON`, curl + OpenSSL reporter).
+  `kuttidb --features` reports `telemetry=v1` and `telemetry-default=on`; a
+  server started without flags reports by default (state dir auto-resolved
+  under `${XDG_STATE_HOME:-$HOME/.local/state}`), and `DO_NOT_TRACK=1` or
+  `--telemetry off` always disable it. This is the variant the installer
+  ships when a user accepts the community-telemetry opt-in question
   (see [TELEMETRY.md](../guides/TELEMETRY.md)).
 
 Both variants contain:

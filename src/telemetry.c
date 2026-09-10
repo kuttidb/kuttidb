@@ -62,8 +62,25 @@ static const char *bucket(unsigned int n) {
     if (n <= 1000) return "101-1000"; return "1001+";
 }
 
+/* Create the state directory and any missing parents. Components are created
+ * owner-only (0700); existing parents are left untouched. Only the leaf is
+ * strictly re-checked by the callers (owner = euid, no group/other bits), so a
+ * pre-existing directory keeps its own permissions. */
+static int ensure_state_dir(void) {
+    char path[1024];
+    if (snprintf(path, sizeof path, "%s", reporter_state_dir) >= (int)sizeof path) return -1;
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        if (mkdir(path, 0700) < 0 && errno != EEXIST) return -1;
+        *p = '/';
+    }
+    if (mkdir(path, 0700) < 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
 static int make_state(char id[33]) {
-    if (mkdir(reporter_state_dir, 0700) < 0 && errno != EEXIST) return -1;
+    if (ensure_state_dir() < 0) return -1;
     struct stat st;
     if (lstat(reporter_state_dir, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 0077)) return -1;
     char path[1100];
@@ -89,7 +106,7 @@ static int make_state(char id[33]) {
 }
 
 static int lock_state(void) {
-    if (mkdir(reporter_state_dir, 0700) < 0 && errno != EEXIST) return -1;
+    if (ensure_state_dir() < 0) return -1;
     struct stat directory;
     if (lstat(reporter_state_dir, &directory) < 0 || !S_ISDIR(directory.st_mode) || directory.st_uid != geteuid() || (directory.st_mode & 0077)) return -1;
     char path[1100];

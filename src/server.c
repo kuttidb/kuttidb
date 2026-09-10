@@ -5017,6 +5017,11 @@ int main(int argc, char **argv) {
             puts("management-api-sse=off");
 #ifdef HAVE_TELEMETRY
             puts("telemetry=v1");
+#ifdef KUTTIDB_TELEMETRY_DEFAULT_ON
+            puts("telemetry-default=on");
+#else
+            puts("telemetry-default=off");
+#endif
 #else
             puts("telemetry=off");
 #endif
@@ -5185,15 +5190,22 @@ int main(int argc, char **argv) {
     }
 
     const char *telemetry_env = getenv("KUTTIDB_TELEMETRY");
-    const char *telemetry_effective = telemetry_mode ? telemetry_mode : telemetry_env;
+#ifdef KUTTIDB_TELEMETRY_DEFAULT_ON
+    const char *telemetry_build_default = "on";
+#else
+    const char *telemetry_build_default = "off";
+#endif
+    /* Precedence: CLI flag > environment > build default; DO_NOT_TRACK=1
+     * always wins. The build default is what the official telemetry-capable
+     * release variant compiles in when the installer's opt-in is accepted. */
+    const char *telemetry_effective = telemetry_mode ? telemetry_mode
+                                    : (telemetry_env ? telemetry_env : telemetry_build_default);
     const char *telemetry_env_endpoint = getenv("KUTTIDB_TELEMETRY_ENDPOINT");
     const char *telemetry_env_state = getenv("KUTTIDB_TELEMETRY_STATE_DIR");
     int telemetry_enabled = 0;
     if (getenv("DO_NOT_TRACK") && strcmp(getenv("DO_NOT_TRACK"), "1") == 0) telemetry_effective = "off";
-    if (telemetry_effective) {
-        if (strcmp(telemetry_effective, "on") == 0) telemetry_enabled = 1;
-        else if (strcmp(telemetry_effective, "off") != 0) { fprintf(stderr, "telemetry must be on or off\n"); return 2; }
-    }
+    if (strcmp(telemetry_effective, "on") == 0) telemetry_enabled = 1;
+    else if (strcmp(telemetry_effective, "off") != 0) { fprintf(stderr, "telemetry must be on or off\n"); return 2; }
     if (!telemetry_endpoint) telemetry_endpoint = telemetry_env_endpoint ? telemetry_env_endpoint : "https://telemetry.kuttidb.com/v1/report";
     if (!telemetry_state_dir) telemetry_state_dir = telemetry_env_state;
     if (telemetry_enabled && !telemetry_endpoint_valid(telemetry_endpoint)) {
@@ -5203,8 +5215,30 @@ int main(int argc, char **argv) {
     if (telemetry_enabled && !telemetry_state_dir && data_dir &&
         snprintf(telemetry_managed_state, sizeof telemetry_managed_state, "%s/.telemetry", data_dir) < (int)sizeof telemetry_managed_state)
         telemetry_state_dir = telemetry_managed_state;
+    /* Standalone fallback state path: the per-user XDG state home, else HOME.
+     * This is what makes a default-on telemetry build work with no flags at
+     * all — the reporter creates the directory itself with owner-only bits. */
+    char telemetry_home_state[1024] = {0};
+    if (telemetry_enabled && !telemetry_state_dir) {
+        const char *xdg_state = getenv("XDG_STATE_HOME");
+        const char *home = getenv("HOME");
+        if (xdg_state && xdg_state[0] == '/') {
+            if (snprintf(telemetry_home_state, sizeof telemetry_home_state, "%s/kuttidb/telemetry", xdg_state) < (int)sizeof telemetry_home_state)
+                telemetry_state_dir = telemetry_home_state;
+        } else if (home && home[0] == '/') {
+            if (snprintf(telemetry_home_state, sizeof telemetry_home_state, "%s/.local/state/kuttidb/telemetry", home) < (int)sizeof telemetry_home_state)
+                telemetry_state_dir = telemetry_home_state;
+        }
+    }
     if (telemetry_enabled && (!telemetry_state_dir || telemetry_state_dir[0] != '/')) {
-        fprintf(stderr, "enabled telemetry requires --telemetry-state-dir ABS_PATH (or managed --data-dir)\n"); return 2;
+        /* Explicitly requested telemetry must be fully configurable: refuse to
+         * start rather than silently report nothing. A build default degrades
+         * gracefully instead — run without telemetry rather than fail. */
+        if (telemetry_mode || telemetry_env) {
+            fprintf(stderr, "enabled telemetry requires --telemetry-state-dir ABS_PATH (or managed --data-dir)\n"); return 2;
+        }
+        fprintf(stderr, "telemetry disabled: cannot resolve a state directory (set --telemetry-state-dir or HOME)\n");
+        telemetry_enabled = 0;
     }
 
     int port = DEFAULT_PORT;

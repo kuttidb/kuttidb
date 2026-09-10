@@ -6,6 +6,7 @@ add_compile_definitions(_POSIX_C_SOURCE=200809L _DEFAULT_SOURCE _DARWIN_C_SOURCE
 
 option(KUTTIDB_TLS "Build TCP TLS support when OpenSSL is available" ON)
 option(KUTTIDB_TELEMETRY "Build optional HTTPS telemetry reporter" OFF)
+option(KUTTIDB_TELEMETRY_DEFAULT_ON "Default --telemetry to on (official opt-in build; requires KUTTIDB_TELEMETRY=ON)" OFF)
 
 if(NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR
@@ -51,6 +52,13 @@ if(KUTTIDB_TELEMETRY)
     endif()
     target_compile_definitions(kuttidb PRIVATE HAVE_TELEMETRY)
     target_link_libraries(kuttidb PRIVATE CURL::libcurl)
+endif()
+
+if(KUTTIDB_TELEMETRY_DEFAULT_ON)
+    if(NOT KUTTIDB_TELEMETRY)
+        message(FATAL_ERROR "KUTTIDB_TELEMETRY_DEFAULT_ON requires KUTTIDB_TELEMETRY=ON")
+    endif()
+    target_compile_definitions(kuttidb PRIVATE KUTTIDB_TELEMETRY_DEFAULT_ON)
 endif()
 
 add_library(kuttidb_embed SHARED src/embed.c src/embed_kuttidb.c)

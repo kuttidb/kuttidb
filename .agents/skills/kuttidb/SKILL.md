@@ -82,7 +82,7 @@ Unknown args print usage and exit `2`. `--help` and `--features` exit `0`.
 | `--job-completion-max-bytes N` | `131072` | 1024..67108864; aggregate canonical operation bound (state + completion). |
 | `--stream-wal PATH\|-` | `<WAL>.streams` | Durable stream WAL; `-` disables stream declarations (streams are durable-only — no volatile fallback) |
 | `--no-tcp` | off | Disable the TCP listener (Unix/embed only) |
-| `--telemetry on\|off` | off | Optional build (`make TELEMETRY=1`) only; sends one delayed, best-effort HTTPS report and never runs by default. `DO_NOT_TRACK=1` wins over CLI/environment. |
+| `--telemetry on\|off` | build default | Optional build (`make TELEMETRY=1`) only. Default off in self-built capable binaries; the official telemetry-capable build (`telemetry-default=on` in `--features`) defaults to on. Precedence: flag > `KUTTIDB_TELEMETRY` env > build default; `DO_NOT_TRACK=1` always forces off. |
 | `--telemetry-endpoint URL` | `https://telemetry.kuttidb.com/v1/report` | HTTPS report endpoint with a path; credentials, query strings, and fragments are rejected. Setting it alone does not enable reporting. |
 | `--telemetry-state-dir ABS_PATH` | required standalone; `<data-dir>/.telemetry` managed | Private reporter state. Never use the managed `instance.id` as telemetry identity. |
 
@@ -129,11 +129,17 @@ samples only a bucket of open native connections after 15 minutes of readiness.
 Official release tarballs come in two variants per platform: the plain
 `kuttidb-<version>-<os>-<arch>.tar.gz` is telemetry-free (reporter not
 compiled in), and `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` is
-telemetry-capable. The `install.sh` community opt-in question only selects the
-tarball; reporting still requires the opt-in env file it writes
-(`KUTTIDB_TELEMETRY=on`, private state dir) or an explicit
-`--telemetry on`, and `DO_NOT_TRACK=1` always wins. Non-interactive installs
-default to the telemetry-free build.
+telemetry-capable **with reporting on by default** (build flag
+`KUTTIDB_TELEMETRY_DEFAULT_ON`; `make TELEMETRY=1 TELEMETRY_DEFAULT=1`
+reproduces it). The `install.sh` community opt-in question selects the
+tarball; the opt-in build also writes `~/.config/kuttidb/telemetry.env`
+(`KUTTIDB_TELEMETRY=on`, private state dir) for shells and older binaries.
+Standalone servers resolve a default state dir under
+`${XDG_STATE_HOME:-$HOME/.local/state}/kuttidb/telemetry`; managed launches
+default it under `data_dir`. Explicit `--telemetry on` without a resolvable
+state dir refuses startup (exit 2); a build-default-on telemetry degrades to
+disabled with a warning instead. `DO_NOT_TRACK=1` always wins. Non-interactive
+installs default to the telemetry-free build.
 
 ## 3. Managed local mode — `kuttidb ensure`
 

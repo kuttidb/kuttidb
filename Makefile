@@ -3,6 +3,15 @@ CFLAGS = -O2 -Wall -Wextra -std=c11 -pthread -D_POSIX_C_SOURCE=200809L -D_DEFAUL
 LDFLAGS = -pthread
 TLS ?= 1
 TELEMETRY ?= 0
+# TELEMETRY_DEFAULT=1 compiles the default --telemetry to on (the official
+# opt-in installer build). Requires TELEMETRY=1.
+TELEMETRY_DEFAULT ?= 0
+
+ifneq ($(TELEMETRY_DEFAULT),0)
+ifneq ($(TELEMETRY),1)
+$(error TELEMETRY_DEFAULT=1 requires TELEMETRY=1)
+endif
+endif
 
 # Go caches must live under a sandbox-writable root (this workspace or the
 # platform temp dir); the home-directory defaults are not writable when the
@@ -24,6 +33,9 @@ endif
 
 ifeq ($(TELEMETRY),1)
 TELEMETRY_CFLAGS = -DHAVE_TELEMETRY
+ifeq ($(TELEMETRY_DEFAULT),1)
+TELEMETRY_CFLAGS += -DKUTTIDB_TELEMETRY_DEFAULT_ON
+endif
 TELEMETRY_LIBS = $(shell curl-config --libs 2>/dev/null)
 CFLAGS += $(TELEMETRY_CFLAGS)
 endif
