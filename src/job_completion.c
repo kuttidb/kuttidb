@@ -47,7 +47,7 @@ uint64_t job_proof_gc_locked(JobEngine *je, uint64_t now_mono) {
         JobProof **link = &je->proofs[b];
         while (*link) {
             JobProof *p = *link;
-            if (p->expires_mono_ms <= now_mono) {
+            if (p->expires_mono_ms + 60000 <= now_mono) {
                 *link = p->next;
                 je->proof_count--;
                 free(p->queue);
@@ -585,6 +585,22 @@ JobStatus job_complete(JobEngine *je, const JobCompletionRequest *req,
             if (stored) complete_result_fill(stored, out, 1);
             pthread_mutex_unlock(&je->state_lock);
             return stored ? JOB_OK : JOB_OPERATION_IN_DOUBT;
+        }
+        if (status == JOB_DELIVERY_NOT_OWNED) {
+            pthread_mutex_lock(&je->proof_lock);
+            JobProof *pp = job_proof_find_locked(je, req->proof);
+            int expired = pp && pp->queue_len == req->input_queue_len &&
+                          memcmp(pp->queue, req->input_queue,
+                                 req->input_queue_len) == 0 &&
+                          pp->queue_incarnation == req->input_incarnation &&
+                          pp->message_id == req->input_message_id &&
+                          pp->expires_mono_ms <= job_monotonic_ms() &&
+                          memcmp(pp->epoch, je->epoch, JOB_ID_LEN) == 0;
+            pthread_mutex_unlock(&je->proof_lock);
+            if (expired) {
+                atomic_fetch_add(&je->delivery_rejects, 1);
+                return JOB_DELIVERY_EXPIRED;
+            }
         }
         return (JobStatus)status;
     }
