@@ -80,14 +80,18 @@ There is no time-based cadence yet; releases follow project milestones.
    | `macos-x86_64` | `macos-15-intel` | macOS 12+ (`CMAKE_OSX_DEPLOYMENT_TARGET=12.0`) |
    | `macos-arm64` | `macos-15` | macOS 12+ |
 
-   Each job: CMake `Release` build with TLS → **full `ctest` suite as a
-   release gate** (all 14 tests, including crash-recovery) → verification that
-   OpenSSL is really linked → tarball + SHA-256.
+   Each job builds **both variants** from the same source (needs
+   `libssl-dev` + `libcurl4-openssl-dev` on Linux): a CMake `Release` build
+   with TLS → **full `ctest` suite as a release gate** (all 14 tests,
+   including crash-recovery) on the telemetry-free build, the telemetry
+   configuration test on the telemetry build → verification that OpenSSL is
+   really linked → `--features` gate (`telemetry=off` / `telemetry=v1`) →
+   two tarballs + SHA-256 each.
 
 4. **Release job publishes.** When all builds pass, it aggregates
-   `SHASUMS256.txt` and creates the GitHub Release with the tarballs. A
-   failed gate anywhere means **no release is published** — a partial release
-   is not possible.
+   `SHASUMS256.txt` (eight tarballs) and creates the GitHub Release with the
+   tarballs. A failed gate anywhere means **no release is published** — a
+   partial release is not possible.
 
 ### Dry runs
 
@@ -103,7 +107,22 @@ when touching the build, packaging, or the workflow itself.
 
 ## Release artifacts
 
-Every tarball `kuttidb-<version>-<os>-<arch>.tar.gz` contains:
+Every release ships two tarball variants per platform, built from the same
+source:
+
+- `kuttidb-<version>-<os>-<arch>.tar.gz` — **telemetry-free** (default). The
+  reporter is not compiled in; `kuttidb --features` reports `telemetry=off`
+  and reporting is impossible even with `--telemetry on`. The plain name is
+  kept so existing scripts and mirrors keep receiving
+  telemetry-not-included binaries.
+- `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` — **telemetry-capable**
+  (`-DKUTTIDB_TELEMETRY=ON`, curl + OpenSSL reporter). `kuttidb --features`
+  reports `telemetry=v1`; reporting stays off at runtime until the operator
+  opts in, and `DO_NOT_TRACK=1` always disables it. This is the variant the
+  installer ships when a user accepts the community-telemetry opt-in question
+  (see [TELEMETRY.md](../guides/TELEMETRY.md)).
+
+Both variants contain:
 
 | File | Purpose |
 |---|---|

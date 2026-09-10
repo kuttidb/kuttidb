@@ -131,6 +131,13 @@ curl -fsSL https://kuttidb.com/install.sh | bash
 kuttidb 7379 kuttidb.wal
 ```
 
+The installer asks once whether you want to contribute to **community
+telemetry**: answering no (the default) installs a build where the telemetry
+reporter is not compiled in at all; answering yes installs a telemetry-capable
+build and sets it up to report. CI/non-interactive installs default to
+telemetry-free — choose explicitly with `--telemetry yes|no`. Details:
+[Telemetry](docs/guides/TELEMETRY.md).
+
 Or build from a cloned repository:
 
 ```sh

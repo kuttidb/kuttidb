@@ -30,6 +30,35 @@ Managed local mode accepts `telemetry`, `telemetry_endpoint`, and
 `<data-dir>/.telemetry`. The state directory is independent from database WALs
 and `instance.id`; never copy it into an image or template.
 
+## Official binaries: with or without telemetry
+
+Every release publishes two tarball variants per platform
+([RELEASE.md](../operations/RELEASE.md)):
+
+| Tarball | Reporter |
+|---|---|
+| `kuttidb-<version>-<os>-<arch>.tar.gz` | not compiled in — reporting is impossible, even by misconfiguration |
+| `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` | compiled in, still off until you opt in |
+
+The official installer (`curl -fsSL https://kuttidb.com/install.sh | bash`)
+asks once whether you want to contribute to the community adoption
+statistics:
+
+- **No (the default)** — installs the telemetry-not-included build. Nothing
+  can ever report from it.
+- **Yes** — installs the telemetry-capable build and writes
+  `~/.config/kuttidb/telemetry.env` with `KUTTIDB_TELEMETRY=on` plus a private
+  state directory under `~/.local/state/kuttidb/telemetry`. Reporting starts
+  only for servers started with that environment loaded — `source` the file
+  (the installer prints the line to add to your shell profile) or start with
+  `--telemetry on`. Declining later removes the env file again.
+
+Non-interactive installs (CI, no terminal) default to the telemetry-free
+build; pass `--telemetry yes|no` or set `KUTTIDB_TELEMETRY_OPTIN=yes|no` to
+choose explicitly. `DO_NOT_TRACK=1` always wins over the env file, the CLI,
+and this installer. The installer verifies after installing that
+`kuttidb --features` matches the choice it made.
+
 ## What is reported
 
 The v1 body has exactly three fields: `schema_version: 1`, a random endpoint-

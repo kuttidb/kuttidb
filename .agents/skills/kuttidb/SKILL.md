@@ -126,6 +126,14 @@ Telemetry settings are also allowlisted through `kuttidb ensure` and Python
 `telemetry_state_dir`; managed launches default the state path under `data_dir`.
 The reporter is built out by default, has no SDK/install/browser beacon, and
 samples only a bucket of open native connections after 15 minutes of readiness.
+Official release tarballs come in two variants per platform: the plain
+`kuttidb-<version>-<os>-<arch>.tar.gz` is telemetry-free (reporter not
+compiled in), and `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` is
+telemetry-capable. The `install.sh` community opt-in question only selects the
+tarball; reporting still requires the opt-in env file it writes
+(`KUTTIDB_TELEMETRY=on`, private state dir) or an explicit
+`--telemetry on`, and `DO_NOT_TRACK=1` always wins. Non-interactive installs
+default to the telemetry-free build.
 
 ## 3. Managed local mode — `kuttidb ensure`
 

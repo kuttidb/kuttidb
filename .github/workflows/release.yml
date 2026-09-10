@@ -5,11 +5,21 @@
 # artifacts are only attached to the workflow run and no GitHub Release is
 # created.
 #
-# Each platform job: CMake Release build, the full ctest suite as a release
-# gate, a check that TLS (OpenSSL) is really linked in, then a tarball. The
-# release job aggregates per-platform checksums into SHASUMS256.txt and
-# publishes the GitHub Release (marked prerelease when the tag contains a
-# hyphen, e.g. v0.0.2-beta).
+# Each platform job builds BOTH variants from the same source:
+#
+#   - telemetry-free (default): the reporter is not compiled in — even
+#     `--telemetry on` cannot report. Tarball keeps the plain asset name
+#     `kuttidb-<version>-<os>-<arch>.tar.gz` so existing scripts keep
+#     receiving telemetry-not-included binaries.
+#   - telemetry-capable: `-DKUTTIDB_TELEMETRY=ON` (curl + OpenSSL reporter).
+#     Tarball: `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz`.
+#
+# The full ctest suite runs once as a release gate on the telemetry-free
+# build; the telemetry build gets the telemetry configuration test plus a
+# `--features` check. Gates: TLS (OpenSSL) really linked, `telemetry=off` /
+# `telemetry=v1` reported by the matching binary. The release job aggregates
+# per-tarball checksums into SHASUMS256.txt and publishes the GitHub Release
+# (marked prerelease when the tag contains a hyphen, e.g. v0.0.2-beta).
 #
 # Process doc: docs/operations/RELEASE.md
 name: Release official binaries
@@ -63,11 +73,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install OpenSSL headers
+      - name: Install OpenSSL and libcurl headers
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends libssl-dev
+            # libssl-dev: TLS; libcurl4-openssl-dev: telemetry reporter
+            sudo apt-get install -y --no-install-recommends libssl-dev libcurl4-openssl-dev
           else
             BREW_OPENSSL="$(brew --prefix openssl@3 2>/dev/null || true)"
             if [ -z "$BREW_OPENSSL" ] || [ ! -d "$BREW_OPENSSL" ]; then
@@ -86,7 +97,7 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Building version: $VERSION"
 
-      - name: Configure and build (Release)
+      - name: Configure and build both variants (Release)
         run: |
           PLATFORM_ARGS=""
           if [ "$RUNNER_OS" = macOS ]; then
@@ -95,14 +106,31 @@ jobs:
             # failing at configure time is a clearer error.
             PLATFORM_ARGS="-DOPENSSL_ROOT_DIR=$OPENSSL_ROOT -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0"
           fi
+          JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+          # Variant 1 — telemetry-free (the plain asset name; the reporter is
+          # not compiled in, so it can never report).
           cmake -S . -B build-release \
             -DCMAKE_BUILD_TYPE=Release \
             -DKUTTIDB_TLS=ON \
             $PLATFORM_ARGS
-          cmake --build build-release -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+          cmake --build build-release -j"$JOBS"
+          # Variant 2 — telemetry-capable (curl + OpenSSL reporter; still off
+          # at runtime until the operator opts in).
+          cmake -S . -B build-telemetry \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DKUTTIDB_TLS=ON \
+            -DKUTTIDB_TELEMETRY=ON \
+            $PLATFORM_ARGS
+          cmake --build build-telemetry -j"$JOBS"
 
-      - name: Test gate (ctest)
+      - name: Test gate (ctest, telemetry-free build)
         run: ctest --test-dir build-release --output-on-failure
+
+      - name: Telemetry build gate (reporter configuration)
+        # Full source is identical; the telemetry delta is one compile
+        # definition, so the focused configuration test plus the --features
+        # check below cover the variant.
+        run: ctest --test-dir build-telemetry -R telemetry --output-on-failure
 
       - name: Verify TLS is linked
         run: |
@@ -113,18 +141,34 @@ jobs:
           fi
           echo "OpenSSL is linked into kuttidb (TLS available)"
 
+      - name: Verify build feature flags
+        run: |
+          ./build-release/kuttidb --features | grep -qx 'telemetry=off' \
+            || { echo "telemetry-free build must report telemetry=off"; exit 1; }
+          ./build-telemetry/kuttidb --features | grep -qx 'telemetry=v1' \
+            || { echo "telemetry build must report telemetry=v1"; exit 1; }
+          echo "telemetry-free build reports telemetry=off; telemetry build reports telemetry=v1"
+
       - name: Package
         run: |
-          PKG="kuttidb-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
-          mkdir -p "dist/${PKG}"
-          cp -p build-release/kuttidb build-release/kuttidb-bench "dist/${PKG}/"
-          cp -p "build-release/${EMBED_LIB}" "dist/${PKG}/"
-          cp -p kuttidb-cli README.md LICENSE "dist/${PKG}/"
-          tar -czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
+          PKG_PLAIN="kuttidb-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          PKG_TELE="kuttidb-${VERSION}-telemetry-${{ matrix.os }}-${{ matrix.arch }}"
+          # Shared artifacts come from the telemetry-free build; only the
+          # kuttidb server differs between the two variants.
+          for PKG in "$PKG_PLAIN" "$PKG_TELE"; do
+            mkdir -p "dist/${PKG}"
+            cp -p "build-release/kuttidb-bench" "dist/${PKG}/"
+            cp -p "build-release/${EMBED_LIB}" "dist/${PKG}/"
+            cp -p kuttidb-cli README.md LICENSE "dist/${PKG}/"
+          done
+          cp -p build-release/kuttidb "dist/${PKG_PLAIN}/kuttidb"
+          cp -p build-telemetry/kuttidb "dist/${PKG_TELE}/kuttidb"
+          tar -czf "dist/${PKG_PLAIN}.tar.gz" -C dist "${PKG_PLAIN}"
+          tar -czf "dist/${PKG_TELE}.tar.gz" -C dist "${PKG_TELE}"
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "dist/${PKG}.tar.gz"
+            sha256sum "dist/${PKG_PLAIN}.tar.gz" "dist/${PKG_TELE}.tar.gz"
           else
-            shasum -a 256 "dist/${PKG}.tar.gz"
+            shasum -a 256 "dist/${PKG_PLAIN}.tar.gz" "dist/${PKG_TELE}.tar.gz"
           fi
           ls -la dist
 
@@ -168,6 +212,14 @@ jobs:
 
             Install in one line (macOS arm64/x86_64, Linux x86_64/arm64):
             `curl -fsSL https://kuttidb.com/install.sh | bash`
+
+            The installer asks whether you want to opt in to community
+            telemetry: **no** (the default) installs the telemetry-free
+            build, **yes** installs the telemetry-capable build
+            (`kuttidb-<version>-telemetry-<os>-<arch>.tar.gz`). Reporting
+            still never runs without your explicit opt-in, and
+            `DO_NOT_TRACK=1` always disables it.
+            Details: https://kuttidb.com/telemetry
 
             Verify a download: `sha256sum -c SHASUMS256.txt`
 

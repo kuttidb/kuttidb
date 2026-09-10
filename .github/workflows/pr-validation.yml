@@ -71,6 +71,18 @@ jobs:
           cmake --build build-pr -j4
           ctest --test-dir build-pr --output-on-failure
 
+      - name: Telemetry-enabled CMake build (release variant)
+        # The release pipeline ships a telemetry-capable build too; catch
+        # curl/OpenSSL reporter breakage here instead of at tag time.
+        run: |
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+          cmake -S . -B build-pr-telemetry -DCMAKE_BUILD_TYPE=Release -DKUTTIDB_TELEMETRY=ON
+          cmake --build build-pr-telemetry -j4 --target kuttidb telemetry_config_test
+          ./build-pr-telemetry/telemetry_config_test
+          ./build-pr-telemetry/kuttidb --features | grep -qx 'telemetry=v1'
+
   go:
     name: Go client (incl. job completion)
     runs-on: ubuntu-latest
