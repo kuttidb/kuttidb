@@ -280,7 +280,7 @@ func main() {
     install: `<dependency>
   <groupId>io.github.kuttidb</groupId>
   <artifactId>kuttidb-client</artifactId>
-  <version>0.0.8-beta</version>
+  <version>0.1.2</version>
 </dependency>`,
     source: 'clients/java',
     note: 'Add this dependency to your Maven project (Java 17+). Save the example as App.java; connect to a server on port 7379.',
@@ -354,7 +354,7 @@ try (KuttiDBClient db = new KuttiDBClient("127.0.0.1", 7379)) {
   },
   rust: {
     name: 'Rust',
-    install: 'cargo add kuttidb@0.0.6-beta',
+    install: 'cargo add kuttidb@0.1.0',
     source: 'clients/rust',
     note: 'Add to a Cargo project. With a server on port 7379, save as src/main.rs and run cargo run.',
     cache: `use std::time::Duration;
