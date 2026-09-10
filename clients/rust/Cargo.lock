@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "kuttidb"
-version = "0.0.7-beta"
+version = "0.1.3"
 dependencies = [
  "rustls",
  "webpki-roots",
