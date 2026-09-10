@@ -4,13 +4,13 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * KuttiDB console design system — the working side of the KuttiDB landing page.
+ * KuttiDB console design system.
  * Paper canvas, olive-black ink, precise rules, compact squared controls, and
  * one toast mascot. Values are specified in docs/design/MANAGEMENT_UI_DESIGN_SYSTEM.md;
- * brand primitives come from landing/landing.css.
+ * brand primitives are defined in the management console design system.
  */
 :root {
-  /* Brand primitives (landing stylesheet). */
+  /* Brand primitives. */
   --brand-paper: #f5f2e9;
   --brand-ink: #27271f;
   --brand-orange: #ed742f;

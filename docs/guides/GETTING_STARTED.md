@@ -26,7 +26,7 @@ your platform (macOS arm64/x86_64, Linux x86_64/arm64), downloads the latest
 release, and verifies its checksum:
 
 ```sh
-curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
+curl -fsSL https://kuttidb.com/install.sh | bash
 kuttidb 7379 kuttidb.wal
 ```
 

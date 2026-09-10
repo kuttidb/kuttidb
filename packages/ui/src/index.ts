@@ -1,7 +1,6 @@
 /**
  * Shared brand tokens for the KuttiDB management UI, aligned with the console
- * design system (docs/design/MANAGEMENT_UI_DESIGN_SYSTEM.md) and the landing
- * stylesheet (landing/landing.css). The live token source of truth for the
+ * design system (docs/design/MANAGEMENT_UI_DESIGN_SYSTEM.md). The live token source of truth for the
  * console itself is apps/management-ui/src/client/styles.css.
  */
 export const managementUiDesignTokens = {

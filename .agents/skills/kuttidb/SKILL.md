@@ -82,6 +82,9 @@ Unknown args print usage and exit `2`. `--help` and `--features` exit `0`.
 | `--job-completion-max-bytes N` | `131072` | 1024..67108864; aggregate canonical operation bound (state + completion). |
 | `--stream-wal PATH\|-` | `<WAL>.streams` | Durable stream WAL; `-` disables stream declarations (streams are durable-only — no volatile fallback) |
 | `--no-tcp` | off | Disable the TCP listener (Unix/embed only) |
+| `--telemetry on\|off` | off | Optional build (`make TELEMETRY=1`) only; sends one delayed, best-effort HTTPS report and never runs by default. `DO_NOT_TRACK=1` wins over CLI/environment. |
+| `--telemetry-endpoint URL` | `https://telemetry.kuttidb.com/v1/report` | HTTPS report endpoint with a path; credentials, query strings, and fragments are rejected. Setting it alone does not enable reporting. |
+| `--telemetry-state-dir ABS_PATH` | required standalone; `<data-dir>/.telemetry` managed | Private reporter state. Never use the managed `instance.id` as telemetry identity. |
 
 ### Metrics listener (optional)
 
@@ -117,6 +120,12 @@ startup if the token file or audit log is unsafe, or the bind fails.
 `--startup-orphan-timeout-ms N`, `--ready-fd N`, `--max-memory-mb N`,
 `--unix-path PATH`. `--listen tcp:` accepts only a literal IPv4 loopback
 endpoint; DNS names are never resolved.
+
+Telemetry settings are also allowlisted through `kuttidb ensure` and Python
+`ServerParams` as `telemetry`, `telemetry_endpoint`, and
+`telemetry_state_dir`; managed launches default the state path under `data_dir`.
+The reporter is built out by default, has no SDK/install/browser beacon, and
+samples only a bucket of open native connections after 15 minutes of readiness.
 
 ## 3. Managed local mode — `kuttidb ensure`
 

@@ -107,8 +107,6 @@ The script uses an installed binary or downloads a checksum-verified release,
 runs on a private local socket, and removes its own server and temporary data
 when finished. Download time varies; the demo itself takes seconds.
 
-[![Recorded demo: cache, report worker, durable queue, event replay, and crash recovery](landing/demo.gif)](https://kuttidb.com/#demo)
-
 <details>
 <summary><strong>What this recording proves</strong></summary>
 
@@ -122,15 +120,14 @@ Already cloned the repository? Run `make && python3 examples/saas_demo.py`.
 </details>
 
 [Read the demo](examples/saas_demo.py) ·
-[Follow the walkthrough](docs/guides/SAAS_DEMO.md) ·
-[Replay the recording](https://kuttidb.com/#demo)
+[Follow the walkthrough](docs/guides/SAAS_DEMO.md)
 
 ## Install and run
 
 Prebuilt binaries are available for **macOS and Linux**, on **arm64 and x86_64**:
 
 ```sh
-curl -fsSL https://kuttidb.github.io/kuttidb/install.sh | bash
+curl -fsSL https://kuttidb.com/install.sh | bash
 kuttidb 7379 kuttidb.wal
 ```
 
@@ -188,7 +185,7 @@ atomic-operation, and stream APIs, including managed local servers. The C/C++
 embedded API provides shared-memory cache access; use the socket clients for
 messaging. Each SDK versions independently.
 
-[Browse usage examples](https://kuttidb.com/#workbench-title) ·
+[Browse usage examples](examples) ·
 [Package publishing and releases](docs/operations/CLIENT_PUBLISHING.md)
 
 ## Connect from your application
@@ -261,13 +258,6 @@ The optional Management API (`/api/admin/v1`) and self-hosted console cover
 keyspace entries, queues, routing, stream tails, consumer groups, atomic
 operations, and maintenance jobs.
 
-[![Recorded console tour: overview, queues, retained messages](landing/media/console-tour.gif)](docs/api/MANAGEMENT_API.md)
-
-| Overview — real facts, no invented charts | Queue messages — browsing never consumes |
-|---|---|
-| ![Console overview with engine summaries, recent jobs, and persistence facts](landing/media/console-overview.png) | ![Queue detail listing retained messages with state, size, and delivery counts](landing/media/console-queue-messages.png) |
-| ![Console overview in dark mode with olive surfaces](landing/media/console-overview-dark.png) | ![Keyspace entry inspector with encoding tabs](landing/media/console-keyspace-inspector.png) |
-
 ### Run the console
 
 **1. Start KuttiDB with the Management API enabled:**
@@ -320,6 +310,7 @@ ports, and a Prometheus metrics listener. Multi-architecture images cover
 | Document | Contents |
 |---|---|
 | [GETTING_STARTED.md](docs/guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
+| [TELEMETRY.md](docs/guides/TELEMETRY.md) | Optional telemetry, public statistics, and privacy controls |
 | [ATOMIC_JOB_COMPLETION.md](docs/guides/ATOMIC_JOB_COMPLETION.md) | Atomic job completion: durable state, ACK, and the next message in one commit |
 | [CLIENT_FEATURE_MATRIX.md](docs/guides/CLIENT_FEATURE_MATRIX.md) | Per-client feature coverage, method mapping, and transports |
 | [SAAS_DEMO.md](docs/guides/SAAS_DEMO.md) | One-command report demo: cache, background jobs, event replay, and crash recovery |
@@ -334,7 +325,6 @@ ports, and a Prometheus metrics listener. Multi-architecture images cover
 | [MANAGEMENT_API.md](docs/api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
 | [MANAGEMENT_UI_DESIGN_SYSTEM.md](docs/design/MANAGEMENT_UI_DESIGN_SYSTEM.md) | Brand-based console design: tokens, components, layouts, and interaction states |
 | [DEPLOYMENT.md](docs/operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
-| [LANDING_PAGE.md](docs/operations/LANDING_PAGE.md) | Preview the landing page, maintain client examples, and serve it with GitHub Pages |
 | [RELEASE.md](docs/operations/RELEASE.md) | Release cycle, official binaries, tagging process |
 | [BENCHMARKS.md](docs/operations/BENCHMARKS.md) | Recorded benchmark methodology and results |
 | [MIGRATION.md](docs/guides/MIGRATION.md) | When to use Redis/RabbitMQ/Kafka/SQLite instead |

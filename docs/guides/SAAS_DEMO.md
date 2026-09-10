@@ -14,15 +14,13 @@ curl -fsSL https://kuttidb.com/demo.sh | bash
 ```
 
 The runner uses `kuttidb` on your PATH or in `~/.local/bin`. If neither exists,
-it uses the existing [installer](../../landing/install.sh) to download a
-checksum-verified release into a temporary folder. The usual
+it downloads a checksum-verified release into a temporary folder. The usual
 [release platform requirements](../operations/RELEASE.md) apply. Downloads
 may take longer than a minute on a slow connection; the actual demo takes
 seconds. It doesn't install into your system or change your PATH.
 
-To inspect the runner before executing it, download
-[demo.sh](../../landing/demo.sh) to a file and read it. The complete application
-is [examples/saas_demo.py](../../examples/saas_demo.py).
+To inspect the runner before executing it, download it to a file and read it.
+The complete application is [examples/saas_demo.py](../../examples/saas_demo.py).
 
 From a source checkout:
 
@@ -87,46 +85,3 @@ A real worker must handle retries and duplicate external effects, including
 the window between appending an event and acknowledging the job. See
 [DURABILITY.md](../design/DURABILITY.md) for the existing atomic
 cache-plus-queue operations and their exact scope.
-
-## Recording and GitHub Pages
-
-The landing page plays an actual captured local run, not a database running in
-the visitor's browser. The README animation and page transcript come from the
-same [recording](../../landing/demo-recording.json), which includes the host,
-timestamp, server hash, and measured output. No production data is recorded.
-
-To refresh it after a successful build:
-
-```sh
-python3 examples/saas_demo.py --delay 0.6 --record landing/demo-recording.json
-python3 examples/render_demo_recording.py
-```
-
-Rendering the README GIF requires Pillow on the maintainer's machine; running
-the demo does not. The renderer also updates the page's static transcript so
-the result remains readable without JavaScript. Commit the JSON, GIF, and
-updated landing page together.
-
-The existing GitHub Pages workflow builds `landing/demo.tar.gz` from the
-canonical example and `src/kuttidb_client.py` in the same checkout. It then
-publishes the existing `landing/` directory. The tarball is generated and
-ignored by Git; there is no second copy of the SDK to maintain.
-
-For a local preview, stage the archive before starting a static server:
-
-```sh
-python3 examples/package_demo.py
-python3 -m http.server 8000 --directory landing --bind 127.0.0.1
-```
-
-In another terminal, test the downloaded bundle against your local binary:
-
-```sh
-curl -fsSL http://127.0.0.1:8000/demo.sh | \
-  KUTTIDB_DEMO_BASE_URL=http://127.0.0.1:8000 KUTTIDB_SERVER="$PWD/kuttidb" bash
-```
-
-`KUTTIDB_DEMO_BASE_URL` can also target a GitHub Pages project subpath. All
-recording and asset links within the landing page are relative. On the public
-site the default is `https://kuttidb.com`; the command becomes available when
-the updated Pages workflow deploys this change.

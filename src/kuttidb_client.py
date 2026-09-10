@@ -458,6 +458,9 @@ class ServerParams:
     job_receipts_max_count: int | None = None
     job_receipt_retention_ms: int | None = None
     job_completion_max_bytes: int | None = None
+    telemetry: str | None = None
+    telemetry_endpoint: str | None = None
+    telemetry_state_dir: str | None = None
 
     def __post_init__(self):
         data_dir = os.path.abspath(os.fspath(self.data_dir))
@@ -486,6 +489,8 @@ class ServerParams:
             raise ManagedServerConfigurationError(
                 "job_completion requires an explicit queue_wal (the durable "
                 "Queue WAL is the completion commit authority)")
+        if self.telemetry not in {None, "on", "off"}:
+            raise ManagedServerConfigurationError("telemetry must be 'on' or 'off'")
         if self.fsync_ms is not None and (not isinstance(self.fsync_ms, int) or self.fsync_ms < 0):
             raise ManagedServerConfigurationError("fsync_ms must be a non-negative integer")
         for name in ("auth_file", "queue_wal", "stream_wal", "tls_cert", "tls_key", "metrics_token_file",
@@ -495,6 +500,14 @@ class ServerParams:
                 if not isinstance(value, (str, os.PathLike)) or not os.fspath(value):
                     raise ManagedServerConfigurationError(f"{name} must be a non-empty path")
                 object.__setattr__(self, name, os.path.abspath(os.fspath(value)))
+        for name in ("telemetry_state_dir",):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, (str, os.PathLike)) or not os.path.isabs(os.fspath(value)):
+                    raise ManagedServerConfigurationError(f"{name} must be an absolute path")
+                object.__setattr__(self, name, os.path.abspath(os.fspath(value)))
+        if self.telemetry_endpoint is not None and (not isinstance(self.telemetry_endpoint, str) or not self.telemetry_endpoint.startswith("https://")):
+            raise ManagedServerConfigurationError("telemetry_endpoint must be an HTTPS URL")
         if (self.tls_cert is None) != (self.tls_key is None):
             raise ManagedServerConfigurationError("tls_cert and tls_key must be supplied together")
         if self.transport == "unix" and self.tls_cert is not None:
@@ -711,6 +724,8 @@ class KuttiDBClient:
             ("admin_tls_key", "--admin-tls-key"), ("admin_max_clients", "--admin-max-clients"),
             ("admin_max_tail_clients", "--admin-max-tail-clients"), ("admin_session_limit", "--admin-session-limit"),
             ("admin_job_limit", "--admin-job-limit"),
+            ("telemetry", "--telemetry"), ("telemetry_endpoint", "--telemetry-endpoint"),
+            ("telemetry_state_dir", "--telemetry-state-dir"),
         )
         for attribute, flag in optional:
             value = getattr(server, attribute)

@@ -218,7 +218,9 @@ int managed_launcher_maybe_run(int argc, char **argv) {
             strcmp(argv[i], "--job-receipts-max-memory-mb") == 0 ||
             strcmp(argv[i], "--job-receipts-max-count") == 0 ||
             strcmp(argv[i], "--job-receipt-retention-ms") == 0 ||
-            strcmp(argv[i], "--job-completion-max-bytes") == 0) {
+            strcmp(argv[i], "--job-completion-max-bytes") == 0 ||
+            strcmp(argv[i], "--telemetry") == 0 || strcmp(argv[i], "--telemetry-endpoint") == 0 ||
+            strcmp(argv[i], "--telemetry-state-dir") == 0) {
             if (++i >= argc) return ENSURE_BAD_CONFIG;
             const char *flag = argv[i - 1];
             const char *v = argv[i];
@@ -233,6 +235,8 @@ int managed_launcher_maybe_run(int argc, char **argv) {
                 /* Ranges are re-validated by the server; here only reject
                  * obviously non-numeric values so config drift fails fast. */
                 if (!v[0]) return ENSURE_BAD_CONFIG;
+            } else if (strcmp(flag, "--telemetry") == 0) {
+                if (strcmp(v, "on") && strcmp(v, "off")) return ENSURE_BAD_CONFIG;
             }
             else if (strcmp(flag, "--idle-timeout-ms") == 0 || strcmp(flag, "--startup-timeout-ms") == 0 || strcmp(flag, "--startup-orphan-timeout-ms") == 0) {
                 if (parse_ms(v, strcmp(flag, "--idle-timeout-ms") == 0 ? &idle_ms : strcmp(flag, "--startup-timeout-ms") == 0 ? &startup_ms : &orphan_ms) < 0) return ENSURE_BAD_CONFIG;

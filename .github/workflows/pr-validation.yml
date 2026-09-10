@@ -15,12 +15,10 @@ on:
   push:
     branches: ['*']
     paths-ignore:
-      - 'landing/**'
       - 'docs/**'
       - '**.md'
   pull_request:
     paths-ignore:
-      - 'landing/**'
       - 'docs/**'
       - '**.md'
   workflow_dispatch: {}

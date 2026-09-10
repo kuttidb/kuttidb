@@ -8,7 +8,7 @@ the management UI redesign instruction (a local planning document under
 
 ## 1. Direction: the KuttiDB workbench
 
-The console should feel like the working side of the KuttiDB landing page:
+The console should use the KuttiDB brand system:
 warm paper, olive-black type, precise rules, compact controls, and one familiar
 toast mascot. Give operators a clear view of their server and a predictable place
 to inspect values, manage deliveries, read streams, and run maintenance.
@@ -21,13 +21,11 @@ information is a successful screen.
 
 | Reference | What it establishes | Console translation |
 |---|---|---|
-| [Landing page](../../landing/index.html) and [stylesheet](../../landing/landing.css) | Paper `#f5f2e9`, ink `#27271f`, orange `#ed742f`, green `#c8daac`; Helvetica and system monospace; ruled sections | Keep these brand primitives; reduce the scale and spacing for repeated daily use |
-| [Original logo](../../landing/logo.png) | Smiling toast with bitten corner, warm crust, transparent background | Reuse the artwork, upright, at a small size |
-| [Console mark](../../apps/management-ui/public/kuttidb-mark.png) | Visually matches the landing mascot | Use this existing public asset after verifying the image still matches |
+| [Console mark](../../apps/management-ui/public/kuttidb-mark.png) | Smiling toast with bitten corner, warm crust, transparent background | Use the existing public asset, upright, at a small size |
+| Brand tokens below | Paper `#f5f2e9`, ink `#27271f`, orange `#ed742f`, green `#c8daac`; Helvetica and system monospace; ruled sections | Keep these primitives; reduce the scale and spacing for repeated daily use |
 | [Current console tokens](../../apps/management-ui/src/client/styles.css) | Light/dark semantic tokens and Tailwind aliases | Preserve the token interface while replacing its visual values |
 | [Current components](../../apps/management-ui/src/client/components/ui/) | Radix interactions and local primitives | Restyle these primitives; preserve accessible behavior |
 
-The primary inspiration is `landing/index.html`, not `landing/alternative/`.
 No outside product is a required reference and no commercial font is needed.
 
 ### Brand boundaries
@@ -41,9 +39,9 @@ No outside product is a required reference and no commercial font is needed.
   it in the page body. Maximum one mascot per visible screen.
 - Use serif emphasis only for an optional Connections welcome sentence; it has
   no role in tables, page titles, forms, dialogs, or operational messages.
-- Bring over the landing page's section rules and material palette. Oversized
-  headlines, full orange hero panels, marketing arrows, and slogans belong to
-  the landing page.
+- Use ruled sections and the material palette sparingly. Oversized headlines,
+  full orange hero panels, marketing arrows, and slogans do not belong in the
+  console.
 
 ## 2. Concrete visual rules
 
@@ -77,8 +75,8 @@ No outside product is a required reference and no commercial font is needed.
 
 ## 3. Color system
 
-These are exact target values. Brand primitives come from the landing stylesheet;
-supporting semantic colors are proposed console additions.
+These are exact target values. Supporting semantic colors are proposed console
+additions.
 
 | Token | Light | Dark | Purpose |
 |---|---|---|---|
@@ -125,8 +123,8 @@ identify form controls by itself; use `--input` for those outlines. These checks
 cover token pairs, not a completed accessibility review of rendered components.
 Recheck actual foreground/background combinations, including hover and dark mode.
 
-Dark mode should resemble the landing page's olive-black demo section. Preserve
-hierarchy and density. Do not apply a global brown tint or lower text opacity.
+Dark mode uses an olive-black base. Preserve hierarchy and density. Do not apply
+a global brown tint or lower text opacity.
 Resolve an explicit stored theme before OS preference, then keep one theme across
 Connections, locked states, the shell, and portals. Set `color-scheme` to the
 resolved theme. Persist only this harmless preference, never credentials.
@@ -416,7 +414,7 @@ never consume work. Do not reduce these tabs to a generic inspector.
 The redesign is complete when all current workflows follow this system, rather
 than only Overview. Review a populated table, payload editor, empty state,
 connection error, stale read, locked profile, destructive dialog, and dark mode.
-Compare the console with the landing page for palette, typography, rules, and
+Compare the console with this design system for palette, typography, rules, and
 mascot treatment. It should read as one product while giving operational data
 the space and density it needs.
 

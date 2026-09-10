@@ -47,7 +47,7 @@ If a document spans categories, pick the primary audience: operators →
 3. Use relative links between documents. After moving a document, fix:
    its outbound links, links pointing at it from other docs, the
    `README.md` tables, and the GitHub `blob/main/...` links in
-   `landing/index.html`.
+   the separate private website repository.
 4. Source comments may reference documents — use the repo-root path
    (e.g. `docs/design/ARCHITECTURE.md`), never a bare filename.
 5. Do not rename documents casually; agents and CI reference them by path.

@@ -2,6 +2,7 @@ CC = cc
 CFLAGS = -O2 -Wall -Wextra -std=c11 -pthread -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE
 LDFLAGS = -pthread
 TLS ?= 1
+TELEMETRY ?= 0
 
 # Go caches must live under a sandbox-writable root (this workspace or the
 # platform temp dir); the home-directory defaults are not writable when the
@@ -19,6 +20,12 @@ ifneq ($(strip $(OPENSSL_PREFIX)),)
 TLS_CFLAGS = -DHAVE_OPENSSL -I$(OPENSSL_PREFIX)/include
 TLS_LIBS = -L$(OPENSSL_PREFIX)/lib -lssl -lcrypto
 CFLAGS += $(TLS_CFLAGS)
+endif
+
+ifeq ($(TELEMETRY),1)
+TELEMETRY_CFLAGS = -DHAVE_TELEMETRY
+TELEMETRY_LIBS = $(shell curl-config --libs 2>/dev/null)
+CFLAGS += $(TELEMETRY_CFLAGS)
 endif
 endif
 
@@ -52,6 +59,9 @@ managed_lifecycle_test: src/test_managed_lifecycle.c src/managed_lifecycle.c src
 managed_lock_test: src/test_managed_lock.c src/instance_lock.c src/instance_lock.h
 	$(CC) $(CFLAGS) -Isrc -o $@ src/test_managed_lock.c src/instance_lock.c $(LDFLAGS)
 
+telemetry_config_test: src/test_telemetry_config.c src/telemetry.c src/telemetry.h
+	$(CC) $(CFLAGS) -Isrc -o $@ src/test_telemetry_config.c src/telemetry.c $(LDFLAGS) $(TLS_LIBS) $(TELEMETRY_LIBS)
+
 queue_test: src/test_queue.c src/queue.c src/queue.h
 	$(CC) $(CFLAGS) -Isrc -o $@ src/test_queue.c src/queue.c $(LDFLAGS)
 
@@ -79,8 +89,8 @@ fuzz_test: src/test_fuzz.c src/stream.c src/queue.c src/stream.h src/queue.h
 embed_aslr_test: src/test_embed_aslr.c src/kuttidb.c src/embed.c src/embed_kuttidb.c src/embed.h src/embed_int.h
 	$(CC) $(CFLAGS) -Isrc -o $@ src/test_embed_aslr.c src/kuttidb.c src/embed.c src/embed_kuttidb.c $(LDFLAGS)
 
-kuttidb: src/kuttidb.o src/server.o src/admin_http.o src/admin_json.o src/embed.o src/embed_kuttidb.o src/platform.o src/queue.o src/stream.o src/job_state.o src/job_completion.o src/instance_lock.o src/managed_lifecycle.o src/managed_launcher.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(TLS_LIBS)
+kuttidb: src/kuttidb.o src/server.o src/admin_http.o src/admin_json.o src/embed.o src/embed_kuttidb.o src/platform.o src/queue.o src/stream.o src/job_state.o src/job_completion.o src/instance_lock.o src/managed_lifecycle.o src/managed_launcher.o src/telemetry.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(TLS_LIBS) $(TELEMETRY_LIBS)
 
 job_state_test: src/test_job_state.c src/job_state.c src/queue.c src/job_state.h src/job_completion.h src/job_int.h src/queue.h
 	$(CC) $(CFLAGS) -Isrc -o $@ src/test_job_state.c src/job_state.c src/queue.c $(LDFLAGS)
@@ -130,7 +140,8 @@ kuttidb-bench: src/kuttidb_bench.c
 src/%.o: src/%.c src/kuttidb.h src/kuttidb_int.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-src/server.o: src/server.c src/kuttidb.h src/kuttidb_int.h src/embed.h src/platform.h src/queue.h src/stream.h src/admin_http.h
+src/server.o: src/server.c src/kuttidb.h src/kuttidb_int.h src/embed.h src/platform.h src/queue.h src/stream.h src/admin_http.h src/telemetry.h
+src/telemetry.o: src/telemetry.c src/telemetry.h
 src/admin_http.o: src/admin_http.c src/admin_http.h src/admin_json.h src/kuttidb.h src/queue.h src/stream.h src/job_state.h src/job_completion.h
 src/admin_json.o: src/admin_json.c src/admin_json.h
 src/platform.o: src/platform.c src/platform.h
@@ -141,7 +152,7 @@ src/managed_launcher.o: src/managed_launcher.c src/managed_launcher.h src/instan
 clean:
 	rm -f libkuttidb_client.dylib libkuttidb_client.so job_client_test job_client_cpp_test
 	rm -f kuttidb kuttidb_sanitize kuttidb-bench core_test core_test_sanitize platform_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test job_state_test job_completion_test job_crash_test job_crash_test_jobfailpoints stream_test stream_test_sanitize fuzz_test fuzz_test_sanitize embed_aslr_test \
-		libkuttidb_embed.dylib libkuttidb_embed.so managed_lifecycle_test managed_lock_test src/*.o clients/java/target
+		libkuttidb_embed.dylib libkuttidb_embed.so managed_lifecycle_test managed_lock_test telemetry_config_test src/*.o clients/java/target
 
 install: all
 	install -m 0755 kuttidb /usr/local/bin/kuttidb
@@ -149,11 +160,12 @@ install: all
 	install -m 0644 src/kuttidb_client.h /usr/local/include/kuttidb_client.h
 	install -m 0755 $(CLIENT_LIB) /usr/local/lib/$(CLIENT_LIB)
 
-test: all core_test platform_test managed_lifecycle_test managed_lock_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test job_state_test job_completion_test job_crash_test stream_test fuzz_test embed_aslr_test
+test: all core_test platform_test managed_lifecycle_test managed_lock_test telemetry_config_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test job_state_test job_completion_test job_crash_test stream_test fuzz_test embed_aslr_test
 	@./core_test
 	@./platform_test
 	@./managed_lifecycle_test
 	@./managed_lock_test
+	@./telemetry_config_test
 	@./queue_test
 	@./queue_failure_test
 	@./queue_crash_test

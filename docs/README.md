@@ -21,6 +21,7 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | Document | Contents |
 |---|---|
 | [guides/GETTING_STARTED.md](guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
+| [guides/TELEMETRY.md](guides/TELEMETRY.md) | Optional privacy-preserving telemetry and public aggregate statistics |
 | [guides/SAAS_DEMO.md](guides/SAAS_DEMO.md) | One-command report demo: cache, background jobs, event replay, and crash recovery |
 | [guides/ATOMIC_JOB_COMPLETION.md](guides/ATOMIC_JOB_COMPLETION.md) | Atomic job completion: durable state, ACK, and the next message in one commit |
 | [guides/CLIENT_FEATURE_MATRIX.md](guides/CLIENT_FEATURE_MATRIX.md) | Per-client feature coverage, method mapping, and transports |
@@ -35,7 +36,6 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | [api/MANAGEMENT_API.md](api/MANAGEMENT_API.md) | Admin API startup, resources, and security guidance |
 | [design/MANAGEMENT_UI_DESIGN_SYSTEM.md](design/MANAGEMENT_UI_DESIGN_SYSTEM.md) | Brand-based console design: tokens, components, layouts, and interaction states |
 | [operations/DEPLOYMENT.md](operations/DEPLOYMENT.md) | Docker/Kubernetes, metrics, probes, backup/restore |
-| [operations/LANDING_PAGE.md](operations/LANDING_PAGE.md) | Preview the landing page, maintain client examples, and serve it with GitHub Pages |
 | [operations/RELEASE.md](operations/RELEASE.md) | Release cycle, official binaries, tagging process |
 | [operations/CLIENT_PUBLISHING.md](operations/CLIENT_PUBLISHING.md) | Client SDK releases: PyPI, npm, crates.io, Go module |
 | [operations/DOCKER.md](operations/DOCKER.md) | Container image, compose setup, runtime flags |

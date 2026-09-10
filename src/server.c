@@ -37,6 +37,7 @@
 #include "instance_lock.h"
 #include "managed_lifecycle.h"
 #include "managed_launcher.h"
+#include "telemetry.h"
 
 #define DEFAULT_PORT 7379
 #define NSHARDS 256
@@ -4963,6 +4964,7 @@ static void usage(const char *prog) {
         "        [--job-receipts-max-memory-mb N] [--job-receipts-max-count N]\n"
         "        [--job-receipt-retention-ms N] [--job-completion-max-bytes N]]\n"
         "       [--metrics-bind IPv4:PORT [--metrics-token-file PATH]]\n"
+        "       [--telemetry on|off --telemetry-endpoint HTTPS_URL --telemetry-state-dir ABS_PATH]\n"
         "       [--admin-bind IPv4:PORT --admin-token-file PATH --admin-audit-log PATH\n"
         "        [--admin-allow-origin ORIGIN] [--admin-tls-cert PATH --admin-tls-key PATH]\n"
         "        [--admin-max-clients N] [--admin-max-tail-clients N]\n"
@@ -4983,6 +4985,7 @@ int main(int argc, char **argv) {
     const char *metrics_token_file = NULL;
     const char *admin_bind = NULL, *admin_token_file = NULL, *admin_audit_log = NULL;
     const char *admin_tls_cert = NULL, *admin_tls_key = NULL;
+    const char *telemetry_mode = NULL, *telemetry_endpoint = NULL, *telemetry_state_dir = NULL;
     const char *admin_origins[16]; size_t admin_origin_count = 0;
     unsigned admin_max_clients = 16, admin_max_tail_clients = 4;
     unsigned admin_session_limit = 256, admin_job_limit = 32;
@@ -5012,6 +5015,11 @@ int main(int argc, char **argv) {
             puts("management-api-contract=1.0");
             puts("management-api-audit=required");
             puts("management-api-sse=off");
+#ifdef HAVE_TELEMETRY
+            puts("telemetry=v1");
+#else
+            puts("telemetry=off");
+#endif
             return 0;
         }
         if (strcmp(a, "--bind") == 0 || strcmp(a, "--auth-file") == 0 ||
@@ -5026,6 +5034,7 @@ int main(int argc, char **argv) {
             strcmp(a, "--admin-audit-log") == 0 || strcmp(a, "--admin-max-clients") == 0 ||
             strcmp(a, "--admin-max-tail-clients") == 0 || strcmp(a, "--admin-session-limit") == 0 ||
             strcmp(a, "--admin-job-limit") == 0 || strcmp(a, "--fsync-ms") == 0 ||
+            strcmp(a, "--telemetry") == 0 || strcmp(a, "--telemetry-endpoint") == 0 || strcmp(a, "--telemetry-state-dir") == 0 ||
             strcmp(a, "--job-state-max-memory-mb") == 0 ||
             strcmp(a, "--job-receipts-max-memory-mb") == 0 ||
             strcmp(a, "--job-receipts-max-count") == 0 ||
@@ -5047,6 +5056,9 @@ int main(int argc, char **argv) {
             else if (strcmp(a, "--admin-tls-cert") == 0) admin_tls_cert = v;
             else if (strcmp(a, "--admin-tls-key") == 0) admin_tls_key = v;
             else if (strcmp(a, "--admin-audit-log") == 0) admin_audit_log = v;
+            else if (strcmp(a, "--telemetry") == 0) telemetry_mode = v;
+            else if (strcmp(a, "--telemetry-endpoint") == 0) telemetry_endpoint = v;
+            else if (strcmp(a, "--telemetry-state-dir") == 0) telemetry_state_dir = v;
             else if (strcmp(a, "--admin-allow-origin") == 0) {
                 if (strcmp(v, "*") == 0 || !strstr(v, "://") || admin_origin_count == 16) { fprintf(stderr, "invalid --admin-allow-origin\n"); return 2; }
                 admin_origins[admin_origin_count++] = v;
@@ -5170,6 +5182,29 @@ int main(int argc, char **argv) {
         }
         if (strncmp(a, "--", 2) == 0 || npos == 6) { usage(argv[0]); return 2; }
         pos[npos++] = a;
+    }
+
+    const char *telemetry_env = getenv("KUTTIDB_TELEMETRY");
+    const char *telemetry_effective = telemetry_mode ? telemetry_mode : telemetry_env;
+    const char *telemetry_env_endpoint = getenv("KUTTIDB_TELEMETRY_ENDPOINT");
+    const char *telemetry_env_state = getenv("KUTTIDB_TELEMETRY_STATE_DIR");
+    int telemetry_enabled = 0;
+    if (getenv("DO_NOT_TRACK") && strcmp(getenv("DO_NOT_TRACK"), "1") == 0) telemetry_effective = "off";
+    if (telemetry_effective) {
+        if (strcmp(telemetry_effective, "on") == 0) telemetry_enabled = 1;
+        else if (strcmp(telemetry_effective, "off") != 0) { fprintf(stderr, "telemetry must be on or off\n"); return 2; }
+    }
+    if (!telemetry_endpoint) telemetry_endpoint = telemetry_env_endpoint ? telemetry_env_endpoint : "https://telemetry.kuttidb.com/v1/report";
+    if (!telemetry_state_dir) telemetry_state_dir = telemetry_env_state;
+    if (telemetry_enabled && !telemetry_endpoint_valid(telemetry_endpoint)) {
+        fprintf(stderr, "telemetry endpoint must be an HTTPS URL without credentials, query, or fragment\n"); return 2;
+    }
+    char telemetry_managed_state[1024];
+    if (telemetry_enabled && !telemetry_state_dir && data_dir &&
+        snprintf(telemetry_managed_state, sizeof telemetry_managed_state, "%s/.telemetry", data_dir) < (int)sizeof telemetry_managed_state)
+        telemetry_state_dir = telemetry_managed_state;
+    if (telemetry_enabled && (!telemetry_state_dir || telemetry_state_dir[0] != '/')) {
+        fprintf(stderr, "enabled telemetry requires --telemetry-state-dir ABS_PATH (or managed --data-dir)\n"); return 2;
     }
 
     int port = DEFAULT_PORT;
@@ -5492,6 +5527,10 @@ int main(int argc, char **argv) {
         if (dprintf(ready_fd, "READY 1\n") < 0) fprintf(stderr, "ready notification failed\n");
         close(ready_fd);
     }
+    TelemetryConfig telemetry_config = { telemetry_enabled, telemetry_endpoint, telemetry_state_dir };
+    if (telemetry_start(&telemetry_config, &g_connections, &g_stop) < 0) {
+        fprintf(stderr, "telemetry unavailable in this build or configuration\n");
+    }
 
     while (!g_stop)
         pause();
@@ -5509,6 +5548,8 @@ int main(int argc, char **argv) {
 
     if (g_maintenance_started)
         pthread_join(g_maintenance_thread, NULL);
+
+    telemetry_stop();
 
     admin_http_destroy(g_admin_http);
 

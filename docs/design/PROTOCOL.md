@@ -315,7 +315,8 @@ formats: [ATOMIC_JOB_COMPLETION.md](ATOMIC_JOB_COMPLETION.md).
   [--bind IPv4] [--auth-file PATH] [--tls-cert PATH --tls-key PATH] \
   [--max-value-mb N] [--max-batch-mb N] [--max-clients N] \
   [--threads N] [--durability periodic|always] [--embed-region-mb N] \
-  [--queue-wal PATH|-] [--stream-wal PATH|-]
+  [--queue-wal PATH|-] [--stream-wal PATH|-] \
+  [--telemetry on|off --telemetry-endpoint HTTPS_URL --telemetry-state-dir ABS_PATH]
 ```
 - `WAL` = path for the write-ahead log (writes `-` to disable persistence)
 - `FSYNC_MS` = background fsync interval, `0` disables fsync
@@ -353,6 +354,12 @@ ordinary server commands remain standalone.
   `<WAL>.streams` when cache persistence is enabled; `-` disables stream topic
   declarations. Stream commands are durable-only in this release slice, so
   they never quietly fall back to volatile storage.
+- Telemetry is built out by default. A binary built with `make TELEMETRY=1`
+  accepts `--telemetry on|off`; it remains off until explicitly enabled.
+  `DO_NOT_TRACK=1` always disables it. `--telemetry-endpoint` must be HTTPS
+  and setting it never enables reporting on its own. Enabled standalone mode
+  needs a private absolute `--telemetry-state-dir`; managed mode defaults it
+  to `<data-dir>/.telemetry`. See [TELEMETRY.md](../guides/TELEMETRY.md).
 
 `STATS` reports live record/table bytes as `mem_bytes`, allocator-owned bytes
 as `allocated_bytes`, plus `wal_failed`, `event_loops`, `event_backend`, and
