@@ -52,18 +52,29 @@ var (
 )
 
 type Client struct {
-	addr        string
-	network     string
-	mu          sync.Mutex
+	addr    string
+	network string
+	// Lock order: stateMu (one state exchange at a time) may be held while
+	// briefly taking lifeMu; Close takes lifeMu only and never stateMu, so
+	// shutdown never waits for an in-flight state request. Neither mutex is
+	// ever held across dialing, AUTH, TLS handshakes, network reads/writes,
+	// or waiting for stateMu.
+	lifeMu      sync.Mutex         // lifecycle: closure flag, active registry
+	active      map[*conn]struct{} // leased connections and late dials
+	done        chan struct{}      // closed once, when the client closes
 	stateMu     sync.Mutex
 	stateConn   *conn
-	pool        chan *conn
+	pool        chan *conn // idle connection cache; get() dials overflow
 	closed      bool
 	dialTimeout time.Duration
 	opTimeout   time.Duration
 	authToken   []byte
 	useTLS      bool
 	tlsConfig   *tls.Config
+
+	// dialOverride, when set (lifecycle tests), supplies the transport
+	// instead of dialing the network.
+	dialOverride func() (net.Conn, error)
 }
 
 // ManagedOptions configures the opt-in local lifecycle. Unix is the
@@ -245,6 +256,8 @@ func newClientNetwork(network, addr string, poolSize int, token []byte, useTLS b
 	c := &Client{
 		addr:        addr,
 		network:     network,
+		active:      make(map[*conn]struct{}),
+		done:        make(chan struct{}),
 		pool:        make(chan *conn, poolSize),
 		dialTimeout: 5 * time.Second,
 		opTimeout:   30 * time.Second,
@@ -266,7 +279,9 @@ func newClientNetwork(network, addr string, poolSize int, token []byte, useTLS b
 func (c *Client) dial() (*conn, error) {
 	var nc net.Conn
 	var err error
-	if c.useTLS {
+	if c.dialOverride != nil {
+		nc, err = c.dialOverride()
+	} else if c.useTLS {
 		dialer := &net.Dialer{Timeout: c.dialTimeout}
 		nc, err = tls.DialWithDialer(dialer, "tcp", c.addr, c.tlsConfig)
 	} else {
@@ -328,26 +343,87 @@ func (c *Client) verifyManaged(expected string) error {
 	return nil
 }
 
+// get leases a connection. The lifecycle mutex is released before dialing:
+// AUTH, TLS, and dial I/O never run under it. A connection opened
+// concurrently with Close either registers before Close's snapshot (and is
+// closed by it) or observes closure here and closes itself — no late dial
+// publishes a live socket into a closed client.
 func (c *Client) get() (*conn, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.lifeMu.Lock()
 	if c.closed {
+		c.lifeMu.Unlock()
 		return nil, ErrClosed
 	}
 	select {
 	case cn := <-c.pool:
+		c.active[cn] = struct{}{}
+		c.lifeMu.Unlock()
 		return cn, nil
 	default:
-		return c.dial()
+		c.lifeMu.Unlock()
 	}
+	cn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	c.lifeMu.Lock()
+	if c.closed {
+		c.lifeMu.Unlock()
+		cn.c.Close()
+		return nil, ErrClosed
+	}
+	c.active[cn] = struct{}{}
+	c.lifeMu.Unlock()
+	return cn, nil
 }
 
+// put returns a leased connection to the idle pool. The closed check and
+// the channel send are synchronized with Close through lifeMu: a return
+// that raced with Close either drains with the snapshot (send already
+// ordered before Close's drain) or observes closure and discards. A
+// returned connection is never reused after discard.
 func (c *Client) put(cn *conn) {
+	c.lifeMu.Lock()
+	if c.closed {
+		c.lifeMu.Unlock()
+		cn.c.Close()
+		return
+	}
+	delete(c.active, cn)
+	c.lifeMu.Unlock()
 	select {
 	case c.pool <- cn:
 	default:
 		cn.c.Close()
 	}
+}
+
+// discard closes a connection that left the pool and must not return to it
+// (I/O failure, discarded response, or shutdown): it can never be reused.
+func (c *Client) discard(cn *conn) {
+	c.lifeMu.Lock()
+	delete(c.active, cn)
+	c.lifeMu.Unlock()
+	cn.c.Close()
+}
+
+// isClosed reports whether the client has been closed (lifecycle mutex).
+func (c *Client) isClosed() bool {
+	c.lifeMu.Lock()
+	defer c.lifeMu.Unlock()
+	return c.closed
+}
+
+// requestError maps an I/O failure onto ErrClosed when the client was
+// closing, so a request interrupted by shutdown is recognizable as such.
+func (c *Client) requestError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if c.isClosed() {
+		return fmt.Errorf("%w: request interrupted by client shutdown: %v", ErrClosed, err)
+	}
+	return err
 }
 
 func readFull(cn *conn, buf []byte) error {
@@ -383,12 +459,12 @@ func (c *Client) Put(key string, value []byte) error {
 	req = append(req, value...)
 	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 	if _, err := cn.c.Write(req); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return err
 	}
 	resp := make([]byte, 5)
 	if err := readFull(cn, resp); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return err
 	}
 	c.put(cn)
@@ -423,12 +499,12 @@ func (c *Client) PutWithTTL(key string, value []byte, ttl time.Duration) error {
 	req = append(req, value...)
 	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 	if _, err := cn.c.Write(req); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return err
 	}
 	resp := make([]byte, 5)
 	if err := readFull(cn, resp); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return err
 	}
 	c.put(cn)
@@ -453,24 +529,24 @@ func (c *Client) Get(key string) ([]byte, error) {
 	req = append(req, key...)
 	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 	if _, err := cn.c.Write(req); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return nil, err
 	}
 	head := make([]byte, 5)
 	if err := readFull(cn, head); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return nil, err
 	}
 	vlen := binary.LittleEndian.Uint32(head[1:5])
 	if vlen > maxValue {
-		cn.c.Close()
+		c.discard(cn)
 		return nil, ErrResponseTooLarge
 	}
 	var val []byte
 	if vlen > 0 {
 		val = make([]byte, vlen)
 		if err := readFull(cn, val); err != nil {
-			cn.c.Close()
+			c.discard(cn)
 			return nil, err
 		}
 	}
@@ -499,12 +575,12 @@ func (c *Client) Delete(key string) (bool, error) {
 	req = append(req, key...)
 	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 	if _, err := cn.c.Write(req); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return false, err
 	}
 	head := make([]byte, 5)
 	if err := readFull(cn, head); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return false, err
 	}
 	c.put(cn)
@@ -520,22 +596,22 @@ func (c *Client) Stats() ([]byte, error) {
 	req := []byte{opStats, 0, 0, 0, 0, 0, 0}
 	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 	if _, err := cn.c.Write(req); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return nil, err
 	}
 	head := make([]byte, 5)
 	if err := readFull(cn, head); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return nil, err
 	}
 	vlen := binary.LittleEndian.Uint32(head[1:5])
 	if vlen > maxValue {
-		cn.c.Close()
+		c.discard(cn)
 		return nil, ErrResponseTooLarge
 	}
 	val := make([]byte, vlen)
 	if err := readFull(cn, val); err != nil {
-		cn.c.Close()
+		c.discard(cn)
 		return nil, err
 	}
 	c.put(cn)
@@ -587,12 +663,12 @@ func (c *Client) PutMany(pairs map[string][]byte) error {
 		}
 		_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 		if _, err := cn.c.Write(req); err != nil {
-			cn.c.Close()
+			c.discard(cn)
 			return err
 		}
 		resp := make([]byte, 1)
 		if err := readFull(cn, resp); err != nil {
-			cn.c.Close()
+			c.discard(cn)
 			return err
 		}
 		c.put(cn)
@@ -657,12 +733,12 @@ func (c *Client) PutManyTTL(items []Item) error {
 		}
 		_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 		if _, err := cn.c.Write(req); err != nil {
-			cn.c.Close()
+			c.discard(cn)
 			return err
 		}
 		resp := make([]byte, 1)
 		if err := readFull(cn, resp); err != nil {
-			cn.c.Close()
+			c.discard(cn)
 			return err
 		}
 		c.put(cn)
@@ -706,30 +782,30 @@ func (c *Client) GetMany(keys []string) ([][]byte, error) {
 		}
 		_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 		if _, err := cn.c.Write(req); err != nil {
-			cn.c.Close()
+			c.discard(cn)
 			return nil, err
 		}
 		var rcount [4]byte
 		if err := readFull(cn, rcount[:]); err != nil {
-			cn.c.Close()
+			c.discard(cn)
 			return nil, err
 		}
 		n := binary.LittleEndian.Uint32(rcount[:])
 		for i := 0; i < int(n); i++ {
 			var sh [5]byte
 			if err := readFull(cn, sh[:]); err != nil {
-				cn.c.Close()
+				c.discard(cn)
 				return nil, err
 			}
 			vlen := binary.LittleEndian.Uint32(sh[1:5])
 			if vlen > maxValue {
-				cn.c.Close()
+				c.discard(cn)
 				return nil, ErrResponseTooLarge
 			}
 			if sh[0] == statusOK && vlen > 0 {
 				val := make([]byte, vlen)
 				if err := readFull(cn, val); err != nil {
-					cn.c.Close()
+					c.discard(cn)
 					return nil, err
 				}
 				result[start+i] = val
@@ -740,23 +816,41 @@ func (c *Client) GetMany(keys []string) ([][]byte, error) {
 	return result, nil
 }
 
-// Close terminates all pooled connections.
+// Close terminates the client: it marks closure before any further lease,
+// wakes shutdown watchers, and interrupts active network I/O by closing
+// every live socket. It never waits for the 30-second read timeout and
+// never acquires stateMu, so it does not wait for a state request to
+// finish first. Close is idempotent and concurrency-safe; drained sockets
+// are closed outside the lifecycle lock.
 func (c *Client) Close() {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	c.mu.Lock()
+	c.lifeMu.Lock()
 	if c.closed {
-		c.mu.Unlock()
+		c.lifeMu.Unlock()
 		return
 	}
 	c.closed = true
-	if c.stateConn != nil {
-		c.stateConn.c.Close()
-		c.stateConn = nil
+	close(c.done)
+	drained := make([]*conn, 0, len(c.pool))
+drain:
+	for {
+		select {
+		case cn := <-c.pool:
+			drained = append(drained, cn)
+		default:
+			break drain
+		}
 	}
-	close(c.pool)
-	for cn := range c.pool {
+	leased := make([]*conn, 0, len(c.active))
+	for cn := range c.active {
+		leased = append(leased, cn)
+	}
+	c.active = make(map[*conn]struct{})
+	c.stateConn = nil
+	c.lifeMu.Unlock()
+	for _, cn := range leased {
 		cn.c.Close()
 	}
-	c.mu.Unlock()
+	for _, cn := range drained {
+		cn.c.Close()
+	}
 }

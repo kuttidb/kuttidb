@@ -77,16 +77,16 @@ func (c *Client) requestFrame(req []byte) (byte, []byte, error) {
 		if keep {
 			c.put(cn)
 		} else {
-			_ = cn.c.Close()
+			c.discard(cn)
 		}
 	}()
 	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 	if _, err = cn.c.Write(req); err != nil {
-		return 0, nil, err
+		return 0, nil, c.requestError(err)
 	}
 	var head [5]byte
 	if err = readFull(cn, head[:]); err != nil {
-		return 0, nil, err
+		return 0, nil, c.requestError(err)
 	}
 	n := binary.LittleEndian.Uint32(head[1:])
 	if n > maxValue {
@@ -94,7 +94,7 @@ func (c *Client) requestFrame(req []byte) (byte, []byte, error) {
 	}
 	payload := make([]byte, n)
 	if _, err = io.ReadFull(cn.c, payload); err != nil {
-		return 0, nil, err
+		return 0, nil, c.requestError(err)
 	}
 	keep = true
 	return head[0], payload, nil
@@ -121,7 +121,7 @@ func (c *Client) requestFrameCtx(ctx context.Context, req []byte) (byte, []byte,
 		if keep {
 			c.put(cn)
 		} else {
-			_ = cn.c.Close()
+			c.discard(cn)
 		}
 	}()
 	deadline := time.Now().Add(c.opTimeout)
@@ -173,7 +173,10 @@ func (c *Client) requestFrameCtx(ctx context.Context, req []byte) (byte, []byte,
 
 // stateRequest serializes operations whose server-side ownership is tied to
 // one native connection (queue deliveries, single-flight leases, and stream
-// group membership). The connection is replaced after an I/O failure.
+// group membership). The dedicated connection is created and used without
+// holding the lifecycle mutex across I/O and is replaced after any failure.
+// Close never acquires stateMu, so shutdown interrupts an exchange instead
+// of waiting for it to finish.
 func (c *Client) stateRequest(op byte, key string, value []byte) (byte, []byte, error) {
 	req, err := frame(op, key, value)
 	if err != nil {
@@ -181,44 +184,79 @@ func (c *Client) stateRequest(op byte, key string, value []byte) (byte, []byte, 
 	}
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
-		return 0, nil, ErrClosed
+	cn, err := c.stateLease()
+	if err != nil {
+		return 0, nil, err
 	}
-	if c.stateConn == nil {
-		c.stateConn, err = c.dial()
-		if err != nil {
-			return 0, nil, err
-		}
-	}
-	cn := c.stateConn
 	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
 	if _, err = cn.c.Write(req); err != nil {
-		c.stateConn = nil
-		_ = cn.c.Close()
-		return 0, nil, err
+		c.stateDrop(cn)
+		return 0, nil, c.requestError(err)
 	}
 	var head [5]byte
 	if err = readFull(cn, head[:]); err != nil {
-		c.stateConn = nil
-		_ = cn.c.Close()
-		return 0, nil, err
+		c.stateDrop(cn)
+		return 0, nil, c.requestError(err)
 	}
 	n := binary.LittleEndian.Uint32(head[1:])
 	if n > maxValue {
-		c.stateConn = nil
-		_ = cn.c.Close()
+		c.stateDrop(cn)
 		return 0, nil, ErrResponseTooLarge
 	}
 	payload := make([]byte, n)
 	if _, err = io.ReadFull(cn.c, payload); err != nil {
-		c.stateConn = nil
-		_ = cn.c.Close()
-		return 0, nil, err
+		c.stateDrop(cn)
+		return 0, nil, c.requestError(err)
 	}
 	return head[0], payload, nil
+}
+
+// stateLease snapshots the dedicated state connection, dialing one when
+// absent. Dialing runs without the lifecycle mutex; a dial racing with
+// Close either registers before Close's snapshot or observes closure and
+// closes itself.
+func (c *Client) stateLease() (*conn, error) {
+	c.lifeMu.Lock()
+	if c.closed {
+		c.lifeMu.Unlock()
+		return nil, ErrClosed
+	}
+	if cn := c.stateConn; cn != nil {
+		c.lifeMu.Unlock()
+		return cn, nil
+	}
+	c.lifeMu.Unlock()
+	cn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	c.lifeMu.Lock()
+	defer c.lifeMu.Unlock()
+	if c.closed {
+		cn.c.Close()
+		return nil, ErrClosed
+	}
+	if c.stateConn == nil {
+		c.stateConn = cn
+		c.active[cn] = struct{}{}
+		return cn, nil
+	}
+	// Unreachable while stateMu serializes callers; keep the spare closed.
+	cn.c.Close()
+	return c.stateConn, nil
+}
+
+// stateDrop discards the dedicated state connection after a failure. Only
+// the exchange holding stateMu may replace it, so the snapshot is compared
+// before clearing.
+func (c *Client) stateDrop(cn *conn) {
+	c.lifeMu.Lock()
+	if c.stateConn == cn {
+		c.stateConn = nil
+	}
+	delete(c.active, cn)
+	c.lifeMu.Unlock()
+	cn.c.Close()
 }
 
 func requireOK(status byte, what string) error {
