@@ -130,7 +130,11 @@ official installer additionally sends one count-only `POST
 https://telemetry.kuttidb.com/v1/install` signal per run (body exactly
 `{"schema_version":1}` — no identifiers, device details, or telemetry answer),
 counted for Yes and No alike; `DO_NOT_TRACK=1` disables it and an unreachable
-collector never affects the install.
+collector never affects the install. Public v1 stats also carry a non-telemetry
+`clients` object: client-SDK download counts cached from public registry APIs
+(npm trailing-30-day daily sum, PyPI pypistats without_mirrors daily sum,
+crates.io trailing-month figure; Maven Central publishes none), refreshed
+every 6 hours and rendered stale after 48 hours without a good fetch.
 Official release tarballs come in two variants per platform: the plain
 `kuttidb-<version>-<os>-<arch>.tar.gz` is telemetry-free (reporter not
 compiled in), and `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` is

@@ -98,6 +98,19 @@ endpoint cannot prove uniqueness or prevent fabricated counts: installer runs
 are a directional invocation metric, not a count of installations, people, or
 completed setups, and are never merged with the opt-in reporting totals.
 
+## Client SDK registry downloads
+
+The public statistics also carry one non-telemetry measure: download counts
+for the client SDKs, cached from public registry APIs every six hours —
+npm (`@kuttidb/client`, trailing-30-day daily sum), PyPI (`kuttidb`,
+pypistats.org `without_mirrors` daily sum), and crates.io (`kuttidb`, the
+registry's own trailing-month figure). Maven Central publishes no download
+statistics and stays empty rather than being guessed. These numbers involve no
+KuttiDB user data, no opt-in, and no collector state about users; they are
+third-party registry figures that include CI jobs and mirrors where the
+registry counts them. Downloads are not installations and not people, and they
+are never merged with the opt-in reporting-installation totals.
+
 ## What is reported
 
 The v1 body has exactly three fields: `schema_version: 1`, a random endpoint-
