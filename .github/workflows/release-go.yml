@@ -43,3 +43,9 @@ jobs:
           go vet ./...
           go test ./... -count=1
           go run ./cmd/smoketest
+
+      - name: Embedding opt-in and clean-consumer matrix
+        run: |
+          set -e
+          make go-embed-smoke
+          make go-external-consumer

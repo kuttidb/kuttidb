@@ -151,6 +151,40 @@ Go has no registry — `go get` fetches directly from the repository, so:
   treat that as a breaking-change decision, not a chore.
 - Pseudo-versions (`go get ...@<commit>`) work for testing untagged commits.
 
+### Go embedding is explicitly opt-in
+
+The default network package must build and import with **either CGO
+setting and no KuttiDB headers or libraries** — embedding is gated behind a
+build tag so a plain `go get github.com/kuttidb/kuttidb/clients/go` never
+enters the shared-memory path:
+
+- `clients/go/embed.go` (and the embedding smoke command
+  `clients/go/cmd/embedsmoke`) carry `//go:build cgo && kuttidb_embed`.
+- Building the embedding API requires **all** of: `CGO_ENABLED=1`, the
+  `-tags kuttidb_embed` tag, and a working C toolchain. With the tag but no
+  CGO the embedding symbols stay unavailable — nothing silently falls back
+  to network behavior.
+- Header/library search paths: build from a full repository checkout (the
+  cgo directives use `<checkout>/src` for headers and
+  `<checkout>/libkuttidb_embed.{dylib,so}` from `make`, with an rpath), or
+  link an installed library by staging `embed.h` + `kuttidb.h` and the
+  shared object in a prefix and passing `CGO_CPPFLAGS`/`CGO_LDFLAGS` (e.g.
+  `-I<prefix>/include`, `-L<prefix>/lib -lkuttidb_embed`).
+- `clients/go/scripts/external-consumer-check.sh` is the release gate for
+  this: it copies the module into a fresh consumer module with **no ancestor
+  `src/`, no built library, no repository `go.work`, and no checkout-wide
+  replace**, strips the repository-dependent integration tests, and builds
+  with CGO disabled and enabled (the enabled case compiles an unrelated tiny
+  cgo package), verifying `embed.go` is never selected and KuttiDB never
+  enters the native linker flags. After a release exists, verify the real
+  downloaded module (`go get ...@go-vX.Y.Z`) the same way instead of the
+  local replace.
+- The repository-dependent Go integration tests (they build the server with
+  `make`) run only in the checkout — never inside the stripped consumer
+  fixture. `make go-embed-smoke` and `make go-external-consumer` wire both
+  checks into `make test`, the PR validation workflow, and
+  `release-go.yml`.
+
 ## Rules
 
 - **A tag must exactly match its manifest version.** The release workflows

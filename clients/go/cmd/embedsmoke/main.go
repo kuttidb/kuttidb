@@ -1,8 +1,19 @@
+//go:build cgo && kuttidb_embed
+
+// embedsmoke exercises the shared-memory embed path against a running
+// server: embedded writes are read back over the wire and vice versa.
+// Build it explicitly — it never participates in default builds:
+//
+//	CGO_ENABLED=1 go build -tags kuttidb_embed ./cmd/embedsmoke
+//
+// Usage: embedsmoke [region-path] [port] (defaults below; the region file
+// is created by the server when started with that EMBED_PATH argument).
 package main
 
 import (
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -12,6 +23,12 @@ import (
 func main() {
 	region := "/tmp/ctest-embed/db.embed"
 	port := "7398"
+	if len(os.Args) > 1 {
+		region = os.Args[1]
+	}
+	if len(os.Args) > 2 {
+		port = os.Args[2]
+	}
 
 	// attach via shared memory
 	db, err := kuttidb.OpenEmbed(region)

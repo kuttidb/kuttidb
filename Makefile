@@ -172,6 +172,26 @@ install: all
 	install -m 0644 src/kuttidb_client.h /usr/local/include/kuttidb_client.h
 	install -m 0755 $(CLIENT_LIB) /usr/local/lib/$(CLIENT_LIB)
 
+# Explicit opt-in embedding: the default Go builds must never need the C
+# artifacts (external-consumer-check), while the tagged embed smoke proves
+# the shared-memory path still works when it is requested. macOS/Linux only.
+.PHONY: go-embed-smoke go-external-consumer
+go-embed-smoke: kuttidb $(EMBED_LIB)
+	@set -e; tmp=$$(mktemp -d); server_pid=""; \
+	trap 'kill $$server_pid 2>/dev/null || true; rm -rf $$tmp' EXIT; \
+	./kuttidb 7397 $$tmp/kuttidb.wal 100 $$tmp/kuttidb.sock 64 $$tmp/db.embed 2>/dev/null & server_pid=$$!; \
+	sleep 0.7; \
+	cd clients/go && CGO_ENABLED=1 go run -tags kuttidb_embed ./cmd/embedsmoke "$$tmp/db.embed" 7397; \
+	kill $$server_pid 2>/dev/null || true; wait $$server_pid 2>/dev/null || true
+
+# Clean-consumer matrix: a stripped module copy inside a fresh consumer
+# module with no ancestor src/, library, go.work, or checkout replace, built
+# with CGO disabled and enabled (the enabled case compiles an unrelated tiny
+# cgo package), then — with the explicit tag — an installed-library embed
+# link, and a runtime round trip when ./kuttidb exists.
+go-external-consumer:
+	bash clients/go/scripts/external-consumer-check.sh "$(CURDIR)"
+
 test: all core_test platform_test managed_lifecycle_test managed_lock_test telemetry_config_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test job_state_test job_completion_test job_crash_test stream_test fuzz_test embed_aslr_test
 	@./core_test
 	@./platform_test
@@ -225,6 +245,8 @@ test: all core_test platform_test managed_lifecycle_test managed_lock_test telem
 	cd ../java && mkdir -p target/classes target/test-classes && javac -encoding UTF-8 -d target/classes $$(find src/main/java -name '*.java') && javac -encoding UTF-8 -cp target/classes -d target/test-classes JobSmoke.java && java -cp target/classes:target/test-classes JobSmoke; \
 	cd ../rust && cargo test --test job_completion --quiet; \
 	if command -v node >/dev/null 2>&1; then cd ../nodejs && node job_smoke.js; else echo "node not installed: skipping Node.js job smoke"; fi
+	@echo "=== Go embedding opt-in and clean-consumer checks ==="
+	@$(MAKE) --no-print-directory go-embed-smoke go-external-consumer
 
 # The default C/Python gate deliberately has no SDK toolchain requirement.
 # Run this target in release CI images to exercise the opt-in lifecycle through

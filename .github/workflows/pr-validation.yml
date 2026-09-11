@@ -101,7 +101,18 @@ jobs:
           make -j4 kuttidb libkuttidb_embed.so
           cd clients/go
           go vet ./...
-          go test -run 'TestJobCompletion' -count=1 -v .
+          go test -run 'TestJobCompletion|TestQueueNamedConsumer' -count=1 -v .
+      - name: Go embedding opt-in and clean-consumer matrix
+        # Default recursive Go checks must build without KuttiDB C deps
+        # (embed.go is tag-gated), the tagged embed smoke must still work
+        # with the provisioned library, and a clean external consumer must
+        # import the module under either CGO setting.
+        run: |
+          set -e
+          make go-embed-smoke
+          make go-external-consumer
+          cd clients/go
+          CGO_ENABLED=0 go test ./... -count=1
 
   java:
     name: Java client (incl. job completion)

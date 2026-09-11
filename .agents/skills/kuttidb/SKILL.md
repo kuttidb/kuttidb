@@ -453,7 +453,7 @@ Error types: `KuttiDBError`, `ManagedServerConfigurationError`,
 | SDK | Configuration |
 |---|---|
 | Node.js | `new Client({ host, port, socketPath, poolSize=4, token, tls })`; `Client.managed({ dataDir, transport="unix", idleTimeout, startupTimeout, executable, host, port, token })` (eager connect + identity check) |
-| Go | `kuttidb.New(addr, poolSize)`, `NewAuthenticated`, `NewTLS(addr, poolSize, token, *tls.Config)`; `kuttidb.NewManaged(kuttidb.ManagedOptions{DataDir, Executable, Transport, Host, Port, IdleTimeout, StartupTimeout, Token, PoolSize})`; `EmbedDB` via cgo for shared memory |
+| Go | `kuttidb.New(addr, poolSize)`, `NewAuthenticated`, `NewTLS(addr, poolSize, token, *tls.Config)`; `kuttidb.NewManaged(kuttidb.ManagedOptions{DataDir, Executable, Transport, Host, Port, IdleTimeout, StartupTimeout, Token, PoolSize})`; `EmbedDB`/`OpenEmbed` shared memory only with `CGO_ENABLED=1` **and** `-tags kuttidb_embed` plus a C toolchain — the default network package needs neither |
 | Rust | `Client::connect*` variants above; `Pool::new*/connect_managed(options, size)` + `pool.with(…)`; `ManagedOptions { data_dir, executable, transport: ManagedTransport, idle_timeout, startup_timeout, auth_token }` |
 | Java | `KuttiDBClient(host, port[, authToken[, SSLContext[, poolSize]]])`; options via builders (`QueueOptions`, `ExchangeOptions`, `StreamOptions`); managed mode supported |
 | CLI | Env vars `KUTTIDB_HOST`, `KUTTIDB_PORT`, `KUTTIDB_AUTH_FILE`, `KUTTIDB_TLS`, `KUTTIDB_CA_FILE` |
@@ -555,10 +555,26 @@ Compose runs a non-root container with durable WALs under
 ## 9. Testing and verification
 
 ```sh
-make test          # core, platform, queues, exchanges, atomicity, streams, fuzz, embed
+make test          # core, platform, queues, exchanges, atomicity, streams, fuzz, embed,
+                   # Go embedding opt-in + clean external consumer checks
 make sanitize      # ASan + UBSan on the concurrent core test
 make bench-quick   # performance gates (p50/p95/p99 batch latency)
 pnpm lint && pnpm test   # required when apps/ or packages/ change
+```
+
+Go client gates (from `clients/go`; embedding needs the built
+`libkuttidb_embed` and a C toolchain):
+
+```sh
+CGO_ENABLED=0 go test ./... -count=1      # network package, no CGO
+CGO_ENABLED=1 go test ./... -count=1      # includes the server-building
+                                          # integration tests
+CGO_ENABLED=1 go test -race ./... -count=1
+go vet ./...
+CGO_ENABLED=1 go test -tags kuttidb_embed ./... -count=1
+CGO_ENABLED=1 go build -tags kuttidb_embed ./cmd/embedsmoke
+make go-embed-smoke        # tagged embed smoke against a live shared-memory server
+make go-external-consumer  # clean external consumer matrix (no KuttiDB C deps)
 ```
 
 Quick manual check:

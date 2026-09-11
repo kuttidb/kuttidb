@@ -1,9 +1,31 @@
-//go:build cgo
+//go:build cgo && kuttidb_embed
 
 package kuttidb
 
 // Shared-memory embedded mode: attaches to the region the server created
 // and reads/writes records directly in memory - no socket, no wire protocol.
+//
+// Embedded mode is explicitly opt-in and needs all of the following:
+//
+//	CGO_ENABLED=1                     (a working C toolchain)
+//	-tags kuttidb_embed               (build tag; without it this file and
+//	                                   every OpenEmbed/EmbedDB symbol are
+//	                                   excluded and the network package
+//	                                   builds with no KuttiDB C dependency)
+//	an explicit C development environment
+//
+// Build from a full repository checkout: the #cgo directives below look for
+// the embed headers in <checkout>/src and the shared library
+// libkuttidb_embed.{dylib,so} in <checkout> (both produced by `make`), with
+// an rpath so the built binary runs from the checkout. To link an installed
+// library instead, keep the checkout for the header (or add its include dir
+// through CGO_CPPFLAGS) and point the linker at the installed library with
+// CGO_LDFLAGS, e.g.:
+//
+//	CGO_ENABLED=1 CGO_LDFLAGS="-L/usr/local/lib -lkuttidb_embed" \
+//	  go build -tags kuttidb_embed ./...
+//
+// The network package (kuttidb.New and friends) never needs either setting.
 //
 //	db, err := OpenEmbed("/tmp/db.embed")
 //	db.Put("k", []byte("v"), 0)
