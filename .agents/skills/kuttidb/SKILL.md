@@ -124,8 +124,13 @@ endpoint; DNS names are never resolved.
 Telemetry settings are also allowlisted through `kuttidb ensure` and Python
 `ServerParams` as `telemetry`, `telemetry_endpoint`, and
 `telemetry_state_dir`; managed launches default the state path under `data_dir`.
-The reporter is built out by default, has no SDK/install/browser beacon, and
-samples only a bucket of open native connections after 15 minutes of readiness.
+The reporter is built out by default, has no SDK/browser beacon, and samples
+only a bucket of open native connections after 15 minutes of readiness. The
+official installer additionally sends one count-only `POST
+https://telemetry.kuttidb.com/v1/install` signal per run (body exactly
+`{"schema_version":1}` — no identifiers, device details, or telemetry answer),
+counted for Yes and No alike; `DO_NOT_TRACK=1` disables it and an unreachable
+collector never affects the install.
 Official release tarballs come in two variants per platform: the plain
 `kuttidb-<version>-<os>-<arch>.tar.gz` is telemetry-free (reporter not
 compiled in), and `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` is

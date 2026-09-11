@@ -4,8 +4,9 @@ KuttiDB telemetry is optional. Normal binaries are built without telemetry
 support — reporting is impossible in them. The official telemetry-capable
 build, which the installer ships when a user accepts the community opt-in,
 defaults to reporting on; self-built capable binaries default to off until you
-switch them on. Reporting never runs in SDKs, install scripts, the web
-console, or the public website.
+switch them on. Native reporting never runs in SDKs, the web console, or the
+public website; the official installer sends a separate count-only invocation
+signal described below.
 
 Its sole purpose is to publish a privacy-preserving, community-level view of
 KuttiDB adoption. It is not a diagnostic, support, monitoring, account, or
@@ -69,6 +70,33 @@ choose explicitly. `DO_NOT_TRACK=1` always wins — over the build default, the
 env file, the CLI, and this installer. `--telemetry off` likewise disables it.
 The installer verifies after installing that `kuttidb --features` matches the
 choice it made (`telemetry=v1` + `telemetry-default=on` for the opt-in build).
+
+## Installer invocation count
+
+Every run of the official installer sends one count-only HTTPS signal before
+anything else — before the telemetry question, the platform check, and any
+download. The request is `POST https://telemetry.kuttidb.com/v1/install` with
+the body `{"schema_version":1}` and nothing else: no installation identifier,
+no device details, no operating system or version, no answer to the telemetry
+question, no timestamps, and no local state. The route itself identifies the
+event, so every accepted request adds exactly one — Yes and No count alike,
+re-runs count again, and a run that later fails still counts once the signal
+was received. Help output, unknown options, and invalid telemetry choices send
+nothing.
+
+`DO_NOT_TRACK=1` disables the counter: no DNS, no request, no state. The
+signal is best-effort: one bounded request (at most ~2 seconds), no retries,
+no redirect following, and an unreachable or rejecting collector is dropped
+silently while the install continues normally. If no suitable HTTP client is
+available the signal is skipped rather than sent through a weaker transport.
+
+The collector stores only aggregates: daily count rows for 396 days plus a
+lifetime total and collection start date. Public statistics publish installer
+runs as exact counts — they carry no identifiers or device dimensions, so the
+native below-20 suppression does not apply. An unauthenticated, identity-free
+endpoint cannot prove uniqueness or prevent fabricated counts: installer runs
+are a directional invocation metric, not a count of installations, people, or
+completed setups, and are never merged with the opt-in reporting totals.
 
 ## What is reported
 
