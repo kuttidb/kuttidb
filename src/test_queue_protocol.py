@@ -2,6 +2,7 @@ import os
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from kuttidb_client import KuttiDBClient
 
 PORT = 7404
+QUEUE_NACK_OP = 0x24
 
 
 def wait_port():
@@ -23,6 +25,28 @@ def wait_port():
         except OSError:
             time.sleep(0.03)
     raise RuntimeError("queue server did not start")
+
+
+def raw_request(sock, op, key, value):
+    """Send one framed request and read the [status:1][vlen:4][payload]
+    response without the SDK, so malformed shapes stay reachable."""
+    frame = (bytes([op]) + struct.pack("<H", len(key)) +
+             struct.pack("<I", len(value)) + key + value)
+    sock.sendall(frame)
+    head = b""
+    while len(head) < 5:
+        chunk = sock.recv(5 - len(head))
+        if not chunk:
+            raise RuntimeError("connection closed")
+        head += chunk
+    payload = b""
+    need = struct.unpack("<I", head[1:5])[0]
+    while len(payload) < need:
+        chunk = sock.recv(need - len(payload))
+        if not chunk:
+            raise RuntimeError("connection closed")
+        payload += chunk
+    return head[0], payload
 
 
 def start(queue_wal):
@@ -215,6 +239,127 @@ try:
         assert d["value"] == b"after-restart"
         assert client.queue_ack("consumers", d["id"])
         assert client.queue_stats("consumers")["inflight"] == 0
+
+    # --- delayed NACK ownership ------------------------------------------
+    # The 17-byte delayed branch must accept a delivery owned by the
+    # connection's named consumer, mirroring ACK and immediate NACK. The
+    # server restarts first and the consumer-owner space is padded: owner
+    # tokens and connection ids are independent counters, and without the
+    # pad a numeric coincidence between them can hide the dispatch defect.
+    proc.kill(); proc.wait(); proc = start(wal)
+    with KuttiDBClient(port=PORT) as client:
+        for i in range(32):
+            client.queue_consumer_register("delay-pad-%d" % i)
+        client.queue_declare("delaynamed", durable=True)
+        client.queue_consumer_register("delay-worker")
+        client.queue_publish("delaynamed", b"delayed-payload")
+        got = client.queue_consume_as("delaynamed", "delay-worker", visibility=30.0)
+        assert got["value"] == b"delayed-payload" and got["delivery_count"] == 1
+        assert client.queue_stats("delaynamed") == {"depth": 1, "inflight": 1}
+        nack_at = time.time()
+        assert client.queue_nack("delaynamed", got["id"], requeue=True, delay=1.0)
+        # Delayed requeue keeps the message live (depth includes it) but not
+        # in flight and not consumable before the delay.
+        assert client.queue_stats("delaynamed") == {"depth": 1, "inflight": 0}
+        if time.time() - nack_at < 0.9:
+            assert client.queue_consume("delaynamed") is None, \
+                "delayed message was consumable before its delay"
+        deadline = time.time() + 10
+        again = None
+        while time.time() < deadline:
+            again = client.queue_consume_as("delaynamed", "delay-worker",
+                                            visibility=30.0)
+            if again is not None:
+                break
+            time.sleep(0.05)
+        assert again is not None, "delayed named-consumer retry never became due"
+        assert again["message_id"] == got["message_id"] and again["redelivered"]
+        assert again["delivery_count"] == 2
+        assert again["id"] != got["id"], "retry must carry a fresh delivery tag"
+        assert client.queue_ack("delaynamed", again["id"])
+        assert client.queue_stats("delaynamed") == {"depth": 0, "inflight": 0}
+
+        # Immediate named-consumer NACK and ACK stay on the same rules.
+        client.queue_publish("delaynamed", b"immediate")
+        held = client.queue_consume_as("delaynamed", "delay-worker", visibility=30.0)
+        assert client.queue_nack("delaynamed", held["id"], requeue=True)
+        back = client.queue_consume_as("delaynamed", "delay-worker", visibility=30.0)
+        assert back["message_id"] == held["message_id"] and back["redelivered"]
+        assert client.queue_ack("delaynamed", back["id"])
+
+        # A delivery owned by the named consumer is invisible to a foreign
+        # connection (different owner token): NACK and ACK both miss.
+        client.queue_publish("delaynamed", b"owned")
+        owned = client.queue_consume_as("delaynamed", "delay-worker", visibility=30.0)
+        assert owned is not None
+        with KuttiDBClient(port=PORT) as outsider:
+            assert outsider.queue_nack("delaynamed", owned["id"]) is False
+            assert outsider.queue_ack("delaynamed", owned["id"]) is False
+            assert outsider.queue_nack("delaynamed", 999999) is False
+            assert outsider.queue_ack("delaynamed", 999999) is False
+            assert client.queue_stats("delaynamed") == {"depth": 1, "inflight": 1}
+            # A second connection legitimately attached to the same named
+            # consumer shares the owner token and may disposition it.
+            assert outsider.queue_consumer_register("delay-worker") > 0
+            assert outsider.queue_consume_as("delaynamed", "delay-worker") is None
+            assert outsider.queue_nack("delaynamed", owned["id"]) is True
+            # Duplicate NACK of the now-requeued delivery is a miss.
+            assert outsider.queue_nack("delaynamed", owned["id"]) is False
+        back = client.queue_consume_as("delaynamed", "delay-worker", visibility=30.0)
+        assert back["message_id"] == owned["message_id"] and back["redelivered"]
+        assert client.queue_ack("delaynamed", back["id"])
+
+        # Terminal rejection of a named-consumer delivery routes to the DLQ.
+        client.queue_declare("delaydlq", durable=True,
+                             dead_letter_queue="delaydlq-dead")
+        client.queue_publish("delaydlq", b"reject-me")
+        held = client.queue_consume_as("delaydlq", "delay-worker", visibility=30.0)
+        assert client.queue_nack("delaydlq", held["id"], requeue=False)
+        assert client.queue_stats("delaydlq") == {"depth": 0, "inflight": 0}
+        assert client.queue_stats("delaydlq-dead") == {"depth": 1, "inflight": 0}
+
+        # Malformed delayed-NACK payloads fail closed over the raw protocol.
+        s = socket.create_connection(("127.0.0.1", PORT), 2)
+        try:
+            stale = struct.pack("<Q", 999999)
+            assert raw_request(s, QUEUE_NACK_OP, b"delaynamed", b"\x01" * 16)[0] == 0x02
+            assert raw_request(s, QUEUE_NACK_OP, b"delaynamed", b"\x01" * 10)[0] == 0x02
+            assert raw_request(s, QUEUE_NACK_OP, b"delaynamed",
+                               stale + b"\x02" + struct.pack("<Q", 0))[0] == 0x02
+            assert raw_request(s, QUEUE_NACK_OP, b"delaynamed", stale + b"\x02")[0] == 0x02
+            assert raw_request(s, QUEUE_NACK_OP, b"delaynamed",
+                               stale + b"\x01" + struct.pack("<Q", 5))[0] == 0x01
+        finally:
+            s.close()
+
+    # Crash: a successful named-consumer delayed NACK survives SIGKILL
+    # before the retry becomes due — the message survives once, keeps its
+    # delayed availability, and is consumable when due.
+    with KuttiDBClient(port=PORT) as client:
+        client.queue_declare("delaycrash", durable=True)
+        client.queue_consumer_register("crash-worker")
+        client.queue_publish("delaycrash", b"survive-once")
+        d = client.queue_consume_as("delaycrash", "crash-worker", visibility=30.0)
+        nack_at = time.time()
+        assert client.queue_nack("delaycrash", d["id"], requeue=True, delay=3.0)
+    proc.kill(); proc.wait(); proc = start(wal)
+    with KuttiDBClient(port=PORT) as client:
+        assert client.queue_stats("delaycrash") == {"depth": 1, "inflight": 0}, \
+            "crash after delayed NACK did not keep the message exactly once"
+        if time.time() - nack_at < 2.9:
+            assert client.queue_consume("delaycrash") is None, \
+                "recovered message ignored its delayed availability"
+        deadline = time.time() + 10
+        survived = None
+        while time.time() < deadline:
+            survived = client.queue_consume("delaycrash")
+            if survived is not None:
+                break
+            time.sleep(0.05)
+        assert survived is not None and survived["value"] == b"survive-once"
+        assert survived["message_id"] == d["message_id"]
+        assert client.queue_ack("delaycrash", survived["id"])
+        assert client.queue_stats("delaycrash") == {"depth": 0, "inflight": 0}
 
     # Delayed retry must not lose a message whose delay expires after later
     # messages were already delivered (consume scan hint invariant).

@@ -143,8 +143,12 @@ The optional Declare extension carries the dead-letter policy:
 cannot be its own dead-letter queue, and a re-declaration that changes the
 durable mode or the dead-letter policy is refused.
 
-`delivery_tag` is a one-use lease token bound to the connection that consumed
-the message; it is the only value accepted by ACK/NACK. `message_id` is the
+`delivery_tag` is a one-use lease token bound to the owner that consumed the
+message: the connection's own token, or the stable owner token of a durable
+named consumer the connection registered or consumed as. ACK and NACK —
+immediate and delayed — accept a delivery owned by the connection itself or
+by the named consumer it is bound to; a foreign connection's attempt misses
+and the delivery stays in flight. `message_id` is the
 stable identifier returned by publish and is informational on consume.
 `delivery_count` starts at one and increments on every delivery, including
 redelivery after restart. A delayed NACK requeue is durable: if the process

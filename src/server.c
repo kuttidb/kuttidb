@@ -3484,10 +3484,21 @@ static void conn_process(Loop *L, Conn *c) {
                                                       get_u64le(arg),
                                                       c->queue_consumer_owner, arg[8]);
                     }
-                    else if (vlen == 17 && arg[8] <= 1)
+                    else if (vlen == 17 && arg[8] <= 1) {
                         rc = queue_nack_for_owner_delay(g_queues, queue, klen,
                                                         get_u64le(arg), c->id, arg[8],
                                                         get_u64le(arg + 9));
+                        /* Mirror ACK and immediate NACK: a delivery owned by
+                         * the named consumer registered on this connection is
+                         * dispositions with the consumer's owner token. A
+                         * negative result is an error, never a fallback. */
+                        if (rc == 0 && c->queue_consumer_owner)
+                            rc = queue_nack_for_owner_delay(g_queues, queue, klen,
+                                                            get_u64le(arg),
+                                                            c->queue_consumer_owner,
+                                                            arg[8],
+                                                            get_u64le(arg + 9));
+                    }
                     resp_status(c, rc < 0 ? 0x02 : (rc ? 0x00 : 0x01));
                 } else if (op == QUEUE_PUBLISH_BATCH) {
                     /* value = [count:4] ( count * [len:4][message] ) */
