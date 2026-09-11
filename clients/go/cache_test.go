@@ -5,6 +5,7 @@ package kuttidb
 // under the race detector: go test -race -run 'TestPool|TestState|TestNewClient'.
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -22,6 +23,11 @@ type fakeConn struct {
 	closed  bool
 	closeCh chan struct{}
 	onRead  func() // invoked when a queued chunk is fully consumed
+
+	writeGate   chan struct{} // optional: Write blocks until it closes
+	writeStart  chan struct{} // closed once, when a Write begins
+	writes      int
+	onWriteDone func()
 }
 
 func newFakeConn() *fakeConn {
@@ -61,9 +67,31 @@ func (f *fakeConn) Read(p []byte) (int, error) {
 
 func (f *fakeConn) Write(p []byte) (int, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.closed {
+		f.mu.Unlock()
 		return 0, net.ErrClosed
+	}
+	gate := f.writeGate
+	start := f.writeStart
+	writes := f.writes
+	f.writes = writes + 1
+	f.mu.Unlock()
+	if start != nil {
+		select {
+		case <-start:
+		default:
+			close(start)
+		}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-f.closeCh:
+			return 0, net.ErrClosed
+		}
+	}
+	if f.onWriteDone != nil {
+		f.onWriteDone()
 	}
 	return len(p), nil
 }
@@ -115,13 +143,15 @@ func newFakeClient(poolSize int, dial func(n int) (net.Conn, error)) (*Client, *
 		addr:        "fake:1",
 		active:      make(map[*conn]struct{}),
 		done:        make(chan struct{}),
+		stateGate:   make(chan struct{}, 1),
 		pool:        make(chan *conn, poolSize),
 		dialTimeout: time.Second,
 		opTimeout:   2 * time.Second,
-		dialOverride: func() (net.Conn, error) {
+		dialOverride: func(context.Context) (net.Conn, error) {
 			return dial(int(count.Add(1)))
 		},
 	}
+	c.stateGate <- struct{}{}
 	for i := 0; i < poolSize; i++ {
 		cn, err := c.dial()
 		if err != nil {

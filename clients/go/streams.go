@@ -1,6 +1,7 @@
 package kuttidb
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -37,6 +38,12 @@ type StreamAssignment struct {
 }
 
 func (c *Client) StreamDeclare(topic string, o StreamOptions) error {
+	return c.StreamDeclareContext(context.Background(), topic, o)
+}
+
+// StreamDeclareContext declares a partitioned stream (durable options fixed
+// at declaration).
+func (c *Client) StreamDeclareContext(ctx context.Context, topic string, o StreamOptions) error {
 	if topic == "" || len(topic) > 255 || o.Partitions < 1 || o.Partitions > 256 {
 		return fmt.Errorf("kuttidb: invalid stream declaration")
 	}
@@ -47,14 +54,19 @@ func (c *Client) StreamDeclare(topic string, o StreamOptions) error {
 	p := appendU32(nil, o.Partitions)
 	p = appendU64(p, o.MaxBytes)
 	p = appendU64(p, age)
-	s, _, e := c.request(opStreamDeclare, topic, p)
+	s, _, e := c.requestCtx(ctx, opStreamDeclare, topic, p)
 	if e != nil {
 		return e
 	}
 	return requireOK(s, "stream declare")
 }
 func (c *Client) StreamList() ([]StreamInfo, error) {
-	s, v, e := c.request(opStreamList, "", nil)
+	return c.StreamListContext(context.Background())
+}
+
+// StreamListContext lists topics with record and byte counts.
+func (c *Client) StreamListContext(ctx context.Context) ([]StreamInfo, error) {
+	s, v, e := c.requestCtx(ctx, opStreamList, "", nil)
 	if e != nil {
 		return nil, e
 	}
@@ -93,7 +105,12 @@ func (c *Client) StreamList() ([]StreamInfo, error) {
 	return out, d.done()
 }
 func (c *Client) StreamGroupList() ([]StreamGroupInfo, error) {
-	s, v, e := c.request(opStreamGroupList, "", nil)
+	return c.StreamGroupListContext(context.Background())
+}
+
+// StreamGroupListContext lists consumer groups.
+func (c *Client) StreamGroupListContext(ctx context.Context) ([]StreamGroupInfo, error) {
+	s, v, e := c.requestCtx(ctx, opStreamGroupList, "", nil)
 	if e != nil {
 		return nil, e
 	}
@@ -137,6 +154,12 @@ func (c *Client) StreamGroupList() ([]StreamGroupInfo, error) {
 }
 
 func (c *Client) StreamAppend(topic string, value, key []byte, partition *uint32) (StreamPosition, error) {
+	return c.StreamAppendContext(context.Background(), topic, value, key, partition)
+}
+
+// StreamAppendContext appends one record; appends are never retried after
+// a lost response (the server may have durably committed).
+func (c *Client) StreamAppendContext(ctx context.Context, topic string, value, key []byte, partition *uint32) (StreamPosition, error) {
 	hint := uint32(0xffffffff)
 	if partition != nil {
 		hint = *partition
@@ -148,7 +171,7 @@ func (c *Client) StreamAppend(topic string, value, key []byte, partition *uint32
 	p = appendU16(p, uint16(len(key)))
 	p = append(p, key...)
 	p = append(p, value...)
-	s, v, e := c.request(opStreamAppend, topic, p)
+	s, v, e := c.requestCtx(ctx, opStreamAppend, topic, p)
 	if e != nil {
 		return StreamPosition{}, e
 	}
@@ -161,10 +184,16 @@ func (c *Client) StreamAppend(topic string, value, key []byte, partition *uint32
 	return StreamPosition{binary.LittleEndian.Uint64(v), binary.LittleEndian.Uint64(v[8:])}, nil
 }
 func (c *Client) StreamAppendBatch(topic string, items []StreamAppend, partition *uint32) ([]StreamPosition, error) {
+	return c.StreamAppendBatchContext(context.Background(), topic, items, partition)
+}
+
+// StreamAppendBatchContext appends up to 1024 records in one durable round
+// trip; it is never retried after a lost response.
+func (c *Client) StreamAppendBatchContext(ctx context.Context, topic string, items []StreamAppend, partition *uint32) ([]StreamPosition, error) {
 	if len(items) < 1 || len(items) > 1024 {
 		return nil, fmt.Errorf("kuttidb: stream batch size must be 1-1024")
 	}
-	if e := c.requireFeature(FeatureStreamBatch, "stream batch append"); e != nil {
+	if e := c.requireFeatureCtx(ctx, FeatureStreamBatch, "stream batch append"); e != nil {
 		return nil, e
 	}
 	hint := uint32(0xffffffff)
@@ -182,7 +211,7 @@ func (c *Client) StreamAppendBatch(topic string, items []StreamAppend, partition
 		p = append(p, it.Key...)
 		p = append(p, it.Value...)
 	}
-	s, v, e := c.request(opStreamAppendBatch, topic, p)
+	s, v, e := c.requestCtx(ctx, opStreamAppendBatch, topic, p)
 	if e != nil {
 		return nil, e
 	}
@@ -209,10 +238,20 @@ func (c *Client) StreamAppendBatch(topic string, items []StreamAppend, partition
 }
 
 func (c *Client) StreamFetch(topic string, partition uint32, offset uint64, maxRecords uint32) ([]StreamRecord, error) {
+	return c.StreamFetchContext(context.Background(), topic, partition, offset, maxRecords)
+}
+
+// StreamFetchContext fetches records at or after offset. The capability
+// probe and the fetch share the operation's single deadline budget.
+func (c *Client) StreamFetchContext(ctx context.Context, topic string, partition uint32, offset uint64, maxRecords uint32) ([]StreamRecord, error) {
 	if maxRecords < 1 || maxRecords > 1024 {
 		return nil, fmt.Errorf("kuttidb: invalid fetch count")
 	}
-	caps, e := c.Capabilities()
+	deadline, e := c.opDeadline(ctx)
+	if e != nil {
+		return nil, e
+	}
+	caps, e := c.capabilitiesAt(ctx, deadline)
 	if e != nil {
 		return nil, e
 	}
@@ -224,7 +263,11 @@ func (c *Client) StreamFetch(topic string, partition uint32, offset uint64, maxR
 	p := appendU32(nil, partition)
 	p = appendU64(p, offset)
 	p = appendU32(p, maxRecords)
-	s, v, e := c.request(op, topic, p)
+	req, e := frame(op, topic, p)
+	if e != nil {
+		return nil, e
+	}
+	s, v, e := c.requestAt(ctx, deadline, req)
 	if e != nil {
 		return nil, e
 	}
@@ -279,22 +322,34 @@ func groupPartition(group string, partition uint32) ([]byte, error) {
 	return p, nil
 }
 func (c *Client) StreamCommit(topic, group string, partition uint32, offset uint64) error {
+	return c.StreamCommitContext(context.Background(), topic, group, partition, offset)
+}
+
+// StreamCommitContext advances a group's next offset on the dedicated state
+// connection (group membership is connection-affine).
+func (c *Client) StreamCommitContext(ctx context.Context, topic, group string, partition uint32, offset uint64) error {
 	p, e := groupPartition(group, partition)
 	if e != nil {
 		return e
 	}
 	p = appendU64(p, offset)
-	s, _, e := c.stateRequest(opStreamCommit, topic, p)
+	s, _, e := c.stateRequestCtx(ctx, opStreamCommit, topic, p)
 	if e != nil {
 		return e
 	}
 	return requireOK(s, "stream commit")
 }
 func (c *Client) StreamCommitBatch(topic, group string, commits []StreamCommit) error {
+	return c.StreamCommitBatchContext(context.Background(), topic, group, commits)
+}
+
+// StreamCommitBatchContext commits up to 256 group offsets in one round
+// trip on the dedicated state connection.
+func (c *Client) StreamCommitBatchContext(ctx context.Context, topic, group string, commits []StreamCommit) error {
 	if len(commits) < 1 || len(commits) > 256 {
 		return fmt.Errorf("kuttidb: commit batch size must be 1-256")
 	}
-	if e := c.requireFeature(FeatureStreamCommitBatch, "stream commit batch"); e != nil {
+	if e := c.requireFeatureCtx(ctx, FeatureStreamCommitBatch, "stream commit batch"); e != nil {
 		return e
 	}
 	if group == "" || len(group) > 255 {
@@ -307,18 +362,18 @@ func (c *Client) StreamCommitBatch(topic, group string, commits []StreamCommit) 
 		p = appendU32(p, it.Partition)
 		p = appendU64(p, it.Offset)
 	}
-	s, _, e := c.stateRequest(opStreamCommitBatch, topic, p)
+	s, _, e := c.stateRequestCtx(ctx, opStreamCommitBatch, topic, p)
 	if e != nil {
 		return e
 	}
 	return requireOK(s, "stream commit batch")
 }
-func (c *Client) streamGroupValue(op byte, topic, group string, partition uint32) (*uint64, error) {
+func (c *Client) streamGroupValue(ctx context.Context, op byte, topic, group string, partition uint32) (*uint64, error) {
 	p, e := groupPartition(group, partition)
 	if e != nil {
 		return nil, e
 	}
-	s, v, e := c.stateRequest(op, topic, p)
+	s, v, e := c.stateRequestCtx(ctx, op, topic, p)
 	if e != nil {
 		return nil, e
 	}
@@ -335,12 +390,29 @@ func (c *Client) streamGroupValue(op byte, topic, group string, partition uint32
 	return &x, nil
 }
 func (c *Client) StreamGroupOffset(topic, group string, partition uint32) (*uint64, error) {
-	return c.streamGroupValue(opStreamGroupOffset, topic, group, partition)
+	return c.StreamGroupOffsetContext(context.Background(), topic, group, partition)
+}
+
+// StreamGroupOffsetContext reports a group's committed next offset.
+func (c *Client) StreamGroupOffsetContext(ctx context.Context, topic, group string, partition uint32) (*uint64, error) {
+	return c.streamGroupValue(ctx, opStreamGroupOffset, topic, group, partition)
 }
 func (c *Client) StreamGroupLag(topic, group string, partition uint32) (*uint64, error) {
-	return c.streamGroupValue(opStreamGroupLag, topic, group, partition)
+	return c.StreamGroupLagContext(context.Background(), topic, group, partition)
+}
+
+// StreamGroupLagContext reports the group's lag on one partition.
+func (c *Client) StreamGroupLagContext(ctx context.Context, topic, group string, partition uint32) (*uint64, error) {
+	return c.streamGroupValue(ctx, opStreamGroupLag, topic, group, partition)
 }
 func (c *Client) StreamGroupJoin(topic, group string, lease time.Duration) (StreamAssignment, error) {
+	return c.StreamGroupJoinContext(context.Background(), topic, group, lease)
+}
+
+// StreamGroupJoinContext joins (or heartbeats) a group; the assignment is
+// bound to this client's state connection. Cancellation that discards the
+// state socket can lose the membership — rejoin explicitly.
+func (c *Client) StreamGroupJoinContext(ctx context.Context, topic, group string, lease time.Duration) (StreamAssignment, error) {
 	if group == "" || len(group) > 255 {
 		return StreamAssignment{}, fmt.Errorf("kuttidb: invalid stream group")
 	}
@@ -351,7 +423,7 @@ func (c *Client) StreamGroupJoin(topic, group string, lease time.Duration) (Stre
 	p := appendU16(nil, uint16(len(group)))
 	p = append(p, group...)
 	p = appendU32(p, uint32(ms))
-	s, v, e := c.stateRequest(opStreamGroupJoin, topic, p)
+	s, v, e := c.stateRequestCtx(ctx, opStreamGroupJoin, topic, p)
 	if e != nil {
 		return StreamAssignment{}, e
 	}
@@ -379,12 +451,17 @@ func (c *Client) StreamGroupJoin(topic, group string, lease time.Duration) (Stre
 	return out, d.done()
 }
 func (c *Client) StreamGroupLeave(topic, group string) error {
+	return c.StreamGroupLeaveContext(context.Background(), topic, group)
+}
+
+// StreamGroupLeaveContext leaves a consumer group.
+func (c *Client) StreamGroupLeaveContext(ctx context.Context, topic, group string) error {
 	if group == "" || len(group) > 255 {
 		return fmt.Errorf("kuttidb: invalid stream group")
 	}
 	p := appendU16(nil, uint16(len(group)))
 	p = append(p, group...)
-	s, _, e := c.stateRequest(opStreamGroupLeave, topic, p)
+	s, _, e := c.stateRequestCtx(ctx, opStreamGroupLeave, topic, p)
 	if e != nil {
 		return e
 	}

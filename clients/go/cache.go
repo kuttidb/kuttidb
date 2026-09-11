@@ -54,15 +54,16 @@ var (
 type Client struct {
 	addr    string
 	network string
-	// Lock order: stateMu (one state exchange at a time) may be held while
-	// briefly taking lifeMu; Close takes lifeMu only and never stateMu, so
-	// shutdown never waits for an in-flight state request. Neither mutex is
-	// ever held across dialing, AUTH, TLS handshakes, network reads/writes,
-	// or waiting for stateMu.
+	// Lock order: the state gate serializes one state exchange at a time and
+// may be held while briefly taking lifeMu; Close takes lifeMu only and
+// never waits for the state gate, so shutdown never waits for an in-flight
+// state request. Neither the lifecycle mutex nor the state gate is ever
+// held across dialing, AUTH, TLS handshakes, network reads/writes, or
+// waiting for the state gate.
 	lifeMu      sync.Mutex         // lifecycle: closure flag, active registry
 	active      map[*conn]struct{} // leased connections and late dials
 	done        chan struct{}      // closed once, when the client closes
-	stateMu     sync.Mutex
+	stateGate   chan struct{}      // one state exchange at a time (cap-1 token)
 	stateConn   *conn
 	pool        chan *conn // idle connection cache; get() dials overflow
 	closed      bool
@@ -73,8 +74,9 @@ type Client struct {
 	tlsConfig   *tls.Config
 
 	// dialOverride, when set (lifecycle tests), supplies the transport
-	// instead of dialing the network.
-	dialOverride func() (net.Conn, error)
+	// instead of dialing the network. It receives the caller's context so
+	// dial cancellation is observable.
+	dialOverride func(ctx context.Context) (net.Conn, error)
 }
 
 // ManagedOptions configures the opt-in local lifecycle. Unix is the
@@ -258,6 +260,7 @@ func newClientNetwork(network, addr string, poolSize int, token []byte, useTLS b
 		network:     network,
 		active:      make(map[*conn]struct{}),
 		done:        make(chan struct{}),
+		stateGate:   make(chan struct{}, 1),
 		pool:        make(chan *conn, poolSize),
 		dialTimeout: 5 * time.Second,
 		opTimeout:   30 * time.Second,
@@ -265,6 +268,7 @@ func newClientNetwork(network, addr string, poolSize int, token []byte, useTLS b
 		useTLS:      useTLS,
 		tlsConfig:   tlsConfig,
 	}
+	c.stateGate <- struct{}{}
 	for i := 0; i < poolSize; i++ {
 		cn, err := c.dial()
 		if err != nil {
@@ -276,112 +280,70 @@ func newClientNetwork(network, addr string, poolSize int, token []byte, useTLS b
 	return c, nil
 }
 
-func (c *Client) dial() (*conn, error) {
-	var nc net.Conn
-	var err error
-	if c.dialOverride != nil {
-		nc, err = c.dialOverride()
-	} else if c.useTLS {
-		dialer := &net.Dialer{Timeout: c.dialTimeout}
-		nc, err = tls.DialWithDialer(dialer, "tcp", c.addr, c.tlsConfig)
-	} else {
-		nc, err = net.DialTimeout(c.network, c.addr, c.dialTimeout)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if t, ok := nc.(*net.TCPConn); ok {
-		_ = t.SetNoDelay(true)
-	}
-	cn := &conn{c: nc}
-	if len(c.authToken) > 0 {
-		req := make([]byte, 7, 7+len(c.authToken))
-		req[0] = opAuth
-		binary.LittleEndian.PutUint16(req[1:3], uint16(len(c.authToken)))
-		req = append(req, c.authToken...)
-		_ = nc.SetWriteDeadline(time.Now().Add(c.opTimeout))
-		if _, err := nc.Write(req); err != nil {
-			nc.Close()
-			return nil, err
-		}
-		var resp [5]byte
-		if err := readFull(cn, resp[:]); err != nil {
-			nc.Close()
-			return nil, err
-		}
-		if resp[0] != statusOK {
-			nc.Close()
-			return nil, ErrAuth
-		}
-	}
-	return cn, nil
-}
-
 func (c *Client) verifyManaged(expected string) error {
-	cn, err := c.get()
+	ctx := context.Background()
+	deadline, err := c.opDeadline(ctx)
 	if err != nil {
 		return err
 	}
-	defer c.put(cn)
-	if _, err = cn.c.Write([]byte{opServerInfo, 0, 0, 0, 0, 0, 0}); err != nil {
+	cn, err := c.getCtx(ctx, deadline)
+	if err != nil {
 		return err
 	}
-	var head [5]byte
-	if err = readFull(cn, head[:]); err != nil {
+	keep := false
+	defer func() {
+		if keep {
+			c.put(cn)
+		} else {
+			c.discard(cn)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if head[0] != statusOK || binary.LittleEndian.Uint32(head[1:]) != 52 {
-		return errors.New("kuttidb: managed server identity unavailable")
-	}
-	payload := make([]byte, 52)
-	if err = readFull(cn, payload); err != nil {
+	_ = cn.c.SetDeadline(deadline)
+	err = c.watchIO(ctx, cn, func() error {
+		if err := writeFull(cn, []byte{opServerInfo, 0, 0, 0, 0, 0, 0}); err != nil {
+			return err
+		}
+		var head [5]byte
+		if err := readFull(cn, head[:]); err != nil {
+			return err
+		}
+		if head[0] != statusOK || binary.LittleEndian.Uint32(head[1:]) != 52 {
+			return errors.New("kuttidb: managed server identity unavailable")
+		}
+		payload := make([]byte, 52)
+		if err := readFull(cn, payload); err != nil {
+			return err
+		}
+		if payload[0] != 1 || payload[1] != 32 || string(payload[2:34]) != expected {
+			return errors.New("kuttidb: managed endpoint belongs to another instance")
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	if payload[0] != 1 || payload[1] != 32 || string(payload[2:34]) != expected {
-		return errors.New("kuttidb: managed endpoint belongs to another instance")
-	}
+	keep = true
 	return nil
 }
 
-// get leases a connection. The lifecycle mutex is released before dialing:
-// AUTH, TLS, and dial I/O never run under it. A connection opened
-// concurrently with Close either registers before Close's snapshot (and is
-// closed by it) or observes closure here and closes itself — no late dial
-// publishes a live socket into a closed client.
+// get leases a connection with the default (no-context) path.
 func (c *Client) get() (*conn, error) {
-	c.lifeMu.Lock()
-	if c.closed {
-		c.lifeMu.Unlock()
-		return nil, ErrClosed
-	}
-	select {
-	case cn := <-c.pool:
-		c.active[cn] = struct{}{}
-		c.lifeMu.Unlock()
-		return cn, nil
-	default:
-		c.lifeMu.Unlock()
-	}
-	cn, err := c.dial()
+	deadline, err := c.opDeadline(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	c.lifeMu.Lock()
-	if c.closed {
-		c.lifeMu.Unlock()
-		cn.c.Close()
-		return nil, ErrClosed
-	}
-	c.active[cn] = struct{}{}
-	c.lifeMu.Unlock()
-	return cn, nil
+	return c.getCtx(context.Background(), deadline)
 }
 
 // put returns a leased connection to the idle pool. The closed check and
 // the channel send are synchronized with Close through lifeMu: a return
 // that raced with Close either drains with the snapshot (send already
 // ordered before Close's drain) or observes closure and discards. A
-// returned connection is never reused after discard.
+// returned connection is never reused after discard, and its obsolete
+// deadline is cleared before it can be leased again.
 func (c *Client) put(cn *conn) {
 	c.lifeMu.Lock()
 	if c.closed {
@@ -391,6 +353,7 @@ func (c *Client) put(cn *conn) {
 	}
 	delete(c.active, cn)
 	c.lifeMu.Unlock()
+	_ = cn.c.SetDeadline(time.Time{})
 	select {
 	case c.pool <- cn:
 	default:
@@ -414,42 +377,20 @@ func (c *Client) isClosed() bool {
 	return c.closed
 }
 
-// requestError maps an I/O failure onto ErrClosed when the client was
-// closing, so a request interrupted by shutdown is recognizable as such.
-func (c *Client) requestError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if c.isClosed() {
-		return fmt.Errorf("%w: request interrupted by client shutdown: %v", ErrClosed, err)
-	}
-	return err
-}
-
-func readFull(cn *conn, buf []byte) error {
-	_ = cn.c.SetReadDeadline(time.Now().Add(30 * time.Second))
-	n := 0
-	for n < len(buf) {
-		r, err := cn.c.Read(buf[n:])
-		if err != nil {
-			return err
-		}
-		n += r
-	}
-	return nil
-}
+// readFull is defined in protocol.go.
 
 // Put stores value under key.
 func (c *Client) Put(key string, value []byte) error {
+	return c.PutContext(context.Background(), key, value)
+}
+
+// PutContext stores value under key.
+func (c *Client) PutContext(ctx context.Context, key string, value []byte) error {
 	if len(key) > maxKey {
 		return ErrKeyTooLarge
 	}
 	if len(value) > maxValue {
 		return ErrValueTooLarge
-	}
-	cn, err := c.get()
-	if err != nil {
-		return err
 	}
 	req := make([]byte, 7, 7+len(key)+len(value))
 	req[0] = opPut
@@ -457,18 +398,11 @@ func (c *Client) Put(key string, value []byte) error {
 	binary.LittleEndian.PutUint32(req[3:7], uint32(len(value)))
 	req = append(req, key...)
 	req = append(req, value...)
-	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-	if _, err := cn.c.Write(req); err != nil {
-		c.discard(cn)
+	status, _, err := c.requestAt(ctx, mustDeadline(c, ctx), req)
+	if err != nil {
 		return err
 	}
-	resp := make([]byte, 5)
-	if err := readFull(cn, resp); err != nil {
-		c.discard(cn)
-		return err
-	}
-	c.put(cn)
-	if resp[0] != statusOK {
+	if status != statusOK {
 		return ErrServer
 	}
 	return nil
@@ -476,15 +410,16 @@ func (c *Client) Put(key string, value []byte) error {
 
 // PutWithTTL stores value under key with a time-to-live.
 func (c *Client) PutWithTTL(key string, value []byte, ttl time.Duration) error {
+	return c.PutWithTTLContext(context.Background(), key, value, ttl)
+}
+
+// PutWithTTLContext stores value under key with a time-to-live.
+func (c *Client) PutWithTTLContext(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	if len(key) > maxKey {
 		return ErrKeyTooLarge
 	}
 	if len(value) > maxValue {
 		return ErrValueTooLarge
-	}
-	cn, err := c.get()
-	if err != nil {
-		return err
 	}
 	ttlMs := uint32(ttl.Milliseconds())
 	if ttlMs == 0 {
@@ -497,18 +432,11 @@ func (c *Client) PutWithTTL(key string, value []byte, ttl time.Duration) error {
 	binary.LittleEndian.PutUint32(req[7:11], ttlMs)
 	req = append(req, key...)
 	req = append(req, value...)
-	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-	if _, err := cn.c.Write(req); err != nil {
-		c.discard(cn)
+	status, _, err := c.requestAt(ctx, mustDeadline(c, ctx), req)
+	if err != nil {
 		return err
 	}
-	resp := make([]byte, 5)
-	if err := readFull(cn, resp); err != nil {
-		c.discard(cn)
-		return err
-	}
-	c.put(cn)
-	if resp[0] != statusOK {
+	if status != statusOK {
 		return ErrServer
 	}
 	return nil
@@ -516,113 +444,73 @@ func (c *Client) PutWithTTL(key string, value []byte, ttl time.Duration) error {
 
 // Get returns nil, nil on miss.
 func (c *Client) Get(key string) ([]byte, error) {
+	return c.GetContext(context.Background(), key)
+}
+
+// GetContext returns nil, nil on miss.
+func (c *Client) GetContext(ctx context.Context, key string) ([]byte, error) {
 	if len(key) > maxKey {
 		return nil, ErrKeyTooLarge
 	}
-	cn, err := c.get()
+	status, value, err := c.requestCtx(ctx, opGet, key, nil)
 	if err != nil {
 		return nil, err
 	}
-	req := make([]byte, 7, 7+len(key))
-	req[0] = opGet
-	binary.LittleEndian.PutUint16(req[1:3], uint16(len(key)))
-	req = append(req, key...)
-	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-	if _, err := cn.c.Write(req); err != nil {
-		c.discard(cn)
-		return nil, err
-	}
-	head := make([]byte, 5)
-	if err := readFull(cn, head); err != nil {
-		c.discard(cn)
-		return nil, err
-	}
-	vlen := binary.LittleEndian.Uint32(head[1:5])
-	if vlen > maxValue {
-		c.discard(cn)
-		return nil, ErrResponseTooLarge
-	}
-	var val []byte
-	if vlen > 0 {
-		val = make([]byte, vlen)
-		if err := readFull(cn, val); err != nil {
-			c.discard(cn)
-			return nil, err
-		}
-	}
-	c.put(cn)
-	if head[0] == statusMiss {
+	if status == statusMiss {
 		return nil, nil
 	}
-	if head[0] != statusOK {
+	if status != statusOK {
 		return nil, ErrServer
 	}
-	return val, nil
+	return value, nil
 }
 
 // Delete reports whether the key existed.
 func (c *Client) Delete(key string) (bool, error) {
+	return c.DeleteContext(context.Background(), key)
+}
+
+// DeleteContext reports whether the key existed.
+func (c *Client) DeleteContext(ctx context.Context, key string) (bool, error) {
 	if len(key) > maxKey {
 		return false, ErrKeyTooLarge
 	}
-	cn, err := c.get()
+	status, _, err := c.requestCtx(ctx, opDelete, key, nil)
 	if err != nil {
 		return false, err
 	}
-	req := make([]byte, 7, 7+len(key))
-	req[0] = opDelete
-	binary.LittleEndian.PutUint16(req[1:3], uint16(len(key)))
-	req = append(req, key...)
-	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-	if _, err := cn.c.Write(req); err != nil {
-		c.discard(cn)
-		return false, err
-	}
-	head := make([]byte, 5)
-	if err := readFull(cn, head); err != nil {
-		c.discard(cn)
-		return false, err
-	}
-	c.put(cn)
-	return head[0] == statusOK, nil
+	return status == statusOK, nil
 }
 
 // Stats returns the server STATS JSON payload.
 func (c *Client) Stats() ([]byte, error) {
-	cn, err := c.get()
+	return c.StatsContext(context.Background())
+}
+
+// StatsContext returns the server STATS JSON payload.
+func (c *Client) StatsContext(ctx context.Context) ([]byte, error) {
+	_, value, err := c.requestCtx(ctx, opStats, "", nil)
 	if err != nil {
 		return nil, err
 	}
-	req := []byte{opStats, 0, 0, 0, 0, 0, 0}
-	_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-	if _, err := cn.c.Write(req); err != nil {
-		c.discard(cn)
-		return nil, err
-	}
-	head := make([]byte, 5)
-	if err := readFull(cn, head); err != nil {
-		c.discard(cn)
-		return nil, err
-	}
-	vlen := binary.LittleEndian.Uint32(head[1:5])
-	if vlen > maxValue {
-		c.discard(cn)
-		return nil, ErrResponseTooLarge
-	}
-	val := make([]byte, vlen)
-	if err := readFull(cn, val); err != nil {
-		c.discard(cn)
-		return nil, err
-	}
-	c.put(cn)
-	return val, nil
+	return value, nil
 }
 
 // PutMany writes pairs in batches of BatchSize (one round trip each).
 func (c *Client) PutMany(pairs map[string][]byte) error {
+	return c.PutManyContext(context.Background(), pairs)
+}
+
+// PutManyContext writes pairs in batches of BatchSize; every chunk shares
+// the operation's single deadline budget.
+func (c *Client) PutManyContext(ctx context.Context, pairs map[string][]byte) error {
 	keys := make([]string, 0, len(pairs))
 	for k := range pairs {
 		keys = append(keys, k)
+	}
+	deadline, err := c.opDeadline(ctx)
+	if err != nil {
+		return err
 	}
 	for start := 0; start < len(keys); start += BatchSize {
 		end := start + BatchSize
@@ -630,53 +518,47 @@ func (c *Client) PutMany(pairs map[string][]byte) error {
 			end = len(keys)
 		}
 		chunk := keys[start:end]
-		cn, err := c.get()
+		req, err := putBatchFrame(chunk, pairs)
 		if err != nil {
 			return err
 		}
-		size := 7
-		for _, k := range chunk {
-			if len(k) > maxKey {
-				return ErrKeyTooLarge
-			}
-			if len(pairs[k]) > maxValue {
-				return ErrValueTooLarge
-			}
-			itemSize := 6 + len(k) + len(pairs[k])
-			if itemSize > maxValue-size {
-				return ErrValueTooLarge
-			}
-			size += itemSize
-		}
-		req := make([]byte, 0, size)
-		req = append(req, opPutBatch, 0, 0)
-		var cnt [4]byte
-		binary.LittleEndian.PutUint32(cnt[:], uint32(len(chunk)))
-		req = append(req, cnt[:]...)
-		for _, k := range chunk {
-			var h [6]byte
-			binary.LittleEndian.PutUint16(h[0:2], uint16(len(k)))
-			binary.LittleEndian.PutUint32(h[2:6], uint32(len(pairs[k])))
-			req = append(req, h[:]...)
-			req = append(req, k...)
-			req = append(req, pairs[k]...)
-		}
-		_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-		if _, err := cn.c.Write(req); err != nil {
-			c.discard(cn)
+		status, _, err := c.requestAt(ctx, deadline, req)
+		if err != nil {
 			return err
 		}
-		resp := make([]byte, 1)
-		if err := readFull(cn, resp); err != nil {
-			c.discard(cn)
-			return err
-		}
-		c.put(cn)
-		if resp[0] != statusOK {
+		if status != statusOK {
 			return ErrServer
 		}
 	}
 	return nil
+}
+
+// putBatchFrame builds one opPutBatch request chunk.
+func putBatchFrame(chunk []string, pairs map[string][]byte) ([]byte, error) {
+	size := 7
+	for _, k := range chunk {
+		if len(k) > maxKey {
+			return nil, ErrKeyTooLarge
+		}
+		if len(pairs[k]) > maxValue {
+			return nil, ErrValueTooLarge
+		}
+		itemSize := 6 + len(k) + len(pairs[k])
+		if itemSize > maxValue-size {
+			return nil, ErrValueTooLarge
+		}
+		size += itemSize
+	}
+	req := make([]byte, 0, size)
+	req = append(req, opPutBatch, 0, 0)
+	req = appendU32(req, uint32(len(chunk)))
+	for _, k := range chunk {
+		req = appendU16(req, uint16(len(k)))
+		req = appendU32(req, uint32(len(pairs[k])))
+		req = append(req, k...)
+		req = append(req, pairs[k]...)
+	}
+	return req, nil
 }
 
 // Item is a key/value pair with optional TTL for PutManyTTL.
@@ -689,131 +571,180 @@ type Item struct {
 // PutManyTTL writes items in batches of BatchSize; per-item TTL in
 // milliseconds on the wire (0 = no expiry). One round trip per batch.
 func (c *Client) PutManyTTL(items []Item) error {
+	return c.PutManyTTLContext(context.Background(), items)
+}
+
+// PutManyTTLContext writes items in batches of BatchSize; every chunk
+// shares the operation's single deadline budget.
+func (c *Client) PutManyTTLContext(ctx context.Context, items []Item) error {
+	deadline, err := c.opDeadline(ctx)
+	if err != nil {
+		return err
+	}
 	for start := 0; start < len(items); start += BatchSize {
 		end := start + BatchSize
 		if end > len(items) {
 			end = len(items)
 		}
 		chunk := items[start:end]
-		cn, err := c.get()
+		req, err := putBatchTTLFrame(chunk)
 		if err != nil {
 			return err
 		}
-		size := 7
-		for _, it := range chunk {
-			if len(it.Key) > maxKey {
-				return ErrKeyTooLarge
-			}
-			if len(it.Value) > maxValue {
-				return ErrValueTooLarge
-			}
-			itemSize := 10 + len(it.Key) + len(it.Value)
-			if itemSize > maxValue-size {
-				return ErrValueTooLarge
-			}
-			size += itemSize
-		}
-		req := make([]byte, 0, size)
-		req = append(req, opPutBatchTTL, 0, 0)
-		var cnt [4]byte
-		binary.LittleEndian.PutUint32(cnt[:], uint32(len(chunk)))
-		req = append(req, cnt[:]...)
-		for _, it := range chunk {
-			var h [10]byte
-			binary.LittleEndian.PutUint16(h[0:2], uint16(len(it.Key)))
-			binary.LittleEndian.PutUint32(h[2:6], uint32(len(it.Value)))
-			ttlMs := uint32(it.TTL.Milliseconds())
-			if it.TTL > 0 && ttlMs == 0 {
-				ttlMs = 1
-			}
-			binary.LittleEndian.PutUint32(h[6:10], ttlMs)
-			req = append(req, h[:]...)
-			req = append(req, it.Key...)
-			req = append(req, it.Value...)
-		}
-		_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-		if _, err := cn.c.Write(req); err != nil {
-			c.discard(cn)
+		status, _, err := c.requestAt(ctx, deadline, req)
+		if err != nil {
 			return err
 		}
-		resp := make([]byte, 1)
-		if err := readFull(cn, resp); err != nil {
-			c.discard(cn)
-			return err
-		}
-		c.put(cn)
-		if resp[0] != statusOK {
+		if status != statusOK {
 			return ErrServer
 		}
 	}
 	return nil
 }
 
+// putBatchTTLFrame builds one opPutBatchTTL request chunk.
+func putBatchTTLFrame(chunk []Item) ([]byte, error) {
+	size := 7
+	for _, it := range chunk {
+		if len(it.Key) > maxKey {
+			return nil, ErrKeyTooLarge
+		}
+		if len(it.Value) > maxValue {
+			return nil, ErrValueTooLarge
+		}
+		itemSize := 10 + len(it.Key) + len(it.Value)
+		if itemSize > maxValue-size {
+			return nil, ErrValueTooLarge
+		}
+		size += itemSize
+	}
+	req := make([]byte, 0, size)
+	req = append(req, opPutBatchTTL, 0, 0)
+	req = appendU32(req, uint32(len(chunk)))
+	for _, it := range chunk {
+		req = appendU16(req, uint16(len(it.Key)))
+		req = appendU32(req, uint32(len(it.Value)))
+		ttlMs := uint32(it.TTL.Milliseconds())
+		if it.TTL > 0 && ttlMs == 0 {
+			ttlMs = 1
+		}
+		req = appendU32(req, ttlMs)
+		req = append(req, it.Key...)
+		req = append(req, it.Value...)
+	}
+	return req, nil
+}
+
 // GetMany fetches keys in batches of BatchSize; misses are nil entries.
 func (c *Client) GetMany(keys []string) ([][]byte, error) {
+	return c.GetManyContext(context.Background(), keys)
+}
+
+// GetManyContext fetches keys in batches of BatchSize; every chunk and
+// response segment shares the operation's single deadline budget, and a
+// canceled or partially read chunk discards its connection so trailing
+// bytes can never become the next operation's response.
+func (c *Client) GetManyContext(ctx context.Context, keys []string) ([][]byte, error) {
 	result := make([][]byte, len(keys))
+	deadline, err := c.opDeadline(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for start := 0; start < len(keys); start += BatchSize {
 		end := start + BatchSize
 		if end > len(keys) {
 			end = len(keys)
 		}
 		chunk := keys[start:end]
-		cn, err := c.get()
+		req, err := getBatchFrame(chunk)
 		if err != nil {
 			return nil, err
 		}
-		size := 7
-		for _, k := range chunk {
-			if len(k) > maxKey {
-				return nil, ErrKeyTooLarge
-			}
-			size += 2 + len(k)
-		}
-		req := make([]byte, 0, size)
-		req = append(req, opGetBatch, 0, 0)
-		var cnt [4]byte
-		binary.LittleEndian.PutUint32(cnt[:], uint32(len(chunk)))
-		req = append(req, cnt[:]...)
-		for _, k := range chunk {
-			var h [2]byte
-			binary.LittleEndian.PutUint16(h[0:2], uint16(len(k)))
-			req = append(req, h[:]...)
-			req = append(req, k...)
-		}
-		_ = cn.c.SetWriteDeadline(time.Now().Add(c.opTimeout))
-		if _, err := cn.c.Write(req); err != nil {
-			c.discard(cn)
+		cn, err := c.getCtx(ctx, deadline)
+		if err != nil {
 			return nil, err
 		}
-		var rcount [4]byte
-		if err := readFull(cn, rcount[:]); err != nil {
-			c.discard(cn)
-			return nil, err
-		}
-		n := binary.LittleEndian.Uint32(rcount[:])
-		for i := 0; i < int(n); i++ {
-			var sh [5]byte
-			if err := readFull(cn, sh[:]); err != nil {
-				c.discard(cn)
-				return nil, err
-			}
-			vlen := binary.LittleEndian.Uint32(sh[1:5])
-			if vlen > maxValue {
-				c.discard(cn)
-				return nil, ErrResponseTooLarge
-			}
-			if sh[0] == statusOK && vlen > 0 {
-				val := make([]byte, vlen)
-				if err := readFull(cn, val); err != nil {
+		err = func() error {
+			keep := false
+			defer func() {
+				if keep {
+					c.put(cn)
+				} else {
 					c.discard(cn)
-					return nil, err
 				}
-				result[start+i] = val
+			}()
+			if err := ctx.Err(); err != nil {
+				return err
 			}
+			_ = cn.c.SetDeadline(deadline)
+			xerr := c.watchIO(ctx, cn, func() error {
+				if err := writeFull(cn, req); err != nil {
+					return err
+				}
+				var rcount [4]byte
+				if err := readFull(cn, rcount[:]); err != nil {
+					return err
+				}
+				n := binary.LittleEndian.Uint32(rcount[:])
+				for i := 0; i < int(n); i++ {
+					var sh [5]byte
+					if err := readFull(cn, sh[:]); err != nil {
+						return err
+					}
+					vlen := binary.LittleEndian.Uint32(sh[1:5])
+					if vlen > maxValue {
+						return ErrResponseTooLarge
+					}
+					if sh[0] == statusOK && vlen > 0 {
+						val := make([]byte, vlen)
+						if err := readFull(cn, val); err != nil {
+							return err
+						}
+						result[start+i] = val
+					}
+				}
+				return nil
+			})
+			if xerr == nil {
+				keep = true
+			}
+			return xerr
+		}()
+		if err != nil {
+			return nil, err
 		}
-		c.put(cn)
 	}
 	return result, nil
+}
+
+// getBatchFrame builds one opGetBatch request chunk.
+func getBatchFrame(chunk []string) ([]byte, error) {
+	size := 7
+	for _, k := range chunk {
+		if len(k) > maxKey {
+			return nil, ErrKeyTooLarge
+		}
+		size += 2 + len(k)
+	}
+	req := make([]byte, 0, size)
+	req = append(req, opGetBatch, 0, 0)
+	req = appendU32(req, uint32(len(chunk)))
+	for _, k := range chunk {
+		req = appendU16(req, uint16(len(k)))
+		req = append(req, k...)
+	}
+	return req, nil
+}
+
+// mustDeadline computes the operation deadline or surfaces context state.
+func mustDeadline(c *Client, ctx context.Context) time.Time {
+	d, err := c.opDeadline(ctx)
+	if err != nil {
+		// The context is already done; requestAt will surface it before
+		// any I/O, so a zero time is safe here.
+		return time.Time{}
+	}
+	return d
 }
 
 // Close terminates the client: it marks closure before any further lease,

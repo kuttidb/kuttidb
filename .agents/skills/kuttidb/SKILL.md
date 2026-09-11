@@ -274,6 +274,21 @@ snake_case with `std::time::Duration` TTLs. The C companion
 `kuttidb_state_get/put/delete`, `kuttidb_durable_operation`,
 `kuttidb_queue_manifest` over TCP/Unix with AUTH and verified TLS.
 
+**Go context variants:** every Go cache, queue, stream, and single-flight
+method has a `MethodContext(ctx, …)` twin with the same signature plus a
+leading `context.Context`; the legacy names delegate with a background
+context and the configured operation timeout. One absolute deadline (the
+earlier of the caller deadline and the operation timeout) governs the whole
+operation, including capability probes and batch chunks. Cancellation or a
+context deadline is recognizable via `errors.Is(err, context.Canceled)` /
+`context.DeadlineExceeded`. The SDK never retries a sent mutation and never
+replays consume/ACK/NACK/join. Queue deliveries, single-flight leases, and
+stream group membership ride one dedicated state connection per client:
+cancellation or shutdown that discards that socket invalidates deliveries,
+claims, and memberships on it — reestablish that state explicitly. `Close()`
+is idempotent, interrupts active I/O, and requests begun afterwards return
+`ErrClosed`; a fully received response may still complete successfully.
+
 **Cache:** `put(key, value, ttl=None)` · `get(key)` · `delete(key)` ·
 `stats()` · `health()` · `capabilities()` · `put_many([(k, v), …])` ·
 `get_many([keys])`

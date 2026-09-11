@@ -1,6 +1,7 @@
 package kuttidb
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -234,28 +235,44 @@ func decodeSingleFlight(s byte, v []byte, holder bool) (SingleFlightResult, erro
 	return r, nil
 }
 func (c *Client) GetOrClaim(key string, lease time.Duration) (SingleFlightResult, error) {
+	return c.GetOrClaimContext(context.Background(), key, lease)
+}
+
+// GetOrClaimContext claims a key for cache loading; the claim lease is
+// bound to this client's state connection.
+func (c *Client) GetOrClaimContext(ctx context.Context, key string, lease time.Duration) (SingleFlightResult, error) {
 	ms, e := milliseconds(lease, false)
 	if e != nil || ms > 60000 {
 		return SingleFlightResult{}, fmt.Errorf("kuttidb: lease must be 0..60 seconds")
 	}
-	s, v, e := c.stateRequest(opGetOrClaim, key, appendU32(nil, uint32(ms)))
+	s, v, e := c.stateRequestCtx(ctx, opGetOrClaim, key, appendU32(nil, uint32(ms)))
 	if e != nil {
 		return SingleFlightResult{}, e
 	}
 	return decodeSingleFlight(s, v, false)
 }
 func (c *Client) WaitForKey(key string, timeout time.Duration) (SingleFlightResult, error) {
+	return c.WaitForKeyContext(context.Background(), key, timeout)
+}
+
+// WaitForKeyContext waits for another claimant to publish the key.
+func (c *Client) WaitForKeyContext(ctx context.Context, key string, timeout time.Duration) (SingleFlightResult, error) {
 	ms, e := milliseconds(timeout, false)
 	if e != nil || ms > 60000 {
 		return SingleFlightResult{}, fmt.Errorf("kuttidb: timeout must be 0..60 seconds")
 	}
-	s, v, e := c.stateRequest(opWaitForKey, key, appendU32(nil, uint32(ms)))
+	s, v, e := c.stateRequestCtx(ctx, opWaitForKey, key, appendU32(nil, uint32(ms)))
 	if e != nil {
 		return SingleFlightResult{}, e
 	}
 	return decodeSingleFlight(s, v, false)
 }
 func (c *Client) PutAndRelease(key string, value []byte, ttl time.Duration, negative bool) error {
+	return c.PutAndReleaseContext(context.Background(), key, value, ttl, negative)
+}
+
+// PutAndReleaseContext stores the loaded value and releases the claim.
+func (c *Client) PutAndReleaseContext(ctx context.Context, key string, value []byte, ttl time.Duration, negative bool) error {
 	ms, e := milliseconds(ttl, true)
 	if e != nil || ms > 0xffffffff {
 		return fmt.Errorf("kuttidb: invalid TTL")
@@ -267,28 +284,38 @@ func (c *Client) PutAndRelease(key string, value []byte, ttl time.Duration, nega
 		p = append(p, 0)
 	}
 	p = append(p, value...)
-	s, _, e := c.stateRequest(opPutAndRelease, key, p)
+	s, _, e := c.stateRequestCtx(ctx, opPutAndRelease, key, p)
 	if e != nil {
 		return e
 	}
 	return requireOK(s, "put and release")
 }
 func (c *Client) ReleaseClaim(key string) error {
-	s, _, e := c.stateRequest(opReleaseClaim, key, nil)
+	return c.ReleaseClaimContext(context.Background(), key)
+}
+
+// ReleaseClaimContext releases a claim without storing a value.
+func (c *Client) ReleaseClaimContext(ctx context.Context, key string) error {
+	s, _, e := c.stateRequestCtx(ctx, opReleaseClaim, key, nil)
 	if e != nil {
 		return e
 	}
 	return requireOK(s, "release claim")
 }
 func (c *Client) GetOrRefresh(key string, lease time.Duration) (SingleFlightResult, error) {
-	if e := c.requireFeature(FeatureSWR, "stale-while-revalidate"); e != nil {
+	return c.GetOrRefreshContext(context.Background(), key, lease)
+}
+
+// GetOrRefreshContext claims a stale-while-revalidate refresh window.
+func (c *Client) GetOrRefreshContext(ctx context.Context, key string, lease time.Duration) (SingleFlightResult, error) {
+	if e := c.requireFeatureCtx(ctx, FeatureSWR, "stale-while-revalidate"); e != nil {
 		return SingleFlightResult{}, e
 	}
 	ms, e := milliseconds(lease, false)
 	if e != nil || ms > 60000 {
 		return SingleFlightResult{}, fmt.Errorf("kuttidb: lease must be 0..60 seconds")
 	}
-	s, v, e := c.stateRequest(opGetOrRefresh, key, appendU32(nil, uint32(ms)))
+	s, v, e := c.stateRequestCtx(ctx, opGetOrRefresh, key, appendU32(nil, uint32(ms)))
 	if e != nil {
 		return SingleFlightResult{}, e
 	}
@@ -296,7 +323,12 @@ func (c *Client) GetOrRefresh(key string, lease time.Duration) (SingleFlightResu
 }
 
 func (c *Client) PutSWR(key string, value []byte, ttl, staleFor, refreshAfter time.Duration) error {
-	if e := c.requireFeature(FeatureSWR, "stale-while-revalidate"); e != nil {
+	return c.PutSWRContext(context.Background(), key, value, ttl, staleFor, refreshAfter)
+}
+
+// PutSWRContext stores a stale-while-revalidate record.
+func (c *Client) PutSWRContext(ctx context.Context, key string, value []byte, ttl, staleFor, refreshAfter time.Duration) error {
+	if e := c.requireFeatureCtx(ctx, FeatureSWR, "stale-while-revalidate"); e != nil {
 		return e
 	}
 	tm, e := milliseconds(ttl, false)
@@ -330,7 +362,11 @@ func (c *Client) PutSWR(key string, value []byte, ttl, staleFor, refreshAfter ti
 	binary.LittleEndian.PutUint32(req[15:19], uint32(rm))
 	req = append(req, key...)
 	req = append(req, value...)
-	s, _, e := c.requestFrame(req)
+	deadline, e := c.opDeadline(ctx)
+	if e != nil {
+		return e
+	}
+	s, _, e := c.requestAt(ctx, deadline, req)
 	if e != nil {
 		return e
 	}
@@ -339,8 +375,26 @@ func (c *Client) PutSWR(key string, value []byte, ttl, staleFor, refreshAfter ti
 
 type Loader func() ([]byte, error)
 
+// ContextLoader loads a value for the context-aware cache helpers. It
+// receives the caller's context: the SDK cannot forcibly stop loader code
+// that ignores cancellation, so long loaders should check ctx themselves.
+// Loaders run synchronously on the caller's goroutine — the SDK never
+// detaches them into unbounded goroutines.
+type ContextLoader func(context.Context) ([]byte, error)
+
 func (c *Client) GetOrLoad(key string, loader Loader, ttl, lease, wait time.Duration) ([]byte, error) {
-	r, e := c.GetOrClaim(key, lease)
+	return c.GetOrLoadContext(context.Background(), key,
+		func(context.Context) ([]byte, error) { return loader() }, ttl, lease, wait)
+}
+
+// GetOrLoadContext loads through the claim/wait/release machinery so cache
+// fallback is never trapped behind an uncancellable helper. Every subrequest
+// (claim, waits, releases, store) shares the operation's deadline budget.
+func (c *Client) GetOrLoadContext(ctx context.Context, key string, loader ContextLoader, ttl, lease, wait time.Duration) ([]byte, error) {
+	if _, err := c.opDeadline(ctx); err != nil {
+		return nil, err
+	}
+	r, e := c.GetOrClaimContext(ctx, key, lease)
 	if e != nil {
 		return nil, e
 	}
@@ -352,7 +406,10 @@ func (c *Client) GetOrLoad(key string, loader Loader, ttl, lease, wait time.Dura
 	}
 	if r.State == StateWait {
 		for range 3 {
-			w, e := c.WaitForKey(key, wait)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			w, e := c.WaitForKeyContext(ctx, key, wait)
 			if e != nil {
 				return nil, e
 			}
@@ -362,7 +419,7 @@ func (c *Client) GetOrLoad(key string, loader Loader, ttl, lease, wait time.Dura
 			if w.State == StateNegative || w.State == StateTimeout {
 				return nil, nil
 			}
-			r, e = c.GetOrClaim(key, lease)
+			r, e = c.GetOrClaimContext(ctx, key, lease)
 			if e != nil {
 				return nil, e
 			}
@@ -377,18 +434,29 @@ func (c *Client) GetOrLoad(key string, loader Loader, ttl, lease, wait time.Dura
 	if r.State != StateClaimed {
 		return nil, nil
 	}
-	loaded, e := loader()
+	loaded, e := loader(ctx)
 	if e != nil {
-		_ = c.ReleaseClaim(key)
+		_ = c.ReleaseClaimContext(ctx, key)
 		return nil, e
 	}
 	if loaded == nil {
-		return nil, c.PutAndRelease(key, nil, ttl, true)
+		return nil, c.PutAndReleaseContext(ctx, key, nil, ttl, true)
 	}
-	return loaded, c.PutAndRelease(key, loaded, ttl, false)
+	return loaded, c.PutAndReleaseContext(ctx, key, loaded, ttl, false)
 }
+
 func (c *Client) GetOrLoadSWR(key string, loader Loader, ttl, staleFor, refreshAfter, lease, wait time.Duration) ([]byte, error) {
-	r, e := c.GetOrRefresh(key, lease)
+	return c.GetOrLoadSWRContext(context.Background(), key,
+		func(context.Context) ([]byte, error) { return loader() }, ttl, staleFor, refreshAfter, lease, wait)
+}
+
+// GetOrLoadSWRContext loads through the SWR claim machinery; every
+// subrequest shares one deadline budget.
+func (c *Client) GetOrLoadSWRContext(ctx context.Context, key string, loader ContextLoader, ttl, staleFor, refreshAfter, lease, wait time.Duration) ([]byte, error) {
+	if _, err := c.opDeadline(ctx); err != nil {
+		return nil, err
+	}
+	r, e := c.GetOrRefreshContext(ctx, key, lease)
 	if e != nil {
 		return nil, e
 	}
@@ -403,7 +471,10 @@ func (c *Client) GetOrLoadSWR(key string, loader Loader, ttl, staleFor, refreshA
 	}
 	if r.State == StateWait {
 		for range 3 {
-			w, e := c.WaitForKey(key, wait)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			w, e := c.WaitForKeyContext(ctx, key, wait)
 			if e != nil {
 				return nil, e
 			}
@@ -413,7 +484,7 @@ func (c *Client) GetOrLoadSWR(key string, loader Loader, ttl, staleFor, refreshA
 			if w.State == StateNegative || w.State == StateTimeout {
 				return nil, nil
 			}
-			r, e = c.GetOrRefresh(key, lease)
+			r, e = c.GetOrRefreshContext(ctx, key, lease)
 			if e != nil {
 				return nil, e
 			}
@@ -431,17 +502,17 @@ func (c *Client) GetOrLoadSWR(key string, loader Loader, ttl, staleFor, refreshA
 	if r.State != StateClaimed && !r.Holder {
 		return nil, nil
 	}
-	loaded, e := loader()
+	loaded, e := loader(ctx)
 	if e != nil {
-		_ = c.ReleaseClaim(key)
+		_ = c.ReleaseClaimContext(ctx, key)
 		return nil, e
 	}
 	if loaded == nil {
-		return nil, c.PutAndRelease(key, nil, ttl, true)
+		return nil, c.PutAndReleaseContext(ctx, key, nil, ttl, true)
 	}
-	if e = c.PutSWR(key, loaded, ttl, staleFor, refreshAfter); e != nil {
-		_ = c.ReleaseClaim(key)
+	if e = c.PutSWRContext(ctx, key, loaded, ttl, staleFor, refreshAfter); e != nil {
+		_ = c.ReleaseClaimContext(ctx, key)
 		return nil, e
 	}
-	return loaded, c.ReleaseClaim(key)
+	return loaded, c.ReleaseClaimContext(ctx, key)
 }

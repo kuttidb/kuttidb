@@ -235,11 +235,7 @@ func jobStatusError(status byte, body []byte, what string) error {
 // error envelope must stay reachable here, so responses are never
 // collapsed into a generic error before decoding.
 func (c *Client) jobRequest(ctx context.Context, op byte, key string, value []byte) (byte, []byte, error) {
-	req, err := frame(op, key, value)
-	if err != nil {
-		return 0, nil, err
-	}
-	return c.requestFrameCtx(ctx, req)
+	return c.requestCtx(ctx, op, key, value)
 }
 
 // QueueManifestEntry is one live Queue in the bounded (256 entries) 0x77

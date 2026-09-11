@@ -1,6 +1,7 @@
 package kuttidb
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -87,9 +88,28 @@ type Capabilities struct {
 }
 
 func (c *Client) Capabilities() (Capabilities, error) {
+	return c.CapabilitiesContext(context.Background())
+}
+
+// CapabilitiesContext probes the server's protocol version and feature set.
+func (c *Client) CapabilitiesContext(ctx context.Context) (Capabilities, error) {
+	deadline, err := c.opDeadline(ctx)
+	if err != nil {
+		return Capabilities{}, err
+	}
+	return c.capabilitiesAt(ctx, deadline)
+}
+
+// capabilitiesAt probes capabilities under a shared absolute deadline so a
+// capability probe and the operation that needs it share one budget.
+func (c *Client) capabilitiesAt(ctx context.Context, deadline time.Time) (Capabilities, error) {
 	p := appendU16(nil, protocolMajor)
 	p = appendU16(p, protocolMinor)
-	status, value, err := c.request(opCapabilities, "", p)
+	req, err := frame(opCapabilities, "", p)
+	if err != nil {
+		return Capabilities{}, err
+	}
+	status, value, err := c.requestAt(ctx, deadline, req)
 	if err != nil {
 		return Capabilities{}, err
 	}
@@ -106,7 +126,15 @@ func (c *Client) Capabilities() (Capabilities, error) {
 }
 
 func (c *Client) requireFeature(feature uint64, name string) error {
-	caps, err := c.Capabilities()
+	return c.requireFeatureCtx(context.Background(), feature, name)
+}
+
+func (c *Client) requireFeatureCtx(ctx context.Context, feature uint64, name string) error {
+	deadline, err := c.opDeadline(ctx)
+	if err != nil {
+		return err
+	}
+	caps, err := c.capabilitiesAt(ctx, deadline)
 	if err != nil {
 		return err
 	}
@@ -117,7 +145,12 @@ func (c *Client) requireFeature(feature uint64, name string) error {
 }
 
 func (c *Client) Health() (bool, error) {
-	status, _, err := c.request(opHealth, "", nil)
+	return c.HealthContext(context.Background())
+}
+
+// HealthContext reports whether the server answers the health probe.
+func (c *Client) HealthContext(ctx context.Context) (bool, error) {
+	status, _, err := c.requestCtx(ctx, opHealth, "", nil)
 	if err != nil {
 		return false, err
 	}
@@ -147,6 +180,12 @@ type Delivery struct {
 }
 
 func (c *Client) QueueDeclare(name string, options QueueOptions) error {
+	return c.QueueDeclareContext(context.Background(), name, options)
+}
+
+// QueueDeclareContext declares a queue (durable options are fixed at
+// declaration).
+func (c *Client) QueueDeclareContext(ctx context.Context, name string, options QueueOptions) error {
 	if name == "" || len(name) > 255 {
 		return fmt.Errorf("kuttidb: invalid queue name")
 	}
@@ -165,7 +204,7 @@ func (c *Client) QueueDeclare(name string, options QueueOptions) error {
 		v = appendU16(v, uint16(len(ext)))
 		v = append(v, ext...)
 	}
-	status, _, err := c.stateRequest(opQueueDeclare, name, v)
+	status, _, err := c.stateRequestCtx(ctx, opQueueDeclare, name, v)
 	if err != nil {
 		return err
 	}
@@ -173,7 +212,12 @@ func (c *Client) QueueDeclare(name string, options QueueOptions) error {
 }
 
 func (c *Client) QueueList() ([]QueueInfo, error) {
-	status, value, err := c.stateRequest(opQueueList, "", nil)
+	return c.QueueListContext(context.Background())
+}
+
+// QueueListContext lists queues with depth and in-flight counts.
+func (c *Client) QueueListContext(ctx context.Context) ([]QueueInfo, error) {
+	status, value, err := c.stateRequestCtx(ctx, opQueueList, "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -209,6 +253,12 @@ func (c *Client) QueueList() ([]QueueInfo, error) {
 }
 
 func (c *Client) QueuePublish(name string, value []byte, ttl time.Duration) (uint64, error) {
+	return c.QueuePublishContext(context.Background(), name, value, ttl)
+}
+
+// QueuePublishContext publishes one message; publication is never retried
+// after a lost response.
+func (c *Client) QueuePublishContext(ctx context.Context, name string, value []byte, ttl time.Duration) (uint64, error) {
 	op, p := byte(opQueuePublish), value
 	if ttl > 0 {
 		ms, err := milliseconds(ttl, false)
@@ -221,7 +271,7 @@ func (c *Client) QueuePublish(name string, value []byte, ttl time.Duration) (uin
 	} else if ttl < 0 {
 		return 0, fmt.Errorf("kuttidb: invalid TTL")
 	}
-	status, response, err := c.stateRequest(op, name, p)
+	status, response, err := c.stateRequestCtx(ctx, op, name, p)
 	if err != nil {
 		return 0, err
 	}
@@ -260,12 +310,19 @@ func decodeDelivery(value []byte) (Delivery, error) {
 }
 
 func (c *Client) QueueConsume(name string, visibility time.Duration) (*Delivery, error) {
+	return c.QueueConsumeContext(context.Background(), name, visibility)
+}
+
+// QueueConsumeContext consumes one delivery. Cancellation that discards the
+// state connection invalidates deliveries already owned there; callers must
+// reestablish state rather than replay consume automatically.
+func (c *Client) QueueConsumeContext(ctx context.Context, name string, visibility time.Duration) (*Delivery, error) {
 	ms, err := milliseconds(visibility, true)
 	if err != nil {
 		return nil, err
 	}
 	p := appendU64(nil, ms)
-	status, value, err := c.stateRequest(opQueueConsume, name, p)
+	status, value, err := c.stateRequestCtx(ctx, opQueueConsume, name, p)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +337,12 @@ func (c *Client) QueueConsume(name string, visibility time.Duration) (*Delivery,
 }
 
 func (c *Client) QueueConsumeAs(name, consumer string, visibility time.Duration) (*Delivery, error) {
+	return c.QueueConsumeAsContext(context.Background(), name, consumer, visibility)
+}
+
+// QueueConsumeAsContext consumes on behalf of a registered durable named
+// consumer; the connection affinity rules of QueueConsumeContext apply.
+func (c *Client) QueueConsumeAsContext(ctx context.Context, name, consumer string, visibility time.Duration) (*Delivery, error) {
 	if consumer == "" || len(consumer) > 255 {
 		return nil, fmt.Errorf("kuttidb: invalid consumer")
 	}
@@ -290,7 +353,7 @@ func (c *Client) QueueConsumeAs(name, consumer string, visibility time.Duration)
 	p := appendU16(nil, uint16(len(consumer)))
 	p = append(p, consumer...)
 	p = appendU64(p, ms)
-	status, value, err := c.stateRequest(opQueueConsumeAs, name, p)
+	status, value, err := c.stateRequestCtx(ctx, opQueueConsumeAs, name, p)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +368,12 @@ func (c *Client) QueueConsumeAs(name, consumer string, visibility time.Duration)
 }
 
 func (c *Client) QueueAck(name string, tag uint64) (bool, error) {
-	status, _, err := c.stateRequest(opQueueAck, name, appendU64(nil, tag))
+	return c.QueueAckContext(context.Background(), name, tag)
+}
+
+// QueueAckContext acknowledges one delivery.
+func (c *Client) QueueAckContext(ctx context.Context, name string, tag uint64) (bool, error) {
+	status, _, err := c.stateRequestCtx(ctx, opQueueAck, name, appendU64(nil, tag))
 	if err != nil {
 		return false, err
 	}
@@ -315,6 +383,11 @@ func (c *Client) QueueAck(name string, tag uint64) (bool, error) {
 	return status == statusOK, nil
 }
 func (c *Client) QueueNack(name string, tag uint64, requeue bool, delay time.Duration) (bool, error) {
+	return c.QueueNackContext(context.Background(), name, tag, requeue, delay)
+}
+
+// QueueNackContext nacks one delivery; a positive delay schedules the retry.
+func (c *Client) QueueNackContext(ctx context.Context, name string, tag uint64, requeue bool, delay time.Duration) (bool, error) {
 	ms, err := milliseconds(delay, true)
 	if err != nil {
 		return false, err
@@ -328,7 +401,7 @@ func (c *Client) QueueNack(name string, tag uint64, requeue bool, delay time.Dur
 	if ms > 0 {
 		p = appendU64(p, ms)
 	}
-	status, _, err := c.stateRequest(opQueueNack, name, p)
+	status, _, err := c.stateRequestCtx(ctx, opQueueNack, name, p)
 	if err != nil {
 		return false, err
 	}
@@ -338,7 +411,12 @@ func (c *Client) QueueNack(name string, tag uint64, requeue bool, delay time.Dur
 	return status == statusOK, nil
 }
 func (c *Client) QueueStats(name string) (*QueueStats, error) {
-	status, v, err := c.stateRequest(opQueueStats, name, nil)
+	return c.QueueStatsContext(context.Background(), name)
+}
+
+// QueueStatsContext reports queue depth and in-flight counts.
+func (c *Client) QueueStatsContext(ctx context.Context, name string) (*QueueStats, error) {
+	status, v, err := c.stateRequestCtx(ctx, opQueueStats, name, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -354,24 +432,41 @@ func (c *Client) QueueStats(name string) (*QueueStats, error) {
 	return &QueueStats{binary.LittleEndian.Uint64(v), binary.LittleEndian.Uint64(v[8:])}, nil
 }
 func (c *Client) QueuePrefetch(count uint32) error {
-	status, _, err := c.stateRequest(opQueuePrefetch, "_", appendU32(nil, count))
+	return c.QueuePrefetchContext(context.Background(), count)
+}
+
+// QueuePrefetchContext bounds per-owner in-flight deliveries on this
+// connection.
+func (c *Client) QueuePrefetchContext(ctx context.Context, count uint32) error {
+	status, _, err := c.stateRequestCtx(ctx, opQueuePrefetch, "_", appendU32(nil, count))
 	if err != nil {
 		return err
 	}
 	return requireOK(status, "queue prefetch")
 }
 func (c *Client) QueueCancel() error {
-	status, _, err := c.stateRequest(opQueueCancel, "_", nil)
+	return c.QueueCancelContext(context.Background())
+}
+
+// QueueCancelContext requeues this connection's in-flight deliveries.
+func (c *Client) QueueCancelContext(ctx context.Context) error {
+	status, _, err := c.stateRequestCtx(ctx, opQueueCancel, "_", nil)
 	if err != nil {
 		return err
 	}
 	return requireOK(status, "queue cancel")
 }
 func (c *Client) QueueConsumerRegister(name string) (uint64, error) {
+	return c.QueueConsumerRegisterContext(context.Background(), name)
+}
+
+// QueueConsumerRegisterContext registers (or heartbeats) a durable named
+// consumer and binds this client's state connection to its owner token.
+func (c *Client) QueueConsumerRegisterContext(ctx context.Context, name string) (uint64, error) {
 	if name == "" || len(name) > 255 {
 		return 0, fmt.Errorf("kuttidb: invalid consumer")
 	}
-	s, v, e := c.stateRequest(opQueueConsumerRegister, name, nil)
+	s, v, e := c.stateRequestCtx(ctx, opQueueConsumerRegister, name, nil)
 	if e != nil {
 		return 0, e
 	}
@@ -384,7 +479,13 @@ func (c *Client) QueueConsumerRegister(name string) (uint64, error) {
 	return binary.LittleEndian.Uint64(v), nil
 }
 func (c *Client) QueueConsumerUnregister(name string) error {
-	s, _, e := c.stateRequest(opQueueConsumerUnregister, name, nil)
+	return c.QueueConsumerUnregisterContext(context.Background(), name)
+}
+
+// QueueConsumerUnregisterContext gracefully detaches a named consumer and
+// requeues its held deliveries.
+func (c *Client) QueueConsumerUnregisterContext(ctx context.Context, name string) error {
+	s, _, e := c.stateRequestCtx(ctx, opQueueConsumerUnregister, name, nil)
 	if e != nil {
 		return e
 	}
@@ -392,6 +493,12 @@ func (c *Client) QueueConsumerUnregister(name string) error {
 }
 
 func (c *Client) QueuePublishBatch(name string, values [][]byte) ([]uint64, error) {
+	return c.QueuePublishBatchContext(context.Background(), name, values)
+}
+
+// QueuePublishBatchContext publishes up to 256 messages in one durable
+// round trip; it is never retried after a lost response.
+func (c *Client) QueuePublishBatchContext(ctx context.Context, name string, values [][]byte) ([]uint64, error) {
 	if len(values) < 1 || len(values) > 256 {
 		return nil, fmt.Errorf("kuttidb: batch size must be 1-256")
 	}
@@ -406,7 +513,7 @@ func (c *Client) QueuePublishBatch(name string, values [][]byte) ([]uint64, erro
 		p = appendU32(p, uint32(len(v)))
 		p = append(p, v...)
 	}
-	s, v, e := c.stateRequest(opQueuePublishBatch, name, p)
+	s, v, e := c.stateRequestCtx(ctx, opQueuePublishBatch, name, p)
 	if e != nil {
 		return nil, e
 	}
@@ -428,13 +535,19 @@ func (c *Client) QueuePublishBatch(name string, values [][]byte) ([]uint64, erro
 	return out, d.done()
 }
 func (c *Client) QueueConsumeBatch(name string, maxCount uint32) ([]Delivery, error) {
+	return c.QueueConsumeBatchContext(context.Background(), name, maxCount)
+}
+
+// QueueConsumeBatchContext consumes up to maxCount deliveries in one round
+// trip.
+func (c *Client) QueueConsumeBatchContext(ctx context.Context, name string, maxCount uint32) ([]Delivery, error) {
 	if maxCount < 1 || maxCount > 256 {
 		return nil, fmt.Errorf("kuttidb: batch size must be 1-256")
 	}
 	if e := c.requireFeature(FeatureQueueBatch, "queue batches"); e != nil {
 		return nil, e
 	}
-	s, v, e := c.stateRequest(opQueueConsumeBatch, name, appendU32(nil, maxCount))
+	s, v, e := c.stateRequestCtx(ctx, opQueueConsumeBatch, name, appendU32(nil, maxCount))
 	if e != nil {
 		return nil, e
 	}
@@ -479,7 +592,7 @@ func (c *Client) QueueConsumeBatch(name string, maxCount uint32) ([]Delivery, er
 	}
 	return out, d.done()
 }
-func (c *Client) queueDispositionBatch(name string, tags []uint64, mode byte) (uint32, error) {
+func (c *Client) queueDispositionBatch(ctx context.Context, name string, tags []uint64, mode byte) (uint32, error) {
 	if len(tags) < 1 || len(tags) > 256 {
 		return 0, fmt.Errorf("kuttidb: batch size must be 1-256")
 	}
@@ -491,7 +604,7 @@ func (c *Client) queueDispositionBatch(name string, tags []uint64, mode byte) (u
 	for _, tag := range tags {
 		p = appendU64(p, tag)
 	}
-	s, v, e := c.stateRequest(opQueueAckBatch, name, p)
+	s, v, e := c.stateRequestCtx(ctx, opQueueAckBatch, name, p)
 	if e != nil {
 		return 0, e
 	}
@@ -504,12 +617,24 @@ func (c *Client) queueDispositionBatch(name string, tags []uint64, mode byte) (u
 	return binary.LittleEndian.Uint32(v), nil
 }
 func (c *Client) QueueAckBatch(name string, tags []uint64) (uint32, error) {
-	return c.queueDispositionBatch(name, tags, 0)
+	return c.QueueAckBatchContext(context.Background(), name, tags)
+}
+
+// QueueAckBatchContext acknowledges up to 256 deliveries in one round trip.
+func (c *Client) QueueAckBatchContext(ctx context.Context, name string, tags []uint64) (uint32, error) {
+	return c.queueDispositionBatch(ctx, name, tags, 0)
 }
 func (c *Client) QueueNackBatch(name string, tags []uint64, requeue bool) (uint32, error) {
+	return c.QueueNackBatchContext(context.Background(), name, tags, requeue)
+}
+
+// QueueNackBatchContext nacks up to 256 deliveries in one round trip
+// (immediate requeue or drop-to-DLQ; the batch form carries no delay).
+func (c *Client) QueueNackBatchContext(ctx context.Context, name string, tags []uint64, requeue bool) (uint32, error) {
 	mode := byte(2)
 	if requeue {
 		mode = 1
 	}
-	return c.queueDispositionBatch(name, tags, mode)
+	return c.queueDispositionBatch(ctx, name, tags, mode)
 }
+
