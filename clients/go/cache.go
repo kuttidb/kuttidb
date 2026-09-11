@@ -522,7 +522,7 @@ func (c *Client) PutManyContext(ctx context.Context, pairs map[string][]byte) er
 		if err != nil {
 			return err
 		}
-		status, _, err := c.requestAt(ctx, deadline, req)
+		status, err := c.batchStatusAt(ctx, deadline, req)
 		if err != nil {
 			return err
 		}
@@ -591,7 +591,7 @@ func (c *Client) PutManyTTLContext(ctx context.Context, items []Item) error {
 		if err != nil {
 			return err
 		}
-		status, _, err := c.requestAt(ctx, deadline, req)
+		status, err := c.batchStatusAt(ctx, deadline, req)
 		if err != nil {
 			return err
 		}
@@ -745,6 +745,48 @@ func mustDeadline(c *Client, ctx context.Context) time.Time {
 		return time.Time{}
 	}
 	return d
+}
+
+// batchStatusAt runs one batch request whose response is a single raw
+// status byte (not a framed body): PUT_BATCH and PUT_BATCH_TTL. The
+// connection is returned to the pool on success and discarded otherwise,
+// with the cancellation watcher joined before either happens.
+func (c *Client) batchStatusAt(ctx context.Context, deadline time.Time, req []byte) (byte, error) {
+	cn, err := c.getCtx(ctx, deadline)
+	if err != nil {
+		return 0, err
+	}
+	var status byte
+	xerr := func() error {
+		keep := false
+		defer func() {
+			if keep {
+				c.put(cn)
+			} else {
+				c.discard(cn)
+			}
+		}()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_ = cn.c.SetDeadline(deadline)
+		werr := c.watchIO(ctx, cn, func() error {
+			if err := writeFull(cn, req); err != nil {
+				return err
+			}
+			var one [1]byte
+			if err := readFull(cn, one[:]); err != nil {
+				return err
+			}
+			status = one[0]
+			return nil
+		})
+		if werr == nil {
+			keep = true
+		}
+		return werr
+	}()
+	return status, xerr
 }
 
 // Close terminates the client: it marks closure before any further lease,
