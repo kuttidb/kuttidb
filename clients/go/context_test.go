@@ -540,8 +540,11 @@ func TestContextDeadlineSharedAcrossChunks(t *testing.T) {
 	// PutManyContext with two chunks: the deadline set for the operation
 	// governs the second chunk too — a blocked second-chunk read ends at
 	// the shared deadline instead of restarting 30 seconds.
-	okConn := instantConn()
-	blocked := newFakeConn() // second chunk's response never arrives
+	okConn := newFakeConn()
+	// PUT_BATCH answers one raw status byte per request, not a frame; this
+	// transport answers chunk 1 only, so chunk 2 blocks until the deadline.
+	okConn.respondRaw([]byte{statusOK})
+	blocked := newFakeConn() // a later dial would never answer either
 	n := 0
 	var mu sync.Mutex
 	fp := newFakePool(0, func(int) *fakeConn {

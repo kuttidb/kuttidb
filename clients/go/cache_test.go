@@ -34,6 +34,13 @@ func newFakeConn() *fakeConn {
 	return &fakeConn{closeCh: make(chan struct{})}
 }
 
+// respondRaw queues a raw response chunk without framing.
+func (f *fakeConn) respondRaw(chunk []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chunks = append(f.chunks, chunk)
+}
+
 // respond queues a complete [status][vlen:4][payload] response chunk.
 func (f *fakeConn) respond(status byte, payload []byte) {
 	f.mu.Lock()
