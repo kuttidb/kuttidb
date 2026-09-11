@@ -33,6 +33,39 @@ truncates a torn or corrupted tail; recovery is idempotent and is exercised by
 tests that inject torn tails, corrupted checksums, SIGKILL during writes, and
 disk exhaustion (`RLIMIT_FSIZE`).
 
+## Stream identity and WAL upgrade (protocol 1.9)
+
+Every stream topic carries a persisted incarnation identity (`StreamID`, 128
+random bits from the OS secure source). It is written as the additive stream
+WAL record `S_IDENTITY` (record type 11:
+`[topic_len:2][topic][stream_id:16]`) in the same durability group as the
+declaration, before the response, so a replay of that WAL can never
+regenerate a different identity. Legacy declarations without an identity
+record are upgraded at store open: one identity per legacy topic is assigned
+and fsynced before the store is exposed, so the first exposure of a migrated
+identity is already durable. Checkpoint rewrites emit `S_IDENTITY` per topic
+and preserve both partition boundaries, including empty partitions whose
+base/next are nonzero. The identity changes only on delete/recreate.
+
+Consequences for operations:
+
+- The identity detects delete/recreate for replay cursors, not arbitrary
+  rollbacks: restoring a full store copy keeps its lineage, so backups are
+  still the answer to rollback detection.
+- **Disk downgrade is not compatible.** An old binary replays the WAL only
+  up to the first unknown record (`S_IDENTITY`) and truncates everything
+  after it — acknowledged data would be lost. Never point an older KuttiDB
+  binary at a data directory written by a newer one. Upgrade procedure:
+  1. Take a pre-upgrade backup of the data directory (file-level copy).
+  2. Start the new binary; it assigns and syncs identities for legacy
+     topics and then serves.
+  3. Verify identities and records through the metadata fetch before
+     retiring the backup.
+  To go back to an old binary, restore the pre-upgrade backup into a fresh
+  directory instead of opening the upgraded files in place.
+- An old *client* against a new server is unaffected: legacy fetch frames
+  and decoding are unchanged, and the new opcode is capability-gated.
+
 ## Managed idle shutdown
 
 Managed idle shutdown uses the normal graceful server teardown: it stops

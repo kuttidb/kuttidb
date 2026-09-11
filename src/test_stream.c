@@ -207,6 +207,197 @@ static int accounting_ok(StreamStore *s, const char *label) {
     return 1;
 }
 
+/* Native replay contract: persisted topic incarnation, one-snapshot
+ * metadata fetch, and the gap table (expired / ahead / recreated). */
+static int replay_test(void) {
+    char path[] = "/tmp/kuttidb-stream-replay-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return 1;
+    close(fd); unlink(path);
+    StreamStore *s = stream_store_open(path);
+    if (!s || stream_declare(s, "events", 6, 2, 25, 0) ||
+        stream_declare(s, "highwater", 9, 1, 0, 0)) {
+        fprintf(stderr, "replay declare failed\n"); return 1;
+    }
+    unsigned char id1[STREAM_ID_LEN];
+    uint64_t base = 0, next = 0, resume = 0;
+    StreamFetchRange range = STREAM_RANGE_OK;
+    StreamRecordView *recs = NULL; uint32_t count = 0;
+    /* Never-written partition: base=next=0; request 0 → success, empty,
+     * resume=0, valid identity. */
+    if (stream_fetch_metadata(s, "events", 6, 1, 0, 10, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        base != 0 || next != 0 || resume != 0 || count != 0 ||
+        range != STREAM_RANGE_OK) {
+        fprintf(stderr, "replay: never-written partition failed\n"); return 1;
+    }
+    stream_fetch_free(recs, count);
+    unsigned char body[5];
+    unsigned char id_first[STREAM_ID_LEN];
+    memcpy(id_first, id1, STREAM_ID_LEN);
+    int zero = 1;
+    for (uint32_t i = 0; i < STREAM_ID_LEN; i++) if (id_first[i]) zero = 0;
+    if (zero) { fprintf(stderr, "replay: empty stream has no identity\n"); return 1; }
+    /* Ten 5-byte records under a 25-byte ceiling → retained 5..9. */
+    for (int i = 0; i < 10; i++) {
+        memcpy(body, "rec-xx", 5);
+        body[4] = (unsigned char)('0' + (i % 10));
+        if (stream_append(s, "events", 6, 0, NULL, 0, body, 5, NULL, NULL)) {
+            fprintf(stderr, "replay: append %d failed\n", i); return 1;
+        }
+    }
+    /* Retained page 5..9. */
+    if (stream_fetch_metadata(s, "events", 6, 0, 5, 5, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        range != STREAM_RANGE_OK || base != 5 || next != 10 || resume != 10 ||
+        count != 5 || recs[0].offset != 5 || recs[4].offset != 9) {
+        fprintf(stderr, "replay: retained page failed\n"); return 1;
+    }
+    stream_fetch_free(recs, count);
+    /* Request 9 → one record; resume=10. */
+    if (stream_fetch_metadata(s, "events", 6, 0, 9, 5, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        count != 1 || recs[0].offset != 9 || resume != 10) {
+        fprintf(stderr, "replay: page at 9 failed\n"); return 1;
+    }
+    stream_fetch_free(recs, count);
+    /* Request 3 → expired, boundaries kept, no records. */
+    if (stream_fetch_metadata(s, "events", 6, 0, 3, 5, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        range != STREAM_RANGE_EXPIRED || base != 5 || next != 10 || count != 0) {
+        fprintf(stderr, "replay: expired row failed\n"); return 1;
+    }
+    /* Request 10 (tail) → success, empty, resume=10. */
+    if (stream_fetch_metadata(s, "events", 6, 0, 10, 5, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        range != STREAM_RANGE_OK || count != 0 || resume != 10) {
+        fprintf(stderr, "replay: tail row failed\n"); return 1;
+    }
+    /* Request 11 → ahead with boundaries. */
+    if (stream_fetch_metadata(s, "events", 6, 0, 11, 5, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        range != STREAM_RANGE_AHEAD || base != 5 || next != 10 || count != 0) {
+        fprintf(stderr, "replay: ahead row failed\n"); return 1;
+    }
+    /* Count-limited page: resume must not jump to the high-water mark. */
+    if (stream_fetch_metadata(s, "events", 6, 0, 5, 2, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        count != 2 || resume != 7) {
+        fprintf(stderr, "replay: count-limited page failed\n"); return 1;
+    }
+    stream_fetch_free(recs, count);
+    /* First record exceeding the byte budget is distinguishable from an
+     * expired offset (-2, no records). */
+    if (stream_fetch_metadata(s, "events", 6, 0, 5, 5, 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != -2) {
+        fprintf(stderr, "replay: oversized record not distinguishable\n"); return 1;
+    }
+    /* Expected identity mismatch is RECREATED even for a valid offset. */
+    unsigned char wrong[STREAM_ID_LEN];
+    memcpy(wrong, id_first, STREAM_ID_LEN);
+    wrong[0] ^= 0xff;
+    if (stream_fetch_metadata(s, "events", 6, 0, 5, 5, 1 << 20, wrong, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        range != STREAM_RANGE_RECREATED || count != 0 ||
+        memcmp(id1, id_first, STREAM_ID_LEN)) {
+        fprintf(stderr, "replay: recreated row failed\n"); return 1;
+    }
+    /* Missing topic and invalid partition are explicit (rc 3). */
+    if (stream_fetch_metadata(s, "missing", 7, 0, 0, 5, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 3 ||
+        stream_fetch_metadata(s, "events", 6, 2, 0, 5, 1 << 20, NULL, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 3) {
+        fprintf(stderr, "replay: missing-resource rows failed\n"); return 1;
+    }
+    /* An empty partition with a nonzero high-water mark: append three
+     * records to "highwater", trim them all, and keep the identity for the
+     * checkpoint and restart checks below. */
+    for (int i = 0; i < 3; i++) {
+        memcpy(body, "p1-xx", 5);
+        if (stream_append(s, "highwater", 9, 0, NULL, 0, body, 5, NULL, NULL)) {
+            fprintf(stderr, "replay: p1 append %d failed\n", i); return 1;
+        }
+    }
+    unsigned char id_hw[STREAM_ID_LEN];
+    if (stream_fetch_metadata(s, "highwater", 9, 0, 3, 5, 1 << 20, NULL, id_hw,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        base != 0 || next != 3 || count != 0) {
+        fprintf(stderr, "replay: highwater pre-trim failed\n"); return 1;
+    }
+    stream_fetch_free(recs, count);
+    uint64_t rev = 0;
+    if (stream_revision(s, "highwater", 9, &rev) != 1 ||
+        stream_truncate_if_revision(s, "highwater", 9, 0, 3, rev) != 0) {
+        fprintf(stderr, "replay: empty-partition trim failed\n"); return 1;
+    }
+    if (stream_fetch_metadata(s, "highwater", 9, 0, 3, 5, 1 << 20, NULL, id_hw,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        base != 3 || next != 3 || count != 0) {
+        fprintf(stderr, "replay: empty partition with base=next=3 failed\n"); return 1;
+    }
+    unsigned char id_before[STREAM_ID_LEN];
+    if (stream_fetch_metadata(s, "events", 6, 0, 5, 5, 1 << 20, NULL, id_before,
+                              &base, &next, &resume, &range, &recs, &count) != 1) {
+        fprintf(stderr, "replay: pre-checkpoint snapshot failed\n"); return 1;
+    }
+    stream_fetch_free(recs, count);
+    if (!accounting_ok(s, "replay")) return 1;
+    /* Fill the WAL past the compaction floor; the checkpoint (inline or
+     * explicit) rewrites every topic, preserving identity and boundaries. */
+    unsigned char blob[512];
+    memset(blob, 0x5a, sizeof blob);
+    for (int i = 0; i < 3000; i++) {
+        if (stream_append(s, "events", 6, 0, NULL, 0, blob, sizeof blob, NULL, NULL)) {
+            fprintf(stderr, "replay: checkpoint fill append failed\n"); return 1;
+        }
+    }
+    if (!accounting_ok(s, "replay-checkpoint")) return 1;
+    if (stream_checkpoint_maybe(s) < 0) {
+        fprintf(stderr, "replay: checkpoint failed\n"); return 1;
+    }
+    stream_store_close(s);
+    s = stream_store_open(path);
+    if (!s) { fprintf(stderr, "replay: reopen failed\n"); return 1; }
+    unsigned char id_after[STREAM_ID_LEN];
+    if (stream_fetch_metadata(s, "events", 6, 0, 0, 5, 1 << 20, NULL, id_after,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        memcmp(id_after, id_before, STREAM_ID_LEN)) {
+        fprintf(stderr, "replay: identity not stable across checkpoint\n"); return 1;
+    }
+    stream_fetch_free(recs, count);
+    StreamPartitionStats stats[1]; uint32_t sc = 0;
+    if (stream_partition_snapshot(s, "highwater", 9, stats, 1, &sc, &rev) != 1 ||
+        stats[0].base_offset != 3 || stats[0].next_offset != 3) {
+        fprintf(stderr, "replay: empty partition boundaries after checkpoint\n"); return 1;
+    }
+    uint64_t pp = 0, oo = 0;
+    if (stream_append(s, "highwater", 9, 0, NULL, 0, body, 5, &pp, &oo) || oo != 3) {
+        fprintf(stderr, "replay: append must not rewind the high-water mark\n"); return 1;
+    }
+    /* Delete/recreate changes the incarnation even for identical settings. */
+    uint64_t drev = 0;
+    if (stream_revision(s, "events", 6, &drev) != 1 ||
+        stream_delete_if_revision(s, "events", 6, drev) != 0 ||
+        stream_declare(s, "events", 6, 2, 25, 0)) {
+        fprintf(stderr, "replay: delete/recreate failed\n"); return 1;
+    }
+    unsigned char id_new[STREAM_ID_LEN];
+    if (stream_fetch_metadata(s, "events", 6, 0, 0, 5, 1 << 20, NULL, id_new,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        !memcmp(id_new, id_before, STREAM_ID_LEN) || base != 0 || next != 0) {
+        fprintf(stderr, "replay: recreated identity must differ\n"); return 1;
+    }
+    /* The old incarnation is refused even though the offset is valid. */
+    if (stream_fetch_metadata(s, "events", 6, 0, 0, 5, 1 << 20, id_before, id1,
+                              &base, &next, &resume, &range, &recs, &count) != 1 ||
+        range != STREAM_RANGE_RECREATED || count != 0) {
+        fprintf(stderr, "replay: recreated mismatch row failed\n"); return 1;
+    }
+    stream_store_close(s);
+    unlink(path);
+    return 0;
+}
+
 int main(void) {
     char path[] = "/tmp/kuttidb-stream-XXXXXX";
     int fd = mkstemp(path);
@@ -673,6 +864,9 @@ int main(void) {
         fprintf(stderr, "stream group-commit concurrency failed\n"); return 1;
     }
     unlink(path);
+    if (replay_test()) {
+        fprintf(stderr, "stream replay tests failed\n"); return 1;
+    }
     puts("STREAM CORE TESTS PASSED");
     return 0;
 }

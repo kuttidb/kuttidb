@@ -1,4 +1,4 @@
-# KuttiDB protocol (v1.8)
+# KuttiDB protocol (v1.9)
 
 Binary, little-endian, request/response over TCP (or Unix socket). Pipelining is
 safe; batch ops group many operations into one round trip. When authentication
@@ -45,7 +45,9 @@ append (`6`), health (`7`), stream group generations (`8`), durable named
 queue consumers (`9`), conditional atomic update (`10`,
 `UPDATE_AND_EMIT`), stale-while-revalidate (`11`,
 `PUT_SWR`/`GET_OR_REFRESH`), queue batch publish/consume/ACK (`12`), stream
-offset commit batch (`13`), and keyed Stream fetch (`14`, `0x6c`). A higher minor
+offset commit batch (`13`), keyed Stream fetch (`14`, `0x6c`), server info
+(`15`), atomic job completion (`16`), and stream replay metadata (`17`,
+`0x6d`). A higher minor
 version is backward-compatible unless the client requires an absent feature
 bit.
 
@@ -255,16 +257,77 @@ and refuses longer windows.
 
 ## Partitioned streams
 
-Native stream commands use opcodes `0x60`–`0x6C`. They provide durable topic
+Native stream commands use opcodes `0x60`–`0x6D`. They provide durable topic
 declarations, append-only partition offsets, replay fetch, persisted per-group
 offsets, lease-based group membership/partition assignment, batch append
-(`0x67`), batch offset commit (`0x6B`, capability bit 13), and an additive
-key-preserving fetch (`0x6C`, capability bit 14). Since v1.3 the
+(`0x67`), batch offset commit (`0x6B`, capability bit 13), an additive
+key-preserving fetch (`0x6C`, capability bit 14), and the replay-metadata
+fetch (`0x6D`, capability bit 17, v1.9). Since v1.3 the
 group-join response carries a membership generation after the assignment, and
 `0x68` performs a graceful group leave. Layouts and current at-least-once
 semantics are in
 [STREAMS.md](../messaging/STREAMS.md). They are native KuttiDB commands, not Kafka wire
 compatibility.
+group-join response carries a membership generation after the assignment, and
+`0x68` performs a graceful group leave. Layouts and current at-least-once
+semantics are in
+[STREAMS.md](../messaging/STREAMS.md). They are native KuttiDB commands, not Kafka wire
+compatibility.
+
+### Stream replay metadata (`0x6D`, capability bit 17, protocol 1.9)
+
+One request returns records and replay metadata together — the persisted
+topic incarnation, both partition boundaries, the range decision, and the
+page — so applications never need a separate (racy) metadata fetch to detect
+gaps. The engine takes the snapshot under one store lock after applying the
+topic's age retention, so retention or recreation between calls cannot split
+the metadata from the records.
+
+Request: key = topic; value =
+`[partition:4][offset:8][max_records:4][expected_flag:1][expected_id:16]`,
+where `expected_flag=0` marks a first fetch (no expected identity) and
+`expected_flag=1` carries the 16-byte expected StreamID for resumption.
+
+OK response body:
+`[range:1][base:8][next:8][resume:8][stream_id:16][count:4]` then `count`
+records shaped like `0x6C`: `[offset:8][key_len:2][value_len:4][key][value]`.
+`offset` is the *next record requested*; `base` is the earliest retained
+boundary (inclusive) and `next` the append high-water mark (exclusive). The
+`range` byte decides the interpretation of an otherwise identical body:
+
+| range | meaning | records | `resume` |
+|---|---|---|---|
+| `0` OK | offset is within `[base, next]` | page (possibly empty) | last returned offset + 1, or the requested offset when the page is empty (including `offset == next`) |
+| `1` `offset_expired` | `offset < base`: the requested history is no longer retained | none | the requested offset |
+| `2` `offset_ahead` | `offset > next` | none | the requested offset |
+| `3` `stream_recreated` | the topic incarnation differs from `expected_id` | none | the requested offset |
+
+A gap never returns records and never advances a cursor: the application
+explicitly chooses to rebuild state and resume at the base or at the tail.
+The StreamID is the opaque, persisted topic incarnation: 128 random bits
+assigned once per topic lifetime, stable across restart, WAL replay,
+retention, and checkpoint rewrite, and changed by delete/recreate. A page
+limited by count/bytes keeps `resume` at its last record, never at the
+high-water mark, so no record is silently skipped.
+
+Errors use the generic ERROR status with a one-byte typed body:
+`1` = missing topic or partition (never an empty valid stream),
+`2` = persistence or allocation failure, `3` = the first eligible record
+exceeds the fetch budget (distinguishable from an expired offset). A server
+without capability bit 17 answers `0x6D` with a plain ERROR and no body —
+it never pretends a gap was detected.
+
+The StreamID survives restart, WAL replay, retention, and checkpoint
+rewrite, and changes on delete/recreate. Copying or restoring an entire
+store preserves its lineage: this identity alone does not detect every
+rollback from backup. The Stream WAL gained the additive record type
+`S_IDENTITY` (11): `[topic_len:2][topic][stream_id:16]`, written at first
+declaration, replayed to preserve identity, and emitted by checkpoint
+rewrites. **Disk downgrade is not compatible**: an old binary that replays a
+WAL containing `S_IDENTITY` stops at that record and truncates the tail. Do
+not roll a data directory back to an older binary in place — take a
+pre-upgrade backup and follow the recovery procedure in
+[DURABILITY.md](DURABILITY.md) instead.
 
 ## Atomic job completion (capability-gated)
 

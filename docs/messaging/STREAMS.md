@@ -131,6 +131,73 @@ All commands use the standard `[opcode][topic_len:u16][value_len:u32][topic]
 clients. Clients that negotiate capability bit 14 use `0x6c` to receive every
 retained binary key as well as its body.
 
+### Replay contract (`0x6d`, capability bit 17, protocol 1.9)
+
+`stream_fetch_metadata` returns records **and** replay metadata together:
+`[range:1][base:8][next:8][resume:8][stream_id:16][count:4]` plus records in
+the `0x6c` shape. The persisted topic incarnation (`StreamID`) is 128 random
+bits assigned and durably persisted at first declaration; it is stable across
+restart, WAL replay, retention, and checkpoint rewrite, and changes on
+delete/recreate. With `expected_id` the server detects a cursor carried over
+from a previous incarnation even when the numeric offset is valid.
+
+The gap table (identical to the engine snapshot semantics):
+
+| Snapshot / request | Result |
+|---|---|
+| Never-written partition: base=next=0; request 0 | OK, empty, resume=0, valid StreamID |
+| Retained offsets 5–9: base=5, next=10; request 3 | `offset_expired`, boundaries 5/10, no records |
+| Same snapshot; request 5 or 9 | OK starting at the requested offset |
+| Same snapshot; request 10 | OK at the tail, empty, resume=10 |
+| Same snapshot; request 11 | `offset_ahead`, boundaries 5/10, no records |
+| All records expired: base=next=10; request 3 | `offset_expired` even with no retained records |
+| All records expired: base=next=10; request 10 | OK, empty, resume=10; the next append still uses offset 10 |
+| Expected StreamID differs after delete/recreate | `stream_recreated`, actual ID and boundaries, no records |
+| Missing topic or invalid partition | typed missing-resource error, never an empty valid stream |
+
+A gap never returns records and never advances a cursor. The application
+chooses to rebuild state and resume at the base or at the tail; KuttiDB
+reports the gap but cannot reconstruct expired events.
+
+#### SSE-style resumable consumer example
+
+Persist the cursor as `(StreamID, partition, nextOffset)`:
+
+```python
+cursor = None                      # e.g. loaded from your database
+while True:
+    if cursor is None:
+        result = db.stream_fetch_metadata("events", partition=0, offset=0)
+        cursor = (result["stream_id"], 0, result["resume_offset"])
+        continue
+    stream_id, partition, next_offset = cursor
+    records, meta = fetch_with_metadata("events", stream_id, partition, next_offset)
+    if meta["range"] == 0:                       # OK page
+        for r in records:
+            handle(r)                            # at-least-once: dedupe by offset
+        cursor = (meta["stream_id"], partition, meta["resume"])
+        persist(cursor)                          # after handling, not before
+    elif meta["range"] == 3:                     # stream_recreated
+        send_resync_event()                      # tell consumers to rebuild
+        cursor = None                            # first fetch adopts the new incarnation
+    else:                                        # offset_expired / offset_ahead
+        rebuild_from_authoritative_state()       # your store owns the truth
+        cursor = (meta["stream_id"], partition, meta["next"])
+```
+
+Convert a last-delivered offset to the next offset with overflow validation
+before persisting; `0` after `UINT64_MAX` would silently rewind a consumer.
+On expiration or recreation the application sends a reset/resync event and
+rebuilds from its authoritative state before explicitly choosing a new
+cursor — KuttiDB never advances, rewinds, or replays a cursor on its own.
+
+The identity is opaque and lineage-preserving: copying or restoring an
+entire store keeps its StreamIDs, so this feature alone does not detect
+every rollback from backup. Disk downgrade to an older binary truncates at
+the new WAL record — see [PROTOCOL.md](../design/PROTOCOL.md) and
+[DURABILITY.md](../design/DURABILITY.md) before touching a data directory
+with an older build.
+
 Topic and group names are limited to 255 bytes, partitions to 256, and one
 fetch to 1,024 records and the server's configured batch-byte limit. If the
 next eligible record cannot fit in that byte budget, fetch fails rather than

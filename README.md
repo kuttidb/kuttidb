@@ -318,6 +318,7 @@ ports, and a Prometheus metrics listener. Multi-architecture images cover
 | Document | Contents |
 |---|---|
 | [GETTING_STARTED.md](docs/guides/GETTING_STARTED.md) | Simple first run: values, Queues, and Streams |
+| [GO_CLIENT.md](docs/guides/GO_CLIENT.md) | Go client: context APIs, connection affinity, embedding opt-in, replay cursors |
 | [TELEMETRY.md](docs/guides/TELEMETRY.md) | Optional telemetry, public statistics, and privacy controls |
 | [ATOMIC_JOB_COMPLETION.md](docs/guides/ATOMIC_JOB_COMPLETION.md) | Atomic job completion: durable state, ACK, and the next message in one commit |
 | [CLIENT_FEATURE_MATRIX.md](docs/guides/CLIENT_FEATURE_MATRIX.md) | Per-client feature coverage, method mapping, and transports |

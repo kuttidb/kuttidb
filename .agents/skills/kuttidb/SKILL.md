@@ -339,6 +339,25 @@ generation)` · `stream_group_leave(topic, group)` ·
 is a successful no-op. Use the generation-checked reset API for an intentional
 rewind.
 
+**Stream replay contract (protocol 1.9, opcode `0x6D`, capability bit 17; Go
+surface `StreamFetchWithMetadata`/`StreamFetchWithMetadataContext`):** one
+request returns records plus the persisted topic incarnation (`StreamID`, 128
+random bits, stable across restart/replay/retention/checkpoint, changed by
+delete/recreate), both partition boundaries (`base` inclusive, `next`
+exclusive), the range decision, and the resume offset — no separate racy
+metadata fetch. `range` byte: `0` OK, `1` `offset_expired`, `2`
+`offset_ahead`, `3` `stream_recreated`; a gap never returns records and
+never advances a cursor — the application rebuilds at the base or tail
+explicitly. Errors are typed (missing topic/partition, persistence,
+oversized record); a server without the bit answers plain ERROR and never
+pretends a gap was detected. Persist SSE-style cursors as
+`(StreamID, partition, nextOffset)`, converting a last-delivered offset with
+overflow validation; on expiration/recreation the application sends a
+reset/resync event and rebuilds from its authoritative state. Restoring a
+full store copy preserves lineage (no rollback detection), and disk
+downgrade truncates at `S_IDENTITY` — see
+`docs/design/PROTOCOL.md` and `docs/design/DURABILITY.md`.
+
 On generation change with a changed assignment: finish in-flight work for
 partitions still owned, drain the rest; commits for lost partitions are
 refused by the server.

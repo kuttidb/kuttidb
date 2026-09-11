@@ -11,12 +11,13 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from kuttidb_client import KuttiDBClient
 
 PORT = 7411
+LEGACY_PORT = 7415
 
-def wait_port():
+def wait_port(port=PORT):
     until = time.time() + 8
     while time.time() < until:
         try:
-            socket.create_connection(("127.0.0.1", PORT), .1).close()
+            socket.create_connection(("127.0.0.1", port), .1).close()
             return
         except OSError:
             time.sleep(.03)
@@ -162,6 +163,205 @@ try:
         # Committed batch offsets survive restart.
         assert c.stream_group_offset("batchc", "g", 1) == 2
         assert c.stream_group_offset("batchc", "g", 2) == 1
+
+    # --- native replay contract (0x6d, capability bit 17, protocol 1.9) ---
+    import struct as _struct
+    import zlib as _zlib
+
+    def meta_request(sock, topic, partition, offset, max_records, expected=None):
+        value = (_struct.pack("<IQI", partition, offset, max_records) +
+                 (b"\x01" + expected if expected else b"\x00"))
+        frame = (bytes([0x6d]) + _struct.pack("<H", len(topic)) +
+                 _struct.pack("<I", len(value)) + topic.encode() + value)
+        sock.sendall(frame)
+        head = b""
+        while len(head) < 5:
+            chunk = sock.recv(5 - len(head))
+            if not chunk:
+                raise RuntimeError("connection closed")
+            head += chunk
+        need = _struct.unpack("<I", head[1:5])[0]
+        payload = b""
+        while len(payload) < need:
+            chunk = sock.recv(need - len(payload))
+            if not chunk:
+                raise RuntimeError("connection closed")
+            payload += chunk
+        return head[0], payload
+
+    def parse_meta(payload):
+        at = 0
+        rng = payload[at]; at += 1
+        base, nxt, resume = _struct.unpack("<QQQ", payload[at:at + 24]); at += 24
+        stream_id = payload[at:at + 16].hex(); at += 16
+        count = _struct.unpack("<I", payload[at:at + 4])[0]; at += 4
+        records = []
+        for _ in range(count):
+            off, klen, vlen = _struct.unpack("<QHI", payload[at:at + 14]); at += 14
+            key = payload[at:at + klen]; at += klen
+            value = payload[at:at + vlen]; at += vlen
+            records.append({"offset": off, "key": key, "value": value})
+        assert at == len(payload), "trailing bytes in metadata response"
+        return {"range": rng, "base": base, "next": nxt, "resume": resume,
+                "stream_id": stream_id, "records": records}
+
+    with KuttiDBClient(port=PORT) as c:
+        caps = c.capabilities()
+        assert caps["minor"] == 9, "protocol minor must be 1.9"
+        assert caps["features"] & (1 << 17), "stream replay capability missing"
+        c.stream_declare("replay", partitions=2, max_bytes=25)
+        s = socket.create_connection(("127.0.0.1", PORT), 2)
+        try:
+            # Never-written partition: base=next=0; request 0 → success,
+            # empty, resume=0, valid stream ID.
+            status, payload = meta_request(s, "replay", 1, 0, 10)
+            assert status == 0x00
+            meta = parse_meta(payload)
+            assert meta["range"] == 0 and meta["base"] == 0 and meta["next"] == 0
+            assert meta["resume"] == 0 and len(meta["records"]) == 0
+            assert len(meta["stream_id"]) == 32
+            # Retained 5..9 via size retention (ten 5-byte records, 25B).
+            batch = c.stream_append_many("replay", [(b"r%02dxy" % i)[:5] for i in range(10)])
+            assert batch[0]["partition"] == 0 and batch[9]["offset"] == 9
+            # Request 5 → success, 5 records, resume=10.
+            status, payload = meta_request(s, "replay", 0, 5, 5)
+            meta = parse_meta(payload)
+            assert meta["range"] == 0 and meta["base"] == 5 and meta["next"] == 10
+            assert meta["resume"] == 10 and len(meta["records"]) == 5
+            actual_id = bytes.fromhex(meta["stream_id"])
+            assert [r["offset"] for r in meta["records"]] == [5, 6, 7, 8, 9]
+            actual_id = bytes.fromhex(meta["stream_id"])
+            # Request 9 → success starting at the requested offset.
+            status, payload = meta_request(s, "replay", 0, 9, 5)
+            meta = parse_meta(payload)
+            assert meta["range"] == 0 and len(meta["records"]) == 1 and meta["resume"] == 10
+            # Request 3 → offset_expired with boundaries, no records.
+            status, payload = meta_request(s, "replay", 0, 3, 5)
+            meta = parse_meta(payload)
+            assert meta["range"] == 1 and meta["base"] == 5 and meta["next"] == 10
+            assert meta["records"] == []
+            # Request 10 (tail) → success, empty, resume=10.
+            status, payload = meta_request(s, "replay", 0, 10, 5)
+            meta = parse_meta(payload)
+            assert meta["range"] == 0 and meta["resume"] == 10 and meta["records"] == []
+            # Request 11 → offset_ahead with boundaries.
+            status, payload = meta_request(s, "replay", 0, 11, 5)
+            meta = parse_meta(payload)
+            assert meta["range"] == 2 and meta["base"] == 5 and meta["next"] == 10
+            # Matching expected identity keeps the page.
+            status, payload = meta_request(s, "replay", 0, 5, 5, expected=actual_id)
+            meta = parse_meta(payload)
+            assert meta["range"] == 0 and len(meta["records"]) == 5
+            # Wrong expected identity → stream_recreated even for a valid
+            # offset; the actual identity and boundaries come back.
+            mismatched = bytearray(actual_id)
+            mismatched[0] ^= 0xFF
+            status, payload = meta_request(s, "replay", 0, 5, 5, expected=bytes(mismatched))
+            meta = parse_meta(payload)
+            assert meta["range"] == 3 and meta["records"] == []
+            assert meta["stream_id"] == actual_id.hex()
+            # Missing topic → typed error, never an empty valid stream.
+            status, payload = meta_request(s, "ghost", 0, 0, 5)
+            assert status == 0x02 and payload == b"\x01"
+            # Invalid partition → same typed error.
+            status, payload = meta_request(s, "replay", 2, 0, 5)
+            assert status == 0x02 and payload == b"\x01"
+            # Malformed request shape fails closed with a typed code.
+            value = b"\x01" * 16
+            frame = bytes([0x6d]) + _struct.pack("<H", 6) + _struct.pack("<I", 16) + b"replay" + value
+            s.sendall(frame)
+            head = s.recv(5)
+            assert head[0] == 0x02, "malformed metadata request accepted"
+        finally:
+            s.close()
+
+    # Legacy fetch stays byte-compatible on the same (new-format) WAL.
+    with KuttiDBClient(port=PORT) as c:
+        items = c.stream_fetch("replay", partition=0, offset=5, max_records=5)
+        assert [x["offset"] for x in items] == [5, 6, 7, 8, 9]
+
+    # Crash: the acknowledged declaration identity survives SIGKILL, gaps
+    # survive complete expiry across restart, and the next append does not
+    # rewind the high-water mark.
+    p.kill(); p.wait(); p = start(wal)
+    with KuttiDBClient(port=PORT) as c:
+        c.stream_declare("crashq", partitions=2, max_age=0.2)
+        c.stream_append("crashq", b"gone", partition=0)
+        c.stream_append("crashq", b"gone2", partition=0)
+        time.sleep(0.35)
+        sock = socket.create_connection(("127.0.0.1", PORT), 2)
+        try:
+            status, payload = meta_request(sock, "crashq", 0, 0, 10)
+            meta = parse_meta(payload)
+            assert meta["range"] == 1 and meta["base"] == 2 and meta["next"] == 2, meta
+            crash_id = meta["stream_id"]
+        finally:
+            sock.close()
+    p.kill(); p.wait(); p = start(wal)
+    with KuttiDBClient(port=PORT) as c:
+        sock = socket.create_connection(("127.0.0.1", PORT), 2)
+        try:
+            status, payload = meta_request(sock, "crashq", 0, 0, 10)
+            meta = parse_meta(payload)
+            assert meta["range"] == 1 and meta["base"] == 2 and meta["next"] == 2
+            assert meta["stream_id"] == crash_id, "restart changed the topic incarnation"
+        finally:
+            sock.close()
+        assert c.stream_append("crashq", b"fresh", partition=0) == {"partition": 0, "offset": 2}
+
+    # Legacy WAL migration: a pre-identity WAL (old binary format) upgrades
+    # in place, assigning durable identities without losing anything.
+    legacy = os.path.join(tmp, "legacy.wal")
+    def legacy_record(op, body):
+        crc = _zlib.crc32(bytes([op])) ^ _zlib.crc32(body)
+        return bytes([op]) + _struct.pack("<I", len(body)) + _struct.pack("<I", crc) + body
+    buf = bytearray()
+    name = b"legacy"
+    buf += legacy_record(1, _struct.pack("<H", 6) + name + _struct.pack("<IQQ", 2, 0, 0))
+    for off in (0, 1, 2):
+        body = (_struct.pack("<H", 6) + name + _struct.pack("<IQQI", 0, off, 1700000000000, 3) + b"val")
+        buf += legacy_record(2, body)
+    body = (_struct.pack("<H", 6) + name + _struct.pack("<H", 1) + b"g" + _struct.pack("<IQ", 0, 2))
+    buf += legacy_record(3, body)
+    with open(legacy, "wb") as fh:
+        fh.write(bytes(buf))
+    p.kill(); p.wait()
+    lproc = subprocess.Popen([os.environ.get("KUTTIDB_SERVER", os.path.join(ROOT, "kuttidb")),
+                              str(LEGACY_PORT), "-", "100", "--stream-wal", legacy],
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    wait_port(LEGACY_PORT)
+    try:
+        with KuttiDBClient(port=LEGACY_PORT) as c:
+            sock = socket.create_connection(("127.0.0.1", LEGACY_PORT), 2)
+            try:
+                status, payload = meta_request(sock, "legacy", 0, 0, 10)
+                assert status == 0x00
+                meta = parse_meta(payload)
+                assert meta["range"] == 0 and meta["base"] == 0 and meta["next"] == 3
+                assert len(meta["records"]) == 3
+                migrated = meta["stream_id"]
+            finally:
+                sock.close()
+            # Records and group commits are preserved by the upgrade.
+            items = c.stream_fetch("legacy", partition=0, offset=0, max_records=10)
+            assert [x["value"] for x in items] == [b"val", b"val", b"val"]
+            assert c.stream_group_offset("legacy", "g", 0) == 2
+        lproc.kill(); lproc.wait()
+        # The migrated identity is durable: reopening assigns nothing new.
+        lproc = subprocess.Popen([os.environ.get("KUTTIDB_SERVER", os.path.join(ROOT, "kuttidb")),
+                                  str(LEGACY_PORT), "-", "100", "--stream-wal", legacy],
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        wait_port(LEGACY_PORT)
+        with KuttiDBClient(port=LEGACY_PORT) as c:
+            sock = socket.create_connection(("127.0.0.1", LEGACY_PORT), 2)
+            try:
+                status, payload = meta_request(sock, "legacy", 0, 0, 10)
+                meta = parse_meta(payload)
+                assert meta["stream_id"] == migrated, "replay regenerated a migrated identity"
+            finally:
+                sock.close()
+    finally:
+        lproc.kill(); lproc.wait()
     print("STREAM PROTOCOL + RECOVERY TESTS PASSED")
 finally:
     if p:

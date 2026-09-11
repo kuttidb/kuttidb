@@ -52,6 +52,7 @@ const (
 	opStreamGroupList         = 0x6a
 	opStreamCommitBatch       = 0x6b
 	opStreamFetchKeys         = 0x6c
+	opStreamFetchMeta         = 0x6d
 	opJobConsume              = 0x70
 	opJobComplete             = 0x71
 	opJobReceipt              = 0x72
@@ -80,6 +81,7 @@ const (
 	FeatureStreamKeys
 	FeatureServerInfo
 	FeatureJobs
+	FeatureStreamReplay
 )
 
 type Capabilities struct {

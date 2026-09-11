@@ -25,6 +25,7 @@ See [../AGENTS.md](../AGENTS.md) for the placement rules.
 | [guides/SAAS_DEMO.md](guides/SAAS_DEMO.md) | One-command report demo: cache, background jobs, event replay, and crash recovery |
 | [guides/ATOMIC_JOB_COMPLETION.md](guides/ATOMIC_JOB_COMPLETION.md) | Atomic job completion: durable state, ACK, and the next message in one commit |
 | [guides/CLIENT_FEATURE_MATRIX.md](guides/CLIENT_FEATURE_MATRIX.md) | Per-client feature coverage, method mapping, and transports |
+| [guides/GO_CLIENT.md](guides/GO_CLIENT.md) | Go client: context APIs, affinity, embedding opt-in, and replay cursors |
 | [design/ARCHITECTURE.md](design/ARCHITECTURE.md) | Engines, storage separation, durability model |
 | [design/PROTOCOL.md](design/PROTOCOL.md) | Binary wire protocol, CLI flags, limits |
 | [messaging/QUEUES.md](messaging/QUEUES.md) | Queue semantics, delivery and dead-letter rules |

@@ -9,6 +9,10 @@
 #define STREAM_PARTITIONS_MAX 256u
 #define STREAM_FETCH_MAX 1024u
 #define STREAM_GROUP_MEMBERS_MAX 1024u
+/* Opaque persisted topic incarnation: 128 random bits assigned once per
+ * topic lifetime, stable across restart, WAL replay, retention, and
+ * checkpoint rewrite, changed by delete/recreate. */
+#define STREAM_ID_LEN 16u
 
 typedef struct StreamStore StreamStore;
 
@@ -77,6 +81,37 @@ int stream_fetch(StreamStore *store, const char *name, uint32_t name_len,
                  uint64_t max_bytes, StreamRecordView **out_records,
                  uint32_t *out_count);
 void stream_fetch_free(StreamRecordView *records, uint32_t count);
+
+/* Range decision for stream_fetch_metadata. Gaps never return records: the
+ * application explicitly chooses to rebuild state and resume at the base or
+ * at the tail, and no cursor is ever advanced silently. */
+typedef enum StreamFetchRange {
+    STREAM_RANGE_OK = 0,        /* requested offset is within [base, next]   */
+    STREAM_RANGE_EXPIRED = 1,   /* offset < base: retained history is gone   */
+    STREAM_RANGE_AHEAD = 2,     /* offset > next: past the high-water mark   */
+    STREAM_RANGE_RECREATED = 3  /* the topic incarnation is not the expected */
+} StreamFetchRange;
+
+/* Fetch records together with replay metadata under ONE store lock: age (and
+ * size) retention is applied first through the existing durability machinery
+ * — its failure is propagated, never masked — then the topic identity, the
+ * partition boundaries, the range decision, and the copied records are taken
+ * in one snapshot, so retention or recreation between separate calls cannot
+ * split them. `expected_id` (STREAM_ID_LEN bytes, or NULL for a first fetch)
+ * forces STREAM_RANGE_RECREATED on identity mismatch even when the numeric
+ * offset is valid. `out_resume` is the last returned offset plus one (with
+ * overflow clamped to UINT64_MAX), or the requested offset on an empty page
+ * or a gap. Return codes: 1 success (out_range carries the decision; gap
+ * results have zero records), 3 missing topic or partition, -1 invalid
+ * arguments/allocation/persistence failure, and -2 when the first eligible
+ * record cannot fit `max_bytes` (distinguishable from an expired offset). */
+int stream_fetch_metadata(StreamStore *store, const char *name, uint32_t name_len,
+                          uint32_t partition, uint64_t offset, uint32_t max_records,
+                          uint64_t max_bytes, const unsigned char *expected_id,
+                          unsigned char *out_stream_id, uint64_t *out_base,
+                          uint64_t *out_next, uint64_t *out_resume,
+                          StreamFetchRange *out_range,
+                          StreamRecordView **out_records, uint32_t *out_count);
 /* Durably remove records below `base_offset` from one partition using the
  * native trim WAL record. The expected topic revision is checked under the
  * Stream lock. Returns 0 on success, 1 stale revision, 2 invalid retained

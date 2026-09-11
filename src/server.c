@@ -97,7 +97,8 @@
 #define STREAM_GROUP_LIST 0x6a
 #define STREAM_COMMIT_BATCH 0x6b
 #define STREAM_FETCH_KEYS 0x6c
-#define STREAM_OP_MAX STREAM_FETCH_KEYS
+#define STREAM_FETCH_META 0x6d
+#define STREAM_OP_MAX STREAM_FETCH_META
 /* Atomic job completion (capability-gated; docs/design/PROTOCOL.md). */
 #define JOB_CONSUME_OP 0x70
 #define JOB_COMPLETE_OP 0x71
@@ -112,7 +113,7 @@
 #define CAPABILITIES 0x0a
 #define PUT_SWR 0x0b
 #define PROTOCOL_MAJOR 1u
-#define PROTOCOL_MINOR 8u
+#define PROTOCOL_MINOR 9u
 #define CAP_CACHE        (1ull << 0)
 #define CAP_QUEUES       (1ull << 1)
 #define CAP_EXCHANGES    (1ull << 2)
@@ -128,6 +129,7 @@
 #define CAP_QUEUE_BATCHES (1ull << 12)
 #define CAP_STREAM_COMMIT_BATCH (1ull << 13)
 #define CAP_STREAM_KEYS (1ull << 14)
+#define CAP_STREAM_REPLAY (1ull << 17)
 #define CAP_SERVER_INFO (1ull << 15)
 #define CAP_JOBS (1ull << 16)
 #define SERVER_INFO 0x0c
@@ -1308,7 +1310,7 @@ static void resp_capabilities(Conn *c) {
                     CAP_SINGLEFLIGHT | CAP_STREAMS | CAP_STREAM_BATCH | CAP_HEALTH |
                     CAP_STREAM_GEN | CAP_QUEUE_CONSUMERS | CAP_ATOMIC_UPDATE |
                     CAP_SWR | CAP_QUEUE_BATCHES | CAP_STREAM_COMMIT_BATCH |
-                    CAP_STREAM_KEYS | CAP_SERVER_INFO;
+                    CAP_STREAM_KEYS | CAP_STREAM_REPLAY | CAP_SERVER_INFO;
     if (g_jobs && job_engine_writable(g_jobs)) caps |= CAP_JOBS;
     p[0] = 0x00; put_u32le(p + 1, 12); put_u16le(p + 5, PROTOCOL_MAJOR);
     put_u16le(p + 7, PROTOCOL_MINOR); put_u64le(p + 9, caps);
@@ -1390,6 +1392,55 @@ static void resp_stream_fetch_keys(Conn *c, int rc, StreamRecordView *records,
     size_t at = 9;
     for (uint32_t i = 0; i < count; i++) {
         put_u64le(p + at, records[i].offset); put_u16le(p + at + 8, records[i].key_len);
+        put_u32le(p + at + 10, records[i].len);
+        if (records[i].key_len) memcpy(p + at + 14, records[i].key, records[i].key_len);
+        if (records[i].len) memcpy(p + at + 14 + records[i].key_len, records[i].data, records[i].len);
+        at += 14 + records[i].key_len + records[i].len;
+    }
+    c->out.len += 5 + bytes;
+}
+
+/* Typed stream errors carry a one-byte code in an ERROR body:
+ * 1 missing topic/partition, 2 persistence failure, 3 oversized record. */
+static void resp_error_code(Conn *c, unsigned char code) {
+    if (kuttidb_vec_reserve(&c->out, 6) < 0) { c->eof = 1; return; }
+    unsigned char *p = (unsigned char *)c->out.data + c->out.len;
+    p[0] = 0x02; put_u32le(p + 1, 1); p[5] = code;
+    c->out.len += 6;
+}
+
+/* 0x6d: records and replay metadata together. [range:1][base:8][next:8]
+ * [resume:8][stream_id:16][count:4] then count records shaped like 0x6c.
+ * A gap returns the actual identity and boundaries with zero records; a
+ * missing topic or partition is a typed error, never an empty valid stream. */
+static void resp_stream_fetch_meta(Conn *c, int rc, StreamFetchRange range,
+                                   const unsigned char *stream_id,
+                                   uint64_t base, uint64_t next,
+                                   uint64_t resume,
+                                   StreamRecordView *records, uint32_t count) {
+    if (rc == 3) { resp_error_code(c, 0x01); return; }
+    if (rc == -2) { resp_error_code(c, 0x03); return; }
+    if (rc < 0 || rc == 0) { resp_error_code(c, 0x02); return; }
+    size_t bytes = 45;
+    for (uint32_t i = 0; i < count; i++) {
+        if (records[i].len > g_max_val || records[i].key_len > g_max_val ||
+            bytes > UINT32_MAX - 14 - records[i].len - records[i].key_len ||
+            bytes > g_max_batch_bytes - 14 - records[i].len - records[i].key_len) {
+            resp_error_code(c, 0x02);
+            return;
+        }
+        bytes += 14 + records[i].len + records[i].key_len;
+    }
+    if (kuttidb_vec_reserve(&c->out, 5 + bytes) < 0) { c->eof = 1; return; }
+    unsigned char *p = (unsigned char *)c->out.data + c->out.len;
+    p[0] = 0x00; put_u32le(p + 1, (uint32_t)bytes); p[5] = (unsigned char)range;
+    put_u64le(p + 6, base); put_u64le(p + 14, next); put_u64le(p + 22, resume);
+    memcpy(p + 30, stream_id, STREAM_ID_LEN);
+    put_u32le(p + 46, count);
+    size_t at = 50;
+    for (uint32_t i = 0; i < count; i++) {
+        put_u64le(p + at, records[i].offset);
+        put_u16le(p + at + 8, records[i].key_len);
         put_u32le(p + at + 10, records[i].len);
         if (records[i].key_len) memcpy(p + at + 14, records[i].key, records[i].key_len);
         if (records[i].len) memcpy(p + at + 14 + records[i].key_len, records[i].data, records[i].len);
@@ -3146,6 +3197,26 @@ static void conn_process(Loop *L, Conn *c) {
                         g_max_batch_bytes, &records, &count) : -1;
                     if (op == STREAM_FETCH_KEYS) resp_stream_fetch_keys(c, rc, records, count);
                     else resp_stream_fetch(c, rc, records, count);
+                    stream_fetch_free(records, count);
+                } else if (op == STREAM_FETCH_META) {
+                    /* value = [partition:4][offset:8][max:4][expected_flag:1]
+                     *         [expected_id:16] (flag 0: first fetch, omit ID) */
+                    int rc = -1;
+                    StreamRecordView *records = NULL; uint32_t count = 0;
+                    unsigned char stream_id[STREAM_ID_LEN] = {0};
+                    uint64_t base = 0, next = 0, resume = 0;
+                    StreamFetchRange range = STREAM_RANGE_OK;
+                    if (vlen == 17 || vlen == 33) {
+                        const unsigned char *expected = NULL;
+                        if (vlen == 33 && arg[16]) expected = arg + 17;
+                        rc = stream_fetch_metadata(g_streams, topic, klen,
+                            get_u32le(arg), get_u64le(arg + 4),
+                            get_u32le(arg + 12), g_max_batch_bytes, expected,
+                            stream_id, &base, &next, &resume, &range,
+                            &records, &count);
+                    }
+                    resp_stream_fetch_meta(c, rc, range, stream_id, base, next,
+                                           resume, records, count);
                     stream_fetch_free(records, count);
                 } else if (op == STREAM_COMMIT) {
                     int rc = -1;
