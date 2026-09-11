@@ -18,6 +18,9 @@
 /stream_test*
 /fuzz_test*
 /embed_aslr_test
+/job_*test*
+/job_state_test
+/telemetry_config_test
 /queue_tsan_test
 /build/
 clients/rust/target/
