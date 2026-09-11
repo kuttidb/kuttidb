@@ -52,3 +52,6 @@ clients/python/dist/
 
 # Local planning documents — kept out of the repository by request.
 docs/plans/
+
+# Local Go build caches (keep out of the repository)
+.gocache/
