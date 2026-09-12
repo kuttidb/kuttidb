@@ -364,7 +364,7 @@ limitation appears with real multiprocess workloads.
 
 A like-for-like single-node comparison of KuttiDB against Redis, RabbitMQ,
 NATS JetStream, and Apache Kafka, all run on the same machine, one server at a
-time, each stopped before the next was installed/started.
+time, each stopped before the next was started.
 
 Environment: Ubuntu 26.04.1 LTS (kernel 7.0.0-30-generic), AMD EPYC 9354P with
 **1 vCPU**, 3.8 GiB RAM, local SSD (`rotational=0`), 48 GiB disk. Every server
@@ -375,20 +375,62 @@ throughout. KuttiDB was built from commit `0ce9a31` with gcc 15.2 `-O2`
 (`tls=off`, telemetry off). Absolute numbers on a 1-vCPU shared vHost are
 conservative; the comparisons are same-machine, same-day, like-for-like.
 
+> **Methodology correction (same day).** The first recording of this
+> comparison ran every KuttiDB harness with its data directory under `/tmp`,
+> which Ubuntu 26.04 mounts as **tmpfs** (a RAM disk). Fsync on tmpfs costs
+> almost nothing, so KuttiDB's single-record publish (17.8k/s), exchange
+> routing (17.5k/s), stream append (634k/s) and queue rows (207k publish /
+> 128k consume+ACK) were inflated relative to every competitor, whose data
+> directories were on the real SSD. Every KuttiDB row in this section has
+> been re-measured with its WAL on the same SSD the competitors used
+> (`TMPDIR` redirected); the corrected numbers replace the old ones below.
+> The resource-usage section was measured on the SSD from the start and
+> needed no correction. Two interim hypotheses are also withdrawn: queue
+> publish is **depth-flat** (86–108k/s SSD at 20k and 200k messages; the
+> 207k/s first reading was tmpfs, not depth), and the earlier footnote
+> blaming queue depth for the publish gap was wrong. Consume+ACK does
+> degrade with depth (63.5k/s at 20k → 32k/s at 200k on SSD) and is recorded
+> at both scales.
+
+Methodology per class:
+
+- **Cache/KV**: KuttiDB `src/bench_matrix.py --quick` (256-item batches of
+  100-byte values, independent one-thread client processes, PUT/GET/DELETE
+  mix, WAL on the SSD). Redis `redis-benchmark` (`-d 100 -t set,get`,
+  pipeline length as shown, 4 connections, `--threads 2`). Redis durability
+  was AOF with `appendfsync everysec` — the closest analogue to KuttiDB
+  `periodic` (`fsync-ms 100`) — plus `appendfsync always` and no-persistence
+  extremes.
+- **Durable queue** (publish → consume → ACK semantics): KuttiDB
+  `src/bench_queue_net.py` (durable queue, 100-byte messages, batched 256 per
+  round trip, single Python client, periodic durability, WAL on the SSD).
+  RabbitMQ 4.0.5 with PerfTest 2.25.0 (`-s 100`, persistent messages,
+  prefetch 100–250, classic durable and quorum queues). NATS 2.10.27
+  JetStream with file storage (`nats bench js pub sync`, callback-based
+  `js consume` with explicit acks). Redis list rows: `redis-benchmark -t
+  lpush` (no acknowledgement semantics — listed for the ceiling only).
+- **Durable partitioned stream**: KuttiDB `src/bench_stream_net.py`
+  (stream, 40k × 100-byte records, 8 partitions, append/fetch batched 256,
+  WAL on the SSD). Kafka 4.1.2 KRaft single broker (512 MiB heap,
+  `acks=1`/`acks=all`, no compression, `batch.size=16384 linger.ms=0`) with
+  the official producer/consumer perf tests.
+
 ### Results at a glance
 
-One small VPS, one CPU, 100-byte messages, every server tuned to a comparable
-durability level. Numbers are thousands of operations per second; **bold** is
-the best in the row; "—" means the product does not target that workload.
+One small VPS, one CPU, 100-byte messages, every server on the same SSD with
+comparable durability. Numbers are thousands of operations per second;
+**bold** is the best in the row; "—" means the product does not target that
+workload.
 
 | Workload | KuttiDB | Redis | RabbitMQ | NATS JetStream | Kafka |
 |---|---:|---:|---:|---:|---:|
-| Cache set/get, batched¹ | **740k** mixed | 399k set / **798k** get | — | — | — |
-| Durable queue: publish | **207k** | — | 9.8k | 12k–101k | 40k–47k² |
-| Durable queue: consume + ack | 128k | — | 13k | **148k** | 33k² |
-| Event stream: append | **634k** | — | 5.6k³ | 12k–101k | 40k–47k² |
-| Event stream: read back | **584k** | — | — | **148k**⁴ | 33k² (255k raw) |
-| One write at a time (no batching) | **17.8k** | — | 9.8k | 12.2k | — |
+| Cache set/get, batched¹ | **651k** (813k @8c) mixed | 399k set / **798k** get | — | — | — |
+| Durable queue: publish, 20k msgs | **108k** | 197k (no ack) | 16.6k | 12k–101k | 40k–47k² |
+| Durable queue: publish, 200k msgs | 86k | 197k (no ack) | 7.3k | 85k | 37k² |
+| Durable queue: consume + ack, 200k msgs | 32k | — | 7.3–13k | **145k** | 39k |
+| Event stream: append (40k recs) | **135k** | — | 5.6k³ | 85–101k | 37k–47k² |
+| Event stream: read back | **496k** | — | — | **148k**⁴ | 33k (163–255k raw) |
+| One durable write at a time | 0.97k | — | **16.6k** | 12.2k | — |
 | Server RAM, fresh idle⁵ | **2.9 MB** | 14 MB | 109 MB | 14 MB | 358 MB |
 | Server RAM, 200k-message queue⁵ | 46 MB | **36 MB** | 161 MB | 41 MB | 385 MB |
 
@@ -400,51 +442,37 @@ Footnotes, in plain language:
    fully off both set and get are ~399k.
 2. Kafka's single-broker setup does not fsync — after a power loss the last
    messages can be gone — and its producer latency averaged ~1 second per
-   record batch on this 1-vCPU box. It is still the weakest-durability row.
-3. That is RabbitMQ's quorum queue, its strongest-durability mode; its classic
-   durable queue manages 9.6k steady-state and 13.1k consume+ack.
+   record batch on this 1-vCPU box. It is the weakest-durability row.
+3. That is RabbitMQ's quorum queue, its strongest-durability mode; its
+   classic durable queue manages 9.6k combined and 13.1k consume+ack.
 4. NATS JetStream consume was measured with 4 clients; every other number in
    its row and all KuttiDB numbers are 1 client. Core NATS without any
    persistence publishes 1,782k msgs/s — the in-memory ceiling, not a durable
    option.
-5. Measured in the resource-usage run below (kernel VmHWM). KuttiDB holds
+5. Measured in the resource-usage section below (kernel VmHWM). KuttiDB holds
    live queue contents in RAM by design (cache-first engine), while NATS and
    Kafka stream to files — that is why KuttiDB wins idle RAM by 5× but Redis
    and NATS run lighter on a deep backlog. The ~8 MB figure from the cache
    matrix above is the cache-workload footprint at its small keyspace.
+6. The single-record row is where batching stops helping: KuttiDB fsyncs
+   before acknowledging each unbatched durable write (~970/s on this SSD),
+   while RabbitMQ and NATS group their durability work internally
+   (16.6k and 12.2k/s). KuttiDB's batched publish (256 per round trip) is the
+   intended path for bulk work.
 
-The one-line summary: **KuttiDB was fastest in every durable category except
-durable consume+ack, where NATS JetStream was ~15% faster**; Redis keeps the
-plain-cache crown for pure reads; all of this happened on a single shared vCPU
-with the production website running on the same machine.
+The one-line summary: **KuttiDB leads batched durable throughput (stream
+append, queue publish) and idle RAM, ties NATS on deep-queue publish, and
+loses on single-record durable writes, deep-queue consume+ACK, and pure cache
+reads** — all of it measured on one shared vCPU with the production website
+running on the same machine.
 
-Methodology per class:
-
-- **Cache/KV**: KuttiDB `src/bench_matrix.py --quick` (256-item batches of
-  100-byte values, independent one-thread client processes, PUT/GET/DELETE
-  mix). Redis `redis-benchmark` (`-d 100 -t set,get`, pipeline length as
-  shown, 4 connections, `--threads 2`). Redis durability was AOF with
-  `appendfsync everysec` — the closest analogue to KuttiDB `periodic`
-  (`fsync-ms 100`) — plus `appendfsync always` and no-persistence extremes.
-- **Durable queue** (publish → consume → ACK semantics): KuttiDB
-  `src/bench_queue_net.py` (durable queue, 20k × 100-byte messages,
-  batched 256 per round trip, single Python client, periodic durability).
-  RabbitMQ 4.0.5 with PerfTest 2.25.0 (`-s 100`, persistent messages,
-  prefetch 100–250, classic durable and quorum queues). NATS 2.10.27
-  JetStream with file storage (`nats bench js pub sync`, callback-based
-  `js consume` with explicit acks).
-- **Durable partitioned stream**: KuttiDB `src/bench_stream_net.py`
-  (stream, 40k × 100-byte records, 8 partitions, append/fetch batched 256).
-  Kafka 4.1.2 KRaft single broker (512 MiB heap, `acks=1`/`acks=all`, no
-  compression, `batch.size=16384 linger.ms=0`) with the official
-  producer/consumer perf tests.
-
-### Cache / KV throughput (100-byte values)
+### Cache / KV throughput (100-byte values, WAL on SSD)
 
 | Server (config) | Shape | Throughput | p50 | p99 |
 |---|---|---:|---:|---:|
-| KuttiDB `periodic` fsync 100 ms | 256-op batches, 1 client | 666,008 ops/s | 471 µs | 717 µs |
-| KuttiDB `periodic` fsync 100 ms | 256-op batches, 8 clients | 740,275 ops/s | 1,893 µs | 10,167 µs |
+| KuttiDB `periodic` fsync 100 ms | 256-op batches, 1 client | 645,022 ops/s | 460 µs | 673 µs |
+| KuttiDB `periodic` fsync 100 ms | 256-op batches, 4 clients | 651,120 ops/s | 1,125 µs | 4,978 µs |
+| KuttiDB `periodic` fsync 100 ms | 256-op batches, 8 clients | 813,328 ops/s | 2,276 µs | 8,819 µs |
 | KuttiDB durability off (ceiling) | 256-op batches, 8 clients | 859,272 ops/s | 1,183 µs | 8,727 µs |
 | Redis 8.0.5 AOF everysec | pipeline 16, 4 connections | SET 266,312 / GET 398,406 ops/s | 199/127 µs | 423/351 µs |
 | Redis 8.0.5 AOF everysec | pipeline 256, 4 connections | SET 398,789 / GET 797,578 ops/s | 831/495 µs | 1,967/1,687 µs |
@@ -454,64 +482,77 @@ Methodology per class:
 | KuttiDB durability off (single-op harness) | 1 op per round trip, 1 client | 44,228 ops/s | 20 µs | 43 µs |
 
 Reading: at matched 256-operation batching, KuttiDB's interleaved
-PUT/GET/DELETE stream (709–740k ops/s with `periodic` durability) sits above
-Redis's SET (399k) and GET (798k) split averages on the same vCPU, and well
-above Redis's SET rate; Redis GET at pipeline 256 approaches KuttiDB's
-no-durability ceiling. On a single vCPU neither server scales with clients —
-the multi-client gains recorded on the ARM64 machine above do not reproduce
-here, which is expected and not a server regression.
+PUT/GET/DELETE stream (645–813k ops/s with `periodic` durability) lands
+between Redis's SET (399k) and GET (798k) rates on the same vCPU, and above
+Redis's SET rate; the no-durability ceiling (859k) shows the SSD WAL costs
+single-digit percent at this fsync cadence. On a single vCPU neither server
+scales with clients in a straight line — the multi-client gains recorded on
+the ARM64 machine above do not reproduce here, which is expected and not a
+server regression.
 
-### Durable queue: publish / consume+ACK (100-byte messages)
+### Durable queue: publish / consume+ACK (100-byte messages, SSD)
 
 | Server (config) | Publish | Consume+ACK | Steady state (pub+sub) |
 |---|---:|---:|---:|
-| KuttiDB 1.9 durable queue, periodic, batched 256 | 207,515 msgs/s | 128,164 msgs/s | — |
-| KuttiDB 1.9 durable queue, singles | 17,816 msgs/s | — | — |
-| RabbitMQ 4.0.5 classic durable, persistent msgs | 9,807 msg/s | 13,129 msg/s (drain) | 9,584 msg/s combined |
-| RabbitMQ 4.0.5 quorum queue, combined | — | — | 5,586 msg/s |
-| NATS 2.10.27 JetStream file, sync publish (per-msg ack) | 12,173 msgs/s (p50 75 µs) | — | — |
-| NATS 2.10.27 JetStream file, async publish (batch 500) | 100,744 msgs/s | — | — |
-| NATS 2.10.27 JetStream durable consumer (callback, explicit ack, 4 clients) | — | 147,612 msgs/s | — |
+| KuttiDB 1.9 durable queue, batched 256, 20k msgs | 108,132 msgs/s | 63,551 msgs/s (drain) | — |
+| KuttiDB 1.9 durable queue, batched 256, 200k msgs | 86,137 msgs/s | 32,192 msgs/s | — |
+| KuttiDB 1.9 durable queue, single-record writes | 965 msgs/s | — | — |
+| RabbitMQ 4.0.5 classic durable, persistent, publish-only (20k) | 16,597 msg/s | — | — |
+| RabbitMQ 4.0.5 classic durable, consume+ACK drain (30k) | — | 13,129 msg/s | — |
+| RabbitMQ 4.0.5 classic durable, combined (30–50k) | — | — | 9,584 msg/s |
+| RabbitMQ 4.0.5 quorum queue, combined (30k) | — | — | 5,586 msg/s |
+| NATS 2.10.27 JetStream file, sync publish (per-msg ack, 50k) | 12,173 msgs/s (p50 75 µs) | — | — |
+| NATS 2.10.27 JetStream file, async publish (batch 500, 200k) | 85,172–100,744 msgs/s | — | — |
+| NATS 2.10.27 JetStream durable consumer (callback, explicit ack, 4 clients, 200k) | — | 144,605–147,612 msgs/s | — |
+| Redis 8.0.5 LPUSH (AOF everysec, no ack, 200k) | 159,744–196,657 ops/s | — | — |
 | NATS 2.10.27 Core NATS pub (no persistence) | 1,782,103 msgs/s | — | — |
+| Kafka 4.1.2 single broker, `acks=1` / `acks=all` (200k) | 36,630–39,557 / 47,214 recs/s | 33,052 msg/s end-to-end (163–255k steady) | — |
 
-KuttiDB's batched durable publish is ~1.3× NATS async publish and ~2.6× NATS
-sync publish; its single-record durable publish (17.8k/s, acknowledged within
-the 100 ms group-fsync window) is ~1.5× RabbitMQ's persistent-message publish
-rate on the same fsync-bound disk. RabbitMQ's quorum queue — its
-strongest-durability option — runs at roughly 58% of its classic-queue rate on
-this vCPU. Non-durable fire-and-forget (Core NATS) is an order of magnitude
-above every durable path and is listed only as the in-memory ceiling.
+Reading: the 256-message batch is what makes KuttiDB competitive — one group
+fsync covers the batch, giving 86–108k msgs/s: level with NATS JetStream's
+async publish, ~2.3× Kafka's produce rate, 5–12× RabbitMQ's classic rate,
+behind only Redis's un-acknowledged O(1) list push. KuttiDB's
+single-record durable path pays one fsync per operation (~965/s here) and is
+10–17× behind RabbitMQ's and NATS's grouped durability — a real gap that
+batching exists to avoid. Consume+ACK is the weakest measured area: behind
+NATS at both scales and behind Kafka at 200k, consistent with the
+depth-linked delivery costs documented in the engine baselines (the deferred
+ready-pointer work is the known follow-up).
 
-### Durable partitioned stream: append / fetch (100-byte records)
+### Durable partitioned stream: append / fetch (100-byte records, SSD)
 
 | Server (config) | Append (write side) | Read side |
 |---|---:|---:|
-| KuttiDB 1.9 stream, 8 partitions, batched 256, periodic | 634,336 recs/s | fetch 584,361 recs/s |
-| KuttiDB stream, single-record appends | 17,194 recs/s | — |
-| Kafka 4.1.2 single broker, `acks=1`, no compression | 39,557 recs/s (p50 1,204 ms) | 33,052 msg/s end-to-end incl. 5.3 s group setup; 254,777 msg/s steady fetch |
-| Kafka 4.1.2 single broker, `acks=all` | 47,214 recs/s (p50 947 ms) | — |
+| KuttiDB 1.9 stream, 8 partitions, batched 256, periodic, 40k recs | 135,543 recs/s | fetch 496,211 recs/s |
+| KuttiDB stream, single-record appends | 839 recs/s | — |
+| Kafka 4.1.2 single broker, `acks=1` / `acks=all`, no compression | 36,630–47,214 recs/s (p50 0.9–1.2 s) | 33,052 msg/s end-to-end incl. 5.3 s group setup; 163,399–254,777 msg/s steady fetch |
 
 Two caveats keep this table honest. First, a single Kafka broker provides
-durability only through the OS page cache (no fsync by default), so its row is
-the weakest-durability configuration of the table — and it still appends an
-order of magnitude slower than KuttiDB's batched durable appends on this box.
-Second, the Kafka numbers were taken with the broker and client JVM sharing
-one vCPU; the producer's ~1 s average latency reflects that starvation (real
-but machine-specific), and the consumer end-to-end rate includes one-time
-group-rebalance setup that the steady fetch rate does not.
+durability only through the OS page cache (no fsync by default), so its row
+is the weakest-durability configuration of the table — KuttiDB's batched
+append is still ~3–4× faster while covering each batch with an fsync, and its
+fetch is ~2–3× Kafka's steady consumer rate. Second, the Kafka numbers were
+taken with the broker and client JVM sharing one vCPU; the producer's ~1 s
+average latency reflects that starvation (real but machine-specific), and the
+consumer end-to-end rate includes one-time group-rebalance setup that the
+steady fetch rate does not.
 
-### Exchange routing (KuttiDB server-level, single Python client, per-publish durable)
+### Exchange routing (KuttiDB server-level, single Python client, per-publish durable, SSD)
 
 | Scenario | Result |
 |---|---:|
-| Plain durable queue publish | 17,503 ops/s |
-| Direct exchange, one durable binding | 16,533 ops/s |
-| Fanout, eight durable bindings | 10,849 ops/s (≈86.8k durable copies/s) |
-| Topic exchange, 100 bindings, one match | 15,368 ops/s |
-| Topic exchange, unroutable | 17,911 ops/s |
+| Plain durable queue publish (singles) | 824 ops/s |
+| Direct exchange, one durable binding | 785 ops/s |
+| Fanout, eight durable bindings | 525 ops/s (≈4.2k durable copies/s) |
+| Topic exchange, 100 bindings, one match | 1,101 ops/s |
+| Topic exchange, unroutable (no durable copy) | 16,282 ops/s |
 
-Routing overhead stays within noise of the plain-queue baseline on Linux as it
-does on the macOS baseline above.
+Every durable copy on this path is fsynced before confirmation, so the SSD
+rates are fsync-bound (~1 ms per copy); the unroutable row (no durable copy)
+shows the CPU-bound ceiling of the same path (16.3k/s). Routing overhead
+relative to the plain-queue baseline stays within noise, as it does on the
+macOS baseline above. The earlier 17.5k/s recording of the same rows was the
+tmpfs artifact described in the correction note.
 
 ### Resource usage under load — 2026-09-12 (same VPS)
 
@@ -522,48 +563,42 @@ from `/proc/<pid>/stat` tick deltas over each benchmark window, sampled
 separately for the server and its load generator (both processes `nice -n
 15`); disk is the `du` delta of each server's data directory during the
 durable-write phase. Versions as in the throughput section; Kafka ran with its
-heap capped at 512 MiB.
+heap capped at 512 MiB. KuttiDB's rates in this section were already measured
+with the WAL on the SSD.
 
 | Product | Scenario (100 B messages) | Rate | Server RAM idle → peak | Server CPU | Client CPU | Disk per message |
 |---|---|---:|---:|---:|---:|---:|
 | KuttiDB 1.9 | cache, batched 256, 400k live keys | 484k ops/s | 3 → 67 MiB | 41% | ~55% | — |
-| Redis 8.0.5 | SET+GET, pipeline 16 | 263k / 319k ops/s | 14 → 16 MiB² | 49% | 39% | — |
-| Redis 8.0.5 | 200k LPUSH, AOF everysec | 197k ops/s | 14 → 36 MiB | 55% | 26% | ~74 B/msg³ |
-| KuttiDB 1.9 | durable queue publish, 200k msgs, batched 256 | 80k msgs/s⁴ | 3 → 45 MiB | 43% | 9% | 132 B/msg⁵ |
-| KuttiDB 1.9 | durable queue consume+ACK, 200k msgs | 28k msgs/s⁴ | 3 → 45 MiB | 56% | 7% | — |
+| Redis 8.0.5 | SET+GET, pipeline 16 | 263k / 319k ops/s | 14 → 16 MiB¹ | 49% | 39% | — |
+| Redis 8.0.5 | 200k LPUSH, AOF everysec | 197k ops/s | 14 → 36 MiB | 55% | 26% | ~74 B/msg² |
+| KuttiDB 1.9 | durable queue publish, 200k msgs, batched 256 | 80k msgs/s | 3 → 45 MiB | 43% | 9% | 132 B/msg³ |
+| KuttiDB 1.9 | durable queue consume+ACK, 200k msgs | 28k msgs/s | 3 → 45 MiB | 56% | 7% | — |
 | NATS 2.10.27 | JetStream async publish, 200k msgs | 85k msgs/s | 14 → 20 MiB | 48% | 36% | 138 B/msg |
 | NATS 2.10.27 | JetStream consume+ack, 4 clients | 145k msgs/s | 14 → 41 MiB | 67% | 20% | — |
-| RabbitMQ 4.0.5 | publish-only, 20k persistent, classic durable | 16.6k msgs/s | 109 → 159 MiB | 17% | 69%⁶ | 316 B/msg |
+| RabbitMQ 4.0.5 | publish-only, 20k persistent, classic durable | 16.6k msgs/s | 109 → 159 MiB | 17% | 69%⁴ | 316 B/msg |
 | RabbitMQ 4.0.5 | combined produce+consume, 30k msgs | 7.3k msgs/s | 109 → 161 MiB | 33% | 54% | — |
-| Kafka 4.1.2 | produce 200k, acks=1 | 36.6k recs/s | 358 → 385 MiB⁷ | 30% | 55% | 110 B/msg⁸ |
+| Kafka 4.1.2 | produce 200k, acks=1 | 36.6k recs/s | 358 → 385 MiB⁵ | 30% | 55% | 110 B/msg⁶ |
 | Kafka 4.1.2 | consume 200k msgs | 39.3k msg/s (163k steady) | 358 → 387 MiB | 10% | 43% | — |
 
 Notes, in plain language:
 
-1. Two footnotes for the glance rows above are merged here: idle RAM and
-   loaded RAM come from these runs, measured per product on a fresh server.
-2. redis-benchmark reuses one key per test by default, so the SET/GET phase
+1. redis-benchmark reuses one key per test by default, so the SET/GET phase
    barely grows Redis; the meaningful Redis loaded-RAM number is the
    200k-entry list phase.
-3. Redis's AOF (`everysec`) is not fsync-acked per operation, and the
+2. Redis's AOF (`everysec`) is not fsync-acked per operation, and the
    recorded size is after Redis's automatic AOF rewrite compacted the log —
    the negative growth the rewrite produced is why no delta is quoted.
-4. Queue rates at 200k-message depth are lower than the 20k-scale numbers in
-   the durable-queue table above (publish 80k vs 207k; consume+ACK 28k vs
-   128k). The depth-linked cost at 200k messages on 1 vCPU is real and both
-   scales are recorded; the earlier table remains the like-for-like
-   comparison at matched sizes.
-5. KuttiDB's publish WAL costs 132 bytes per 100-byte message while messages
+3. KuttiDB's publish WAL costs 132 bytes per 100-byte message while messages
    are in flight; the queue checkpoint compacts it after consumption, and the
    whole 200k-message run left ~1.2 MB on disk.
-6. The PerfTest JVM consumed most of RabbitMQ's CPU; the Erlang server ran
+4. The PerfTest JVM consumed most of RabbitMQ's CPU; the Erlang server ran
    light on CPU but heavy in RAM (VM baseline ~109 MiB).
-7. Kafka's peak includes the 512 MiB heap cap (RSS = heap + metaspace + mapped
+5. Kafka's peak includes the 512 MiB heap cap (RSS = heap + metaspace + mapped
    files); its durability remains page-cache-only on a single broker. During
    produce the data dir transiently preallocated ~1.15 GB of index files that
    were reclaimed after the run; the steady topic log is 110 B/msg and the
    whole data dir finished at 66 MB including metadata topics.
-8. CPU columns do not sum past 100 because this is one shared core; durable
+6. CPU columns do not sum past 100 because this is one shared core; durable
    publish paths are fsync-bound — the server CPU stays below 100% while
    blocked on disk I/O rather than compute-bound.
 
@@ -576,30 +611,42 @@ fsync cadence rather than either process saturating the core.
 
 ### Summary
 
-On one vCPU with durability in the same class on all sides, KuttiDB led every
-durable category measured: ~1.7–2.6× the nearest competitor on batched durable
-queue publish (207k vs RabbitMQ 9.6k combined / NATS 12–101k), ~2.5–4× on
-stream append, and it did so while acknowledging writes in batches that each
-fsync covers (`periodic`, 100 ms) — durability comparable to RabbitMQ's quorum
-path and stronger than Kafka's default single-broker page-cache behaviour.
-Against Redis on the cache path, KuttiDB's mixed batched stream measured
-709–740k ops/s versus Redis's 399k SET / 798k GET at matched batching, with a
-loaded server RSS of ~8 MiB in the same runs. Single-round-trip latency is in
-the same band everywhere on this vCPU (tens of microseconds server-side);
-Kafka's producer latencies (p50 ≈ 1 s) and RabbitMQ's 1-second-burst
-variability are the throughput-over-latency trade-offs those systems make, and
-they reproduce here.
+Honest scorecard on one vCPU, same SSD on all sides:
+
+- **Wins**: batched durable stream append (135k vs Kafka 37–47k, NATS
+  85–101k — 1.4–3.7×, while each batch is fsync-covered); stream fetch
+  (496k vs Kafka's steady 163k); idle RAM (2.9 MB — 5× less than Redis,
+  12× less than RabbitMQ, 123× less than Kafka); CPU cost per message on
+  durable publish (0.6 CPU-points per 1,000 msgs/s).
+- **Ties**: batched durable queue publish at 200k messages (86k vs NATS 85k;
+  ~2.3× Kafka; 5–12× RabbitMQ), behind only Redis's un-acknowledged push.
+- **Losses, recorded rather than hidden**: single-record durable writes
+  (965/s — 12–17× behind RabbitMQ's and NATS's grouped durability; the
+  batched API is the intended path); deep-queue consume+ACK (32k/s at 200k
+  vs NATS 145k with 4 clients and Kafka 39k — the depth-linked delivery cost
+  documented in the engine baselines); pure cache GETs (Redis 798k at
+  pipeline 256); loaded RAM on deep backlogs (46 MB vs Redis 36 / NATS 41 —
+  the in-memory queue is a design choice, and the checkpoint keeps the
+  on-disk cost at ~1.2 MB for a fully drained 200k-message run).
+
+Against the first recording of this comparison, the corrected numbers moved
+every KuttiDB single-record and stream-append row down and left the batched
+cache row essentially unchanged — the tmpfs correction is the difference
+between marketing and measurement, and this file keeps the corrected ones.
 
 Reproduce with: `make` (KuttiDB, commit `0ce9a31`, gcc 15.2), then
-`python3 src/bench_matrix.py --quick --durability periodic`,
-`python3 src/bench_queue_net.py`, `python3 src/bench_stream_net.py`,
-`python3 src/bench_exchange.py 7406 5000` for KuttiDB;
-`redis-server --appendonly yes --appendfsync everysec` +
-`redis-benchmark -n 200000 -d 100 -t set,get,lpush,rpop -P {1,16,256} -c 4 --csv`;
-`rabbitmq-perf-test` with the flags above;
-`nats bench js pub sync|async` + `nats bench js consume` with file storage;
-`kafka-producer-perf-test.sh` / `kafka-consumer-perf-test.sh` as above.
-The raw tool outputs of the recorded runs are kept out of the published
+`TMPDIR=/root/resbench/tmp python3 src/bench_matrix.py --quick --durability
+periodic`, `TMPDIR=... python3 src/bench_queue_net.py 7411 20000`,
+`TMPDIR=... python3 src/bench_queue_net.py 7411 200000`,
+`TMPDIR=... python3 src/bench_stream_net.py 7412 40000 8`,
+`TMPDIR=... python3 src/bench_exchange.py 7406 5000` for KuttiDB (the
+`TMPDIR` redirect is mandatory on hosts where `/tmp` is tmpfs — on macOS it
+is not); `redis-server --appendonly yes --appendfsync everysec` +
+`redis-benchmark -n 200000 -d 100 -t set,get,lpush,rpop -P {1,16,256} -c 4
+--csv`; `rabbitmq-perf-test` with the flags above; `nats bench js pub
+sync|async` + `nats bench js consume` with file storage;
+`kafka-producer-perf-test.sh` / `kafka-consumer-perf-test.sh` as above. The
+raw tool outputs of the recorded runs are kept out of the published
 repository per the documentation policy (transient working notes live in the
 gitignored `docs/plans/`).
 
