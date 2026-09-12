@@ -1,5 +1,6 @@
 #include "queue.h"
 
+#include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +23,71 @@ static int consume_value(QueueStore *store, const char *expected,
     return 0;
 }
 
+/* Prefetch ownership must remain exact across index growth and every way a
+ * delivery stops being in flight. A large ready backlog must not be counted. */
+static void test_owner_inflight_index(void) {
+    QueueStore *store = queue_store_open(NULL);
+    assert(store);
+    assert(queue_declare(store, "indexed", 7, 0, 0) == 0);
+    assert(queue_declare(store, "other", 5, 0, 0) == 0);
+    for (unsigned i = 0; i < 4096; i++)
+        assert(queue_publish(store, "indexed", 7, "x", 1, 0, NULL) == 0);
+    assert(queue_owner_inflight(store, 11) == 0);
+    uint64_t tags[160];
+    for (unsigned i = 0; i < 160; i++) {
+        QueueMessage message;
+        assert(queue_consume_for_owner(store, "indexed", 7, 60000,
+                                       i % 2 ? 11 : 22, &message) == 1);
+        tags[i] = message.delivery_tag;
+        queue_message_free(&message);
+    }
+    assert(queue_owner_inflight(store, 11) == 80);
+    assert(queue_owner_inflight(store, 22) == 80);
+    assert(queue_owner_inflight(store, 33) == 0);
+    assert(queue_owner_inflight(store, 0) == 0);
+    assert(queue_publish(store, "other", 5, "y", 1, 0, NULL) == 0);
+    QueueMessage message;
+    assert(queue_consume_for_owner(store, "other", 5, 60000, 11, &message) == 1);
+    queue_message_free(&message);
+    assert(queue_owner_inflight(store, 11) == 81);
+    /* Wrong-owner ACK cannot free another consumer's prefetch slot. */
+    assert(queue_ack_for_owner(store, "indexed", 7, tags[0], 11) == 0);
+    assert(queue_owner_inflight(store, 22) == 80);
+    assert(queue_ack_for_owner(store, "indexed", 7, tags[0], 22) == 1);
+    assert(queue_owner_inflight(store, 22) == 79);
+    assert(queue_nack_for_owner_delay(store, "indexed", 7, tags[2], 22, 1, 60000) == 1);
+    assert(queue_owner_inflight(store, 22) == 78);
+    uint32_t acked = 0;
+    assert(queue_ack_batch(store, "indexed", 7, 11, 0, &tags[3], 1, &acked) == 0);
+    assert(acked == 1 && queue_owner_inflight(store, 11) == 80);
+    queue_requeue_owner(store, 11);
+    assert(queue_owner_inflight(store, 11) == 0);
+    assert(queue_owner_inflight(store, 22) == 78);
+    uint64_t removed = 0;
+    assert(queue_purge(store, "indexed", 7, &removed) == 1);
+    assert(queue_owner_inflight(store, 22) == 0);
+    /* Exercise reuse of an empty but previously grown index and visibility
+     * expiry, which must release the slot before a new owner receives it. */
+    assert(queue_publish(store, "indexed", 7, "z", 1, 0, NULL) == 0);
+    assert(queue_consume_for_owner(store, "indexed", 7, 1, 22, &message) == 1);
+    queue_message_free(&message);
+    assert(queue_owner_inflight(store, 22) == 1);
+    usleep(5000);
+    queue_reap(store);
+    assert(queue_owner_inflight(store, 22) == 0);
+    assert(queue_consume_for_owner(store, "indexed", 7, 60000, 33, &message) == 1);
+    assert(message.redelivered);
+    queue_message_free(&message);
+    assert(queue_owner_inflight(store, 33) == 1);
+    uint64_t revision = 0;
+    assert(queue_revision(store, "indexed", 7, &revision) == 1);
+    assert(queue_delete_if_revision(store, "indexed", 7, revision, &removed) == 1);
+    assert(queue_owner_inflight(store, 33) == 0);
+    queue_store_close(store);
+}
+
 int main(void) {
+    test_owner_inflight_index();
     char path[] = "/tmp/kuttidb-queue-XXXXXX";
     uint64_t owner = 0;
     int fd = mkstemp(path);

@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -186,6 +188,120 @@ static int ack_crash_test(const char *path) {
     return 0;
 }
 
+/* Force writev to stop inside the header, name and payload, then crash
+ * without close/checkpoint. Recovery must keep only the confirmed prefix. */
+static int partial_record_crash_test(const char *path) {
+    const unsigned cuts[] = {1, 27, 28, 29, 32, 33, 50, 132};
+    for (unsigned i = 0; i < sizeof cuts / sizeof cuts[0]; i++) {
+        unlink(path);
+        QueueStore *store = queue_store_open(path);
+        if (!store || queue_declare(store, "parts", 5, 1, 0) != 0 ||
+            queue_publish(store, "parts", 5, "kept", 4, 0, NULL) != 0)
+            return 1;
+        queue_store_close(store);
+        struct stat prefix;
+        if (stat(path, &prefix)) return 1;
+        pid_t pid = fork();
+        if (pid < 0) return 1;
+        if (pid == 0) {
+            store = queue_store_open(path);
+            struct rlimit limit = {
+                .rlim_cur = (rlim_t)prefix.st_size + cuts[i],
+                .rlim_max = (rlim_t)prefix.st_size + cuts[i]
+            };
+            if (!store || setrlimit(RLIMIT_FSIZE, &limit)) _exit(2);
+            signal(SIGXFSZ, SIG_IGN);
+            char payload[100];
+            memset(payload, 'x', sizeof payload);
+            if (queue_publish(store, "parts", 5, payload, sizeof payload, 0, NULL) != -1 ||
+                !queue_persistence_failed(store)) _exit(3);
+            kill(getpid(), SIGKILL);
+            _exit(4);
+        }
+        int status = 0;
+        if (waitpid(pid, &status, 0) != pid || !WIFSIGNALED(status) ||
+            WTERMSIG(status) != SIGKILL) return 1;
+        store = queue_store_open(path);
+        struct stat recovered;
+        if (!store || stat(path, &recovered) || recovered.st_size != prefix.st_size ||
+            queue_depth(store, "parts", 5) != 1 || queue_persistence_failed(store)) {
+            fprintf(stderr, "partial record recovery failed at byte %u\n", cuts[i]);
+            return 1;
+        }
+        QueueMessage message;
+        if (queue_consume(store, "parts", 5, 60000, &message) != 1 ||
+            message.len != 4 || memcmp(message.data, "kept", 4) ||
+            queue_ack(store, "parts", 5, message.delivery_tag) != 1)
+            return 1;
+        queue_message_free(&message);
+        if (queue_publish(store, "parts", 5, "after", 5, 0, NULL) != 0)
+            return 1;
+        queue_store_close(store);
+    }
+    return 0;
+}
+
+/* Compact timer storage must never persist a monotonic visibility deadline
+ * as a wall-clock delayed delivery, or expose one in the other API field. */
+static int checkpoint_timer_crash_test(const char *path) {
+    unlink(path);
+    pid_t pid = fork();
+    if (pid < 0) return 1;
+    if (pid == 0) {
+        QueueStore *store = queue_store_open(path);
+        if (!store || queue_declare(store, "timers", 6, 1, 0) != 0 ||
+            queue_publish(store, "timers", 6, "delayed", 7, 0, NULL) != 0 ||
+            queue_publish(store, "timers", 6, "inflight", 8, 0, NULL) != 0) _exit(2);
+        QueueMessage message;
+        if (queue_consume_for_owner(store, "timers", 6, 60000, 1, &message) != 1 ||
+            queue_nack_for_owner_delay(store, "timers", 6, message.delivery_tag,
+                                       1, 1, 60000) != 1) _exit(3);
+        queue_message_free(&message);
+        if (queue_consume_for_owner(store, "timers", 6, 60000, 2, &message) != 1)
+            _exit(4);
+        QueueMessageSnapshot snapshot;
+        if (queue_message_snapshot(store, "timers", 6, message.id, 0, 0, &snapshot) != 1 ||
+            snapshot.not_before_ms != 0 || snapshot.visibility_deadline_ms == 0)
+            _exit(5);
+        queue_message_snapshot_free(&snapshot);
+        queue_message_free(&message);
+        QueueMessageSnapshot *messages = NULL;
+        uint32_t count = 0;
+        if (queue_peek(store, "timers", 6, QUEUE_PEEK_DELAYED | QUEUE_PEEK_INFLIGHT,
+                       2, 0, 0, &messages, &count) != 1 || count != 2 ||
+            messages[0].not_before_ms == 0 || messages[0].visibility_deadline_ms != 0 ||
+            messages[1].not_before_ms != 0 || messages[1].visibility_deadline_ms == 0)
+            _exit(6);
+        queue_peek_free(messages, count);
+        if (queue_checkpoint_force(store) != 1) _exit(7);
+        kill(getpid(), SIGKILL);
+        _exit(8);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid || !WIFSIGNALED(status) ||
+        WTERMSIG(status) != SIGKILL) {
+        fprintf(stderr, "checkpoint timer child failed: %d\n", status);
+        return 1;
+    }
+    QueueStore *store = queue_store_open(path);
+    if (!store || queue_depth(store, "timers", 6) != 2) return 1;
+    QueueMessage message;
+    if (queue_consume_for_owner(store, "timers", 6, 60000, 3, &message) != 1 ||
+        message.len != 8 || memcmp(message.data, "inflight", 8) || !message.redelivered ||
+        queue_ack_for_owner(store, "timers", 6, message.delivery_tag, 3) != 1) return 1;
+    queue_message_free(&message);
+    if (queue_consume(store, "timers", 6, 60000, &message) != 0) return 1;
+    QueueMessageSnapshot *messages = NULL;
+    uint32_t count = 0;
+    if (queue_peek(store, "timers", 6, QUEUE_PEEK_DELAYED, 1, 0, 0,
+                   &messages, &count) != 1 || count != 1 ||
+        messages[0].not_before_ms == 0 || messages[0].visibility_deadline_ms != 0)
+        return 1;
+    queue_peek_free(messages, count);
+    queue_store_close(store);
+    return 0;
+}
+
 int main(void) {
     char dir[] = "/tmp/kuttidb-qcrash-XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
@@ -193,6 +309,8 @@ int main(void) {
     snprintf(path, sizeof path, "%s/queues.wal", dir);
     int rc = publish_crash_test(path);
     if (rc == 0) rc = ack_crash_test(path);
+    if (rc == 0) rc = partial_record_crash_test(path);
+    if (rc == 0) rc = checkpoint_timer_crash_test(path);
     unlink(path);
     rmdir(dir);
     if (rc == 0) puts("QUEUE CRASH TESTS PASSED");
