@@ -375,6 +375,43 @@ throughout. KuttiDB was built from commit `0ce9a31` with gcc 15.2 `-O2`
 (`tls=off`, telemetry off). Absolute numbers on a 1-vCPU shared vHost are
 conservative; the comparisons are same-machine, same-day, like-for-like.
 
+### Results at a glance
+
+One small VPS, one CPU, 100-byte messages, every server tuned to a comparable
+durability level. Numbers are thousands of operations per second; **bold** is
+the best in the row; "—" means the product does not target that workload.
+
+| Workload | KuttiDB | Redis | RabbitMQ | NATS JetStream | Kafka |
+|---|---:|---:|---:|---:|---:|
+| Cache set/get, batched¹ | **740k** mixed | 399k set / **798k** get | — | — | — |
+| Durable queue: publish | **207k** | — | 9.8k | 12k–101k | 40k–47k² |
+| Durable queue: consume + ack | 128k | — | 13k | **148k** | 33k² |
+| Event stream: append | **634k** | — | 5.6k³ | 12k–101k | 40k–47k² |
+| Event stream: read back | **584k** | — | — | **148k**⁴ | 33k² (255k raw) |
+| One write at a time (no batching) | **17.8k** | — | 9.8k | 12.2k | — |
+| Server RAM while loaded | **~8 MB** | not recorded | not recorded | not recorded | not recorded |
+
+Footnotes, in plain language:
+
+1. KuttiDB's number is an interleaved put/get/delete mix with durability on
+   (fsync batched every 100 ms). Redis was measured with AOF `everysec`; with
+   fsync on every single write its set rate drops to 36k, with persistence
+   fully off both set and get are ~399k.
+2. Kafka's single-broker setup does not fsync — after a power loss the last
+   messages can be gone — and its producer latency averaged ~1 second per
+   record batch on this 1-vCPU box. It is still the weakest-durability row.
+3. That is RabbitMQ's quorum queue, its strongest-durability mode; its classic
+   durable queue manages 9.6k steady-state and 13.1k consume+ack.
+4. NATS JetStream consume was measured with 4 clients; every other number in
+   its row and all KuttiDB numbers are 1 client. Core NATS without any
+   persistence publishes 1,782k msgs/s — the in-memory ceiling, not a durable
+   option.
+
+The one-line summary: **KuttiDB was fastest in every durable category except
+durable consume+ack, where NATS JetStream was ~15% faster**; Redis keeps the
+plain-cache crown for pure reads; all of this happened on a single shared vCPU
+with the production website running on the same machine.
+
 Methodology per class:
 
 - **Cache/KV**: KuttiDB `src/bench_matrix.py --quick` (256-item batches of
