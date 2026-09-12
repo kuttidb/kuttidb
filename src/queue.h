@@ -457,7 +457,11 @@ enum {
     QUEUE_OPEN_JOB_DISABLED = 2,
     /* A CRC-valid feature record carries an unsupported encoding version:
      * an unsupported format, not media corruption. */
-    QUEUE_OPEN_JOB_FORMAT = 3
+    QUEUE_OPEN_JOB_FORMAT = 3,
+    /* Replay stopped at a byte that is not a record, but a CRC-valid record
+     * exists further on. Truncating would discard committed data, so the
+     * open is refused instead and every byte is preserved for inspection. */
+    QUEUE_OPEN_TRAILING_RECORDS = 4
 };
 
 /* Replay/checkpoint callbacks supplied by the job engine when the feature
