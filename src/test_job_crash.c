@@ -460,6 +460,26 @@ static void test_format_guard(void) {
     close(fd);
     unlink(path);
     run_child(path, NULL, "committed");
+    /* The child exits without closing the store, so on a platform where the
+     * WAL reserves space ahead of its cursor the file is longer than its
+     * records. Recover and close once through the library first: that
+     * returns the reservation, so the record appended below lands where the
+     * next record would actually go. Appending past a reservation gap would
+     * instead exercise a WAL with a hole, which the open refuses with
+     * QUEUE_OPEN_TRAILING_RECORDS — a real behaviour, but not the one this
+     * case is about. */
+    {
+        Rig warm;
+        memset(&warm, 0, sizeof warm);
+        snprintf(warm.path, sizeof warm.path, "%s", path);
+        int warm_err = 0;
+        rig_recover(&warm, 1, &warm_err);
+        if (!warm.store) {
+            fprintf(stderr, "format: normalising recovery failed (%d)\n", warm_err);
+            exit(1);
+        }
+        rig_close(&warm);
+    }
     long long size = 0;
     {
         FILE *f = fopen(path, "rb");

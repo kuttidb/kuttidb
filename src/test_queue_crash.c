@@ -302,6 +302,132 @@ static int checkpoint_timer_crash_test(const char *path) {
     return 0;
 }
 
+
+/* A gap in the WAL must never be resolved by discarding what follows it.
+ * Replay stops at the first byte that is not a record; if that is an
+ * all-zero tail (the shape a space reservation leaves when a process exits
+ * without closing) truncation is right, but if a committed record sits
+ * beyond the gap, truncating would lose it silently. The open is refused
+ * instead, with every byte preserved. */
+static int read_file(const char *path, unsigned char **out, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) { fclose(f); return -1; }
+    *out = malloc((size_t)n ? (size_t)n : 1);
+    if (!*out || (n && fread(*out, 1, (size_t)n, f) != (size_t)n)) {
+        free(*out); fclose(f); return -1;
+    }
+    *len = (size_t)n;
+    fclose(f);
+    return 0;
+}
+
+static int seed_wal(const char *path, const char *queue_name) {
+    QueueStore *s = queue_store_open(path);
+    if (!s) return -1;
+    if (queue_declare(s, queue_name, (uint32_t)strlen(queue_name), 1, 0)) {
+        queue_store_close(s);
+        return -1;
+    }
+    uint64_t id = 0;
+    if (queue_publish(s, queue_name, (uint32_t)strlen(queue_name),
+                      "payload", 7, 0, &id)) {
+        queue_store_close(s);
+        return -1;
+    }
+    queue_store_close(s);   /* clean close: no reservation left behind */
+    return 0;
+}
+
+static int trailing_record_test(const char *dir) {
+    char a[256], b[256], target[256];
+    snprintf(a, sizeof a, "%s/gap-a.wal", dir);
+    snprintf(b, sizeof b, "%s/gap-b.wal", dir);
+    snprintf(target, sizeof target, "%s/gap-target.wal", dir);
+    unsigned char *first = NULL, *second = NULL;
+    size_t first_len = 0, second_len = 0;
+    int rc = 1;
+    if (seed_wal(a, "alpha") || seed_wal(b, "beta") ||
+        read_file(a, &first, &first_len) || read_file(b, &second, &second_len))
+        goto done;
+
+    /* Case 1: records, a zero gap, then more records -> refuse, preserve. */
+    {
+        static const unsigned char zeros[4096] = {0};
+        FILE *f = fopen(target, "wb");
+        if (!f) goto done;
+        fwrite(first, 1, first_len, f);
+        fwrite(zeros, 1, sizeof zeros, f);
+        fwrite(second, 1, second_len, f);
+        fclose(f);
+        size_t expect = first_len + sizeof zeros + second_len;
+        int err = QUEUE_OPEN_OK;
+        QueueStore *s = queue_store_open_ex(target, 0, NULL, &err);
+        if (s) {
+            fprintf(stderr, "trailing: open should have been refused\n");
+            queue_store_close(s);
+            goto done;
+        }
+        if (err != QUEUE_OPEN_TRAILING_RECORDS) {
+            fprintf(stderr, "trailing: wrong error kind %d\n", err);
+            goto done;
+        }
+        unsigned char *after = NULL;
+        size_t after_len = 0;
+        if (read_file(target, &after, &after_len)) goto done;
+        int same = after_len == expect;
+        free(after);
+        if (!same) {
+            fprintf(stderr, "trailing: refused open changed the WAL\n");
+            goto done;
+        }
+    }
+
+    /* Case 2: records then only zeros -> that is a reservation tail, so the
+     * open succeeds, truncates it, and keeps the records. */
+    {
+        static const unsigned char zeros[4096] = {0};
+        FILE *f = fopen(target, "wb");
+        if (!f) goto done;
+        fwrite(first, 1, first_len, f);
+        fwrite(zeros, 1, sizeof zeros, f);
+        fclose(f);
+        int err = QUEUE_OPEN_OK;
+        QueueStore *s = queue_store_open_ex(target, 0, NULL, &err);
+        if (!s) {
+            fprintf(stderr, "reservation tail: open refused (%d)\n", err);
+            goto done;
+        }
+        int ok = queue_depth(s, "alpha", 5) == 1;
+        queue_store_close(s);
+        if (!ok) {
+            fprintf(stderr, "reservation tail: message not recovered\n");
+            goto done;
+        }
+        unsigned char *after = NULL;
+        size_t after_len = 0;
+        if (read_file(target, &after, &after_len)) goto done;
+        int trimmed = after_len == first_len;
+        free(after);
+        if (!trimmed) {
+            fprintf(stderr, "reservation tail: not truncated (%zu vs %zu)\n",
+                    after_len, first_len);
+            goto done;
+        }
+    }
+    rc = 0;
+done:
+    free(first);
+    free(second);
+    unlink(a);
+    unlink(b);
+    unlink(target);
+    return rc;
+}
+
 int main(void) {
     char dir[] = "/tmp/kuttidb-qcrash-XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
@@ -311,6 +437,7 @@ int main(void) {
     if (rc == 0) rc = ack_crash_test(path);
     if (rc == 0) rc = partial_record_crash_test(path);
     if (rc == 0) rc = checkpoint_timer_crash_test(path);
+    if (rc == 0) rc = trailing_record_test(dir);
     unlink(path);
     rmdir(dir);
     if (rc == 0) puts("QUEUE CRASH TESTS PASSED");

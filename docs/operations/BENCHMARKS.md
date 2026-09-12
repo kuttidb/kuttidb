@@ -379,87 +379,103 @@ limitation appears with real multiprocess workloads.
 
 ## Queue and stream WAL write path — 2026-09-13 (Linux VPS, interleaved A/B)
 
-Changes to how queue and stream records reach the disk, measured against the
-revision immediately before them on the reference VPS (Ubuntu 26.04.1,
-AMD EPYC 9354P, one shared vCPU, 3.8 GiB RAM, ext4 on `/dev/sda1`). This
-host's storage latency drifts between sessions, so each comparison alternates
-baseline and candidate trial by trial (medians over eight trials each); the
-ratio is the trustworthy figure, not the absolute rate.
+Two rounds of changes to how records reach the disk. The first round shipped
+the parts with no on-disk consequence; the second shipped the two larger wins
+once each had the mechanism that makes it safe. Measured against the revision
+immediately before each round on the reference VPS (Ubuntu 26.04.1, AMD EPYC
+9354P, one shared vCPU, 3.8 GiB RAM, ext4 on `/dev/sda1`). This host's storage
+latency drifts between sessions, so every comparison alternates baseline and
+candidate trial by trial (medians over eight trials each); the ratio is the
+trustworthy figure, not the absolute rate.
 
-What shipped, in both engines:
+### Round 1 — fewer syscalls per record
 
 1. **One syscall per record instead of two or three.** A record's header, name
    and payload are assembled in a staging buffer and issued as a single
    `pwrite` rather than a `write` per field.
-2. **Slice-by-8 CRC-32.** Same reflected polynomial, bit-identical output —
-   verified against the byte-at-a-time routine over 68,800 length and split
-   combinations — so existing WAL files verify unchanged.
+2. **Slice-by-8 CRC-32**, same reflected polynomial, output verified
+   bit-identical over 68,800 length and split combinations.
 3. **The queue checkpoint stages its writes.** `ckpt_emit` issued up to three
    write syscalls per record while holding the metadata lock and every queue
-   lock. A profile attributed 66% of server CPU during a drain to
-   `ckpt_emit`, because draining a queue makes the WAL large relative to live
-   state and re-triggers the checkpoint. The checkpoint writes to a temp file
-   no reader can observe until the rename, so buffering it carries none of
-   the ordering constraint discussed below.
-
-100,000 × 100-byte messages, batches of 256, one client,
-`src/bench_queue_net.py`, eight interleaved trials per side:
+   lock. A profile attributed 66% of server CPU during a drain to it.
 
 | Measurement | Before | After | Δ |
 |---|---:|---:|---:|
 | Consume+ACK, batches of 256 | 49,996 msgs/s | 66,884 msgs/s | 1.34× |
 | Consume+ACK, server CPU per million | 8.8 s | 4.8 s | 1.8× less |
 | Durable publish, batches of 256 | 107,748 msgs/s | 118,742 msgs/s | 1.10× |
-| Durable publish, server CPU per million | 3.0 s | 2.4 s | 0.79× |
-| Durable publish, one message per call | 926 msgs/s | 957 msgs/s | 1.03× |
+
+### Round 2 — batch coalescing and a WAL space reservation
+
+Both were measured in round 1 and held back, each for a specific correctness
+reason. Both now ship with that reason addressed.
+
+**Batch coalescing — one write per batch instead of one per record.** The
+obstacle was ordering: both engines applied a record to memory as soon as the
+write returned, so deferring the write to the barrier moved write-time errors
+past the mutation, and a failed append could leave a record readable that no
+barrier would ever cover (the stream engine's disk-full test caught exactly
+this). The fix is to restructure the batch paths so nothing is applied to
+memory until every record of the batch is staged and written:
+
+- `queue_publish_batch` validates the whole batch, allocates the IDs, stages
+  all records, writes once, and only then links the messages.
+- `queue_consume_batch` selects its messages into an array during the scan,
+  writes every delivery record in one call, and publishes the in-flight
+  state afterwards — under the queue lock throughout, so no reader observes a
+  message as in flight before its record is in the file.
+- `queue_ack_batch` / `queue_nack_batch` already used a log pass followed by
+  an apply pass; their log pass now stages, and the `sync_log` between the
+  passes performs the single write.
+
+The single-record path is unchanged: it still writes before returning,
+because its caller applies the record immediately afterwards.
+
+**A WAL space reservation, committed with `fdatasync`.** Writes address an
+offset inside a span the file has already been grown to with `fallocate`, so
+the inode is untouched and the commit skips the size-update journal
+transaction. The obstacle was that a process exiting without a clean close
+leaves a zero tail, so "the records run to the end of the file" stops holding
+until the next open — and `job_crash_matrix` showed a record appended past
+such a gap being silently truncated instead of refusing the open. Silently
+discarding a committed record is the wrong failure mode for this format, so
+replay now proves the tail is safe before truncating: it scans from the
+truncation point, truncates if the remainder is all zeros (a reservation) or
+holds nothing that parses, and otherwise refuses the open with
+`QUEUE_OPEN_TRAILING_RECORDS` and every byte preserved. A torn tail still
+truncates as before — matching a CRC-32 by chance is a 2^-32 event — and the
+cost is paid only when a tail exists. `src/test_queue_crash.c` covers both
+outcomes.
+
+Cumulative effect of round 2, 100,000 × 100-byte messages, batches of 256,
+one client, eight interleaved trials per side:
+
+| Measurement | Before | After | Δ |
+|---|---:|---:|---:|
+| Durable publish, server CPU per million | 2.5 s | 0.9 s | **2.9× less** |
+| Consume+ACK, server CPU per million | 5.2 s | 1.4 s | **3.7× less** |
+| Durable publish, one message per call | 781 msgs/s | 1,414 msgs/s | **1.81×** |
+| Single publish p50 / p99 | 949 / 4,683 µs | 476 / 2,893 µs | 0.50× / 0.62× |
+| Consume+ACK, batches of 256 | 53,065 msgs/s | 69,768 msgs/s | 1.31× |
+| Consume+ACK, batch p50 / p99 | 4,094 / 14,218 µs | 2,966 / 11,532 µs | 0.72× / 0.81× |
+| Durable publish, batches of 256 | 110,435 msgs/s | 115,173 msgs/s | 1.04× |
 | WAL bytes written | identical | identical | 1.00 |
-| Idle RSS | unchanged | unchanged | 1.00 |
+| Idle RSS | 2,928 KiB | 2,938 KiB | unchanged |
 
-The acknowledgement contract, the record format and the bytes written per
-message are all unchanged.
+The CPU reductions are much larger than the throughput gains because client
+and server share one vCPU here: work removed from the server is immediately
+consumed by the client process. On a host where the server does not compete
+with its own load generator, that freed CPU is available for throughput.
+Batched publish moves 4% — it is bound by the client and the device on this
+host, not by server CPU.
 
-### Two larger optimisations that were measured, then rejected
+The acknowledgement contract is unchanged throughout: publish, delivery and
+ACK replies return only after a barrier covers their bytes in the file, and
+the bytes written per message are identical before and after.
 
-Both are recorded here with their numbers so the trade-offs are not
-re-litigated from scratch, and so neither is mistaken for an untried idea.
+### Device ceiling for reference
 
-**Staging records across a whole batch** — one `write` per durability round
-instead of one per record — measured **1.49× publish and 1.63× consume+ACK,
-with 4.1× and 6.5× less server CPU**. It is not in the build because of
-ordering, not performance. Both engines apply a record to memory as soon as
-the write call returns and only then wait for the barrier:
-`queue_publish_batch` interleaves `append_record` and `append_message` per
-message, and `stream_append` calls `log_record` before `append_memory`.
-Deferring the write to the barrier moves write-time errors past the mutation,
-so a failed append leaves a record readable that no barrier will ever cover.
-The stream engine's disk-full test caught exactly this: a store that hit
-`RLIMIT_FSIZE` mid-append reported the failure and refused further mutations
-correctly, but `stream_fetch` then returned one more record than had been
-acknowledged. Capturing this safely requires the batch paths to stage every
-record before mutating any of them.
-
-**Reserving WAL space with `fallocate` and committing with `fdatasync`** —
-writing inside a file size the WAL has already been grown to, so the commit
-skips the inode-update journal transaction — measured **1.61× on
-one-message-per-call durable publish** (926 → 1,457 msgs/s, p50 838 → 448 µs)
-and roughly halved p99 across paths. It is not in the build because it
-changes what the file looks like on disk: a process that exits without a
-clean close leaves up to 8 MiB of reserved zeros after the last record, so
-"the records run to the end of the file" stops holding until the next open.
-Replay handles that correctly in every direction tested, including an older
-binary reading a reserved WAL, but `job_crash_matrix` — which appends a
-hand-built record at the file's end to check that an unsupported encoding
-*refuses* the open — then saw its record land after the gap and be silently
-truncated instead. Silently discarding a record that should have refused the
-open is the wrong failure mode for this file format, so the reservation needs
-a companion check (refuse the open when valid records exist past the
-truncation point) before it can ship. `FALLOC_FL_KEEP_SIZE` was measured as
-an alternative that keeps the file size honest and is **not** viable: it
-gives no benefit at all (914–944 commits/s against 1,115 for a plain
-extending write), because every write still updates the inode.
-
-For reference, the device ceiling those numbers come from — writing a
-160-byte record and committing it, 400 times, on this VPS:
+Writing a 160-byte record and committing it, 400 times, on this VPS:
 
 | Method | p50 | p95 | commits/s at p50 |
 |---|---:|---:|---:|
@@ -470,11 +486,20 @@ For reference, the device ceiling those numbers come from — writing a
 | `fallocate(KEEP_SIZE)` span, `fdatasync` | 1,059–1,094 µs | 3,480–3,760 µs | 914–944 |
 | Zero-filled span, `fdatasync` | 215–270 µs | 285–467 µs | 3,701–4,652 |
 
+`FALLOC_FL_KEEP_SIZE` keeps the file length honest and would have avoided the
+tail question entirely, but it is not viable: every write still updates the
+inode, so it gives no benefit at all. Zero-filling is marginally faster than
+a reservation per commit but stalls the writer for the length of the fill.
+The reservation is 8 MiB ahead of the cursor; a clean close returns the
+unused tail, so the WAL on disk is exactly the records it holds. The
+reservation is Linux-only (`fallocate`); other platforms fall back to
+extending writes and keep the round-1 behaviour.
+
 ### Cross-version WAL compatibility
 
-The bytes are interchangeable in both directions, verified with the writer
-killed by `SIGKILL` so the reader must replay a WAL that was never cleanly
-closed:
+Verified with the writer killed by `SIGKILL`, so the reader must replay a WAL
+that was never cleanly closed — including, for the new writer, one carrying a
+reservation tail (8,388,642 bytes of file for 672,714 bytes of records):
 
 | Writer → reader | Messages | Replayed depth | Read back in order | Drained |
 |---|---:|---:|---|---|
@@ -514,17 +539,17 @@ Redis `appendfsync everysec`: both nominally a one-second loss window. (The
 earlier comparison put KuttiDB's 100 ms setting against Redis's one second.)
 
 
-> **Build note.** KuttiDB's rows here were collected with the `fallocate`
-> space reservation enabled, which was subsequently withdrawn (see the
-> rejected optimisations above). On batched workloads like this one the
-> reservation measured within 5% either way — inside this host's run-to-run
-> spread — so these rows stand for the shipped build; on one-message-per-call
-> durable publish, which this table does not measure, the difference is 1.61×.
+> **Build note.** KuttiDB's rows were re-measured on the shipped build (both
+> rounds of the WAL write-path work above). Competitor rows were collected in
+> an earlier session and are unchanged, since their configuration did not
+> change — but on a host with this much storage drift that means the two
+> columns carry independent run-to-run spread. Treat the ordering as the
+> result, not the exact ratios.
 
 | Measurement | KuttiDB | Redis 8.0.5 |
 |---|---:|---:|
-| Write, ops/s | **497,017** | 234,867 |
-| Read, ops/s | **440,997** | 359,362 |
+| Write, ops/s | **502,332** | 234,867 |
+| Read, ops/s | **424,069** | 359,362 |
 | Write, server CPU s per million | **1.1** | 1.6 |
 | Read, server CPU s per million | **0.6** | 0.7 |
 | Write, client CPU s per million | **0.8** | 2.4 |
@@ -561,18 +586,18 @@ Kafka runs `acks=all` with `log.flush.interval.messages=1`; Redis Streams runs
 for each server's whole process tree.
 
 
-> **Build note.** KuttiDB's rows here were collected with the `fallocate`
-> space reservation enabled, which was subsequently withdrawn (see the
-> rejected optimisations above). On batched workloads like this one the
-> reservation measured within 5% either way — inside this host's run-to-run
-> spread — so these rows stand for the shipped build; on one-message-per-call
-> durable publish, which this table does not measure, the difference is 1.61×.
+> **Build note.** KuttiDB's rows were re-measured on the shipped build (both
+> rounds of the WAL write-path work above). Competitor rows were collected in
+> an earlier session and are unchanged, since their configuration did not
+> change — but on a host with this much storage drift that means the two
+> columns carry independent run-to-run spread. Treat the ordering as the
+> result, not the exact ratios.
 
 | Measurement | KuttiDB | Redis Streams | Kafka 4.1.2 |
 |---|---:|---:|---:|
-| Append, records/s | **104,931** | 43,586 | 27,126 |
-| Read+commit, records/s | **173,761** | 87,914 | 12,755 |
-| Append, server CPU s per million | **1.0** | 3.3 | 25.6 |
+| Append, records/s | **117,061** | 43,586 | 27,126 |
+| Read+commit, records/s | **157,686** | 87,914 | 12,755 |
+| Append, server CPU s per million | **0.9** | 3.3 | 25.6 |
 | Read, server CPU s per million | **0.9** | 1.0 | 16.1 |
 | Append, client CPU s per million | **1.0** | 9.1 | 2.3 |
 | Append, disk bytes per record | **140** | 203 | 164 |
@@ -649,32 +674,28 @@ shared vCPU, 3.8 GiB RAM, ext4 on `/dev/sda1`. Client and server share that
 one vCPU over loopback, without TLS or compression, and the host also serves
 a website. This measures that deployment, not isolated server capacity.
 
-**KuttiDB's rows were re-measured** against the build that keeps
-write-before-mutate (see the rejected optimisation above); an earlier draft of
-this table recorded 197,553 publish and 93,224 consume+ACK from the build that
-deferred writes to the barrier, and those figures are withdrawn. Competitor
-rows are unchanged — their configuration did not change — but they were
-collected in a separate session from KuttiDB's, so on a host with this much
-storage drift the KuttiDB column carries the same run-to-run spread as every
-other measurement here: publish medians of 109,343 and 157,385 were both
-observed. Treat the ordering as the result, not the exact ratios.
+**KuttiDB's rows are from the shipped build.** An earlier draft recorded
+197,553 publish and 93,224 consume+ACK from a build that deferred writes past
+the in-memory mutation; that build was withdrawn as unsafe and those figures
+do not stand. Publish medians between 109,343 and 157,385 have been observed
+across sessions on this host, which is the scale of its storage drift.
 
 ### Results
 
-> **Build note.** KuttiDB's rows here were collected with the `fallocate`
-> space reservation enabled, which was subsequently withdrawn (see the
-> rejected optimisations above). On batched workloads like this one the
-> reservation measured within 5% either way — inside this host's run-to-run
-> spread — so these rows stand for the shipped build; on one-message-per-call
-> durable publish, which this table does not measure, the difference is 1.61×.
+> **Build note.** KuttiDB's rows were re-measured on the shipped build (both
+> rounds of the WAL write-path work above). Competitor rows were collected in
+> an earlier session and are unchanged, since their configuration did not
+> change — but on a host with this much storage drift that means the two
+> columns carry independent run-to-run spread. Treat the ordering as the
+> result, not the exact ratios.
 
 
 | Measurement | KuttiDB | Redis | NATS | RabbitMQ | Kafka |
 |---|---:|---:|---:|---:|---:|
-| Publish, msgs/s | **109,343** | 42,536 | 607 | 1,651 | 27,013 |
-| Consume+ACK, msgs/s | **52,601** | 50,917 | 600 | 29,596 | 12,257 |
-| Publish, server CPU s per million | **2.7** | 3.5 | 125.3 | 428.1 | 28.4 |
-| Consume+ACK, server CPU s per million | **4.0** | 4.1 | 183.1 | 18.2 | 22.1 |
+| Publish, msgs/s | **142,346** | 42,536 | 607 | 1,651 | 27,013 |
+| Consume+ACK, msgs/s | **85,409** | 50,917 | 600 | 29,596 | 12,257 |
+| Publish, server CPU s per million | **1.1** | 3.5 | 125.3 | 428.1 | 28.4 |
+| Consume+ACK, server CPU s per million | **1.3** | 4.1 | 183.1 | 18.2 | 22.1 |
 | Publish, client CPU s per million | **0.9** | 9.6 | 26.0 | 170.2 | 2.4 |
 | Publish, disk bytes per message | **149** | 201 | 4,230 | 303 | 164 |
 | Consume+ACK, disk bytes per message | 216 | 240 | 4,199 | **9** | 18 |
@@ -873,12 +894,10 @@ they do not simulate a hypervisor or storage device losing power.
   SIGKILL-recovery cost table for streams (the reopen row above covers clean
   restart only), and consumer-lag behavior under slow consumers are not yet
   recorded.
-- Single-message durable publish trails RabbitMQ on the reference VPS
-  (~950 against ~1,650 msgs/s). Cross-WAL interference was tested and ruled
-  out. The measured fix is the `fallocate` space reservation (1.61×, to
-  ~1,457 msgs/s), which is deferred until it carries a check that refuses an
-  open when valid records exist past the truncation point — see the rejected
-  optimisations above.
+- Single-message durable publish now measures ~1,414 msgs/s against
+  RabbitMQ's ~1,651 on the reference VPS, having been ~950 before the space
+  reservation. The remaining gap has not been attributed; cross-WAL
+  interference was tested and ruled out.
 - The consume path writes a delivery and an acknowledgement record per
   message (216 bytes per 100-byte message against RabbitMQ's 9 on the drain).
   A coalesced batch record for deliveries and acknowledgements is the
@@ -887,15 +906,18 @@ they do not simulate a hypervisor or storage device losing power.
   Clustering, replication, multi-consumer fan-out and power-loss crash
   consistency are not measured, and the systems compared are built for
   guarantees these comparisons do not exercise.
-- Batch coalescing of WAL writes is measured (1.49× publish, 1.63×
-  consume+ACK, 4.1×/6.5× less server CPU) but not shipped: it needs the batch
-  paths restructured to stage every record before mutating any of them, so
-  one flush still precedes every mutation it covers. This is the largest
-  known unrealised queue win.
-- `job_crash_matrix` builds a WAL record by appending at the file's end. Any
-  future change that lets the file extend past its last record (a space
-  reservation, segment preallocation) has to address that test's assumption
-  rather than work around it.
+- The stream engine's batch paths were not restructured for coalescing:
+  `stream_append_batch` already writes one record for a whole batch, so it
+  had nothing to gain, but `stream_commit_batch_if_generation` and the group
+  offset reset still write one record per commit.
+- Batched publish throughput is bound by the client and the device on this
+  one-vCPU host, so the 2.9× reduction in server CPU per message converts to
+  only 4% more throughput here. The headroom has not been measured on a host
+  where the server does not share a core with its load generator.
+- The consume path still writes a delivery and an acknowledgement record per
+  message (208 bytes per 100-byte message against RabbitMQ's 9 on the drain).
+  A coalesced range record for deliveries and acknowledgements would cut
+  that; it is not implemented.
 - Memcached, Valkey and Dragonfly are not in the cache comparison; only
   Redis is. NATS JetStream is not in the stream comparison.
 - The WAL space reservation is Linux-only (`fallocate`). macOS and other
