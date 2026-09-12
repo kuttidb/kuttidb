@@ -49,14 +49,30 @@ typedef struct StreamTopic { struct StreamTopic *next; char *name; uint32_t len,
  * a client-visible acknowledgement never precedes its fsync point. A write
  * or fsync failure sets `failed` permanently and wakes every waiter with an
  * error: durable work fails closed. */
-struct StreamStore { pthread_mutex_t mu; pthread_cond_t sync_cond; StreamTopic *topics; int fd, failed, syncer; char *path; uint64_t wal_bytes, live_bytes, wal_seq, synced_seq, sync_target; };
+struct StreamStore { pthread_mutex_t mu; pthread_cond_t sync_cond; StreamTopic *topics; int fd, failed, syncer; char *path; uint64_t wal_bytes, live_bytes, wal_seq, synced_seq, sync_target;
+  /* WAL staging and space reservation, all guarded by `mu` (see the queue
+   * engine, which made the same change first). Records are assembled in
+   * `wal_buf` and issued as one `pwrite` instead of a write per field;
+   * `wal_off` is an explicit append cursor rather than O_APPEND. */
+  unsigned char *wal_buf; size_t wal_buf_len, wal_buf_cap; off_t wal_off; };
+
+#define STREAM_WAL_BUF_CAP (256u * 1024u)
 
 #define STREAM_COMPACT_FLOOR (1ull << 20)
 
-static uint32_t crc_table[256];
+/* Slice-by-8 over the same reflected polynomial: eight input bytes fold per
+ * step and the value is bit-identical to the byte-at-a-time routine, so
+ * existing stream WAL files verify unchanged. */
+static uint32_t crc_table[8][256];
 static pthread_once_t crc_once = PTHREAD_ONCE_INIT;
-static void crc_init(void) { for (uint32_t i=0;i<256;i++) { uint32_t x=i; for(int j=0;j<8;j++) x=x&1?(x>>1)^0xedb88320u:x>>1; crc_table[i]=x; } }
-static uint32_t crc32(const void *p, size_t n) { pthread_once(&crc_once, crc_init); uint32_t c=~0u; const unsigned char *s=p; while(n--) c=crc_table[(c^*s++)&255]^(c>>8); return ~c; }
+static void crc_init(void) { for (uint32_t i=0;i<256;i++) { uint32_t x=i; for(int j=0;j<8;j++) x=x&1?(x>>1)^0xedb88320u:x>>1; crc_table[0][i]=x; }
+  for (uint32_t i=0;i<256;i++) for (int k=1;k<8;k++) crc_table[k][i]=crc_table[0][crc_table[k-1][i]&0xff]^(crc_table[k-1][i]>>8); }
+static uint32_t crc32(const void *p, size_t n) { pthread_once(&crc_once, crc_init); uint32_t c=~0u; const unsigned char *s=p;
+  while (n>=8) { uint32_t lo=(uint32_t)s[0]|((uint32_t)s[1]<<8)|((uint32_t)s[2]<<16)|((uint32_t)s[3]<<24); lo^=c;
+    c=crc_table[7][lo&0xff]^crc_table[6][(lo>>8)&0xff]^crc_table[5][(lo>>16)&0xff]^crc_table[4][(lo>>24)&0xff]
+      ^crc_table[3][s[4]]^crc_table[2][s[5]]^crc_table[1][s[6]]^crc_table[0][s[7]]; s+=8; n-=8; }
+  while (n--) { c=crc_table[0][(c^*s++)&255]^(c>>8); }
+  return ~c; }
 static void u16(unsigned char *p,uint16_t x){p[0]=x;p[1]=x>>8;} static uint16_t g16(const unsigned char*p){return (uint16_t)p[0]|((uint16_t)p[1]<<8);} static void u32(unsigned char*p,uint32_t x){for(int i=0;i<4;i++)p[i]=(unsigned char)(x>>(8*i));} static uint32_t g32(const unsigned char*p){uint32_t x=0;for(int i=3;i>=0;i--)x=(x<<8)|p[i];return x;} static void u64(unsigned char*p,uint64_t x){for(int i=0;i<8;i++)p[i]=(unsigned char)(x>>(8*i));} static uint64_t g64(const unsigned char*p){uint64_t x=0;for(int i=7;i>=0;i--)x=(x<<8)|p[i];return x;}
 static uint64_t now_ms(void){struct timespec t;clock_gettime(CLOCK_REALTIME,&t);return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;}
 static uint64_t mono_ms(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;}
@@ -66,15 +82,45 @@ static uint64_t mono_ms(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t
 static void topic_id_generate(unsigned char out[STREAM_ID_LEN]){unsigned char raw[STREAM_ID_LEN];size_t used=0;int fd=open("/dev/urandom",O_RDONLY|O_CLOEXEC);while(fd>=0&&used<sizeof raw){ssize_t r=read(fd,raw+used,sizeof raw-used);if(r>0)used+=(size_t)r;else if(r<0&&errno==EINTR)continue;else break;}if(fd>=0)close(fd);if(used!=sizeof raw){uint64_t seed=(uint64_t)time(NULL)^((uint64_t)getpid()<<32)^(uintptr_t)out;for(size_t i=0;i<sizeof raw;i++){seed=seed*6364136223846793005ULL+1;raw[i]=(unsigned char)(seed>>32);}}memcpy(out,raw,STREAM_ID_LEN);}
 static int write_all(int fd,const void*p,size_t n){const unsigned char*b=p;while(n){ssize_t r=write(fd,b,n);if(r<0&&errno==EINTR)continue;if(r<=0)return-1;b+=r;n-=(size_t)r;}return 0;}
 static int write_record_fd(int fd,unsigned char op,const void*body,uint32_t n,int sync){unsigned char h[9];h[0]=op;u32(h+1,n);uint32_t c=crc32(&op,1)^crc32(body,n);u32(h+5,c);return write_all(fd,h,sizeof h)||write_all(fd,body,n)||(sync&&fsync(fd))?-1:0;}
+static int pwrite_all(int fd,const void*p,size_t n,off_t off){const unsigned char*b=p;while(n){ssize_t r=pwrite(fd,b,n,off);if(r<0&&errno==EINTR)continue;if(r<=0)return-1;b+=r;off+=r;n-=(size_t)r;}return 0;}
+/* Hand every staged byte to the kernel. Caller holds `mu`. */
+static int wal_flush_locked(StreamStore*s){
+  if(!s->wal_buf_len)return 0;
+  if(pwrite_all(s->fd,s->wal_buf,s->wal_buf_len,s->wal_off))return-1;
+  s->wal_off+=(off_t)s->wal_buf_len;s->wal_buf_len=0;return 0;}
+static int wal_sync_run(StreamStore*s){return fsync(s->fd);}
+/* Stage one record. A record too large for the buffer is written directly
+ * after flushing, so byte order still equals record order. Caller holds `mu`. */
+static int wal_stage_locked(StreamStore*s,unsigned char op,const void*body,uint32_t n){
+  unsigned char h[9];h[0]=op;u32(h+1,n);u32(h+5,crc32(&op,1)^crc32(body,n));
+  size_t total=sizeof h+n;
+  if(!s->wal_buf&&total<=STREAM_WAL_BUF_CAP){s->wal_buf=malloc(STREAM_WAL_BUF_CAP);if(s->wal_buf)s->wal_buf_cap=STREAM_WAL_BUF_CAP;}
+  if(!s->wal_buf||total>s->wal_buf_cap){
+    if(wal_flush_locked(s))return-1;
+    if(pwrite_all(s->fd,h,sizeof h,s->wal_off)||(n&&pwrite_all(s->fd,body,n,s->wal_off+(off_t)sizeof h)))return-1;
+    s->wal_off+=(off_t)total;return 0;}
+  if(s->wal_buf_len+total>s->wal_buf_cap&&wal_flush_locked(s))return-1;
+  memcpy(s->wal_buf+s->wal_buf_len,h,sizeof h);
+  if(n)memcpy(s->wal_buf+s->wal_buf_len+sizeof h,body,n);
+  s->wal_buf_len+=total;return 0;}
 /* Write one WAL record WITHOUT syncing; durability is provided by the group
  * fsync in stream_wait_durable_locked. Each record advances wal_seq. */
-static int log_record(StreamStore*s,unsigned char op,const void*body,uint32_t n){if(s->fd<0)return 0;if(write_record_fd(s->fd,op,body,n,0)){s->failed=1;pthread_cond_broadcast(&s->sync_cond);return-1;}s->wal_bytes+=9u+n;s->wal_seq++;return 0;}
+/* Stage and hand to the kernel before returning. Callers apply the record to
+ * memory as soon as this succeeds, so a write error has to be visible now:
+ * deferring it past the mutation would leave a record readable that no
+ * barrier will ever cover. The staging buffer still turns the header and the
+ * body into one syscall instead of two. */
+static int log_record(StreamStore*s,unsigned char op,const void*body,uint32_t n){if(s->fd<0)return 0;if(wal_stage_locked(s,op,body,n)||wal_flush_locked(s)){s->failed=1;pthread_cond_broadcast(&s->sync_cond);return-1;}s->wal_bytes+=9u+n;s->wal_seq++;return 0;}
 /* Block until `target` is durable (an fsync covers it) or the store fails.
  * Called with the lock held; the lock is released while fsync runs so
  * writers and readers proceed concurrently. The thread that finds no sync in
  * flight becomes the syncer and covers the current high-water mark, so under
  * concurrency one fsync completes many operations. */
-static int stream_wait_durable_locked(StreamStore*s,uint64_t target){for(;;){if(s->failed)return-1;if(s->synced_seq>=target)return 0;if(s->syncer){pthread_cond_wait(&s->sync_cond,&s->mu);continue;}s->syncer=1;s->sync_target=s->wal_seq;pthread_mutex_unlock(&s->mu);int rc=fsync(s->fd);pthread_mutex_lock(&s->mu);s->syncer=0;if(rc){s->failed=1;pthread_cond_broadcast(&s->sync_cond);return-1;}if(s->sync_target>s->synced_seq)s->synced_seq=s->sync_target;pthread_cond_broadcast(&s->sync_cond);}}
+static int stream_wait_durable_locked(StreamStore*s,uint64_t target){for(;;){if(s->failed)return-1;if(s->synced_seq>=target)return 0;if(s->syncer){pthread_cond_wait(&s->sync_cond,&s->mu);continue;}s->syncer=1;s->sync_target=s->wal_seq;
+  /* The staged bytes for sync_target reach the file before the lock is
+   * released; anything staged during the barrier belongs to a later round. */
+  if(wal_flush_locked(s)){s->syncer=0;s->failed=1;pthread_cond_broadcast(&s->sync_cond);return-1;}
+  pthread_mutex_unlock(&s->mu);int rc=wal_sync_run(s);pthread_mutex_lock(&s->mu);s->syncer=0;if(rc){s->failed=1;pthread_cond_broadcast(&s->sync_cond);return-1;}if(s->sync_target>s->synced_seq)s->synced_seq=s->sync_target;pthread_cond_broadcast(&s->sync_cond);}}
 static int fsync_parent(const char *path){char b[PATH_MAX];size_t n=strlen(path);if(n>=sizeof b)return-1;memcpy(b,path,n+1);char *slash=strrchr(b,'/');const char *dir=".";if(slash){if(slash==b)slash[1]=0;else *slash=0;dir=b;}int fd=open(dir,O_RDONLY|O_DIRECTORY);if(fd<0)return-1;int rc=fsync(fd);if(close(fd))rc=-1;return rc;}
 static StreamTopic *topic(StreamStore*s,const char*n,uint32_t l){for(StreamTopic*t=s->topics;t;t=t->next)if(t->len==l&&!memcmp(t->name,n,l))return t;return NULL;}
 static void free_topic(StreamTopic*t){while(t){StreamTopic*n=t->next;for(uint32_t i=0;i<t->partitions;i++){StreamRecord*r=t->parts[i].head;while(r){StreamRecord*x=r->next;free(r);r=x;}}free(t->parts);while(t->groups){StreamGroup*g=t->groups;t->groups=g->next;while(g->members){StreamMember*m=g->members;g->members=m->next;free(m);}free(g->name);free(g->offsets);free(g);}free(t->name);free(t);t=n;}}
@@ -122,7 +168,11 @@ if(!rc&&fsync(fd))rc=-1;
 if(close(fd))rc=-1;
 if(!rc&&rename(tmp,s->path))rc=-1;
 if(!rc&&fsync_parent(s->path))rc=-1;
-if(!rc){close(s->fd);s->fd=open(s->path,O_RDWR|O_APPEND|O_NOFOLLOW);if(s->fd<0)rc=-1;else s->wal_bytes=bytes;}
+if(!rc){/* Every mutation holds `mu`, so nothing can have staged a record since
+   * the caller entered; drop the buffer rather than let a stray byte land
+   * out of order in the freshly published file. */
+  s->wal_buf_len=0;close(s->fd);s->fd=open(s->path,O_RDWR|O_NOFOLLOW);off_t end=s->fd<0?-1:lseek(s->fd,0,SEEK_END);
+  if(s->fd<0||end<0)rc=-1;else{s->wal_bytes=bytes;s->wal_off=end;}}
 if(rc)unlink(tmp);
 if(!rc){/* The synced, atomically published checkpoint contains every
    * in-memory record, so all outstanding sequence numbers are durable. */
@@ -135,12 +185,15 @@ static int replay(StreamStore*s,unsigned char op,const unsigned char*b,uint32_t 
  * WAL was still valid, so the stale temp is safe to delete at startup. The
  * store is single-owner, so no concurrent compaction can be in progress. */
 static void remove_stale_temps(const char*path){const char*base=strrchr(path,'/');size_t bl;if(base){base++;bl=strlen(base);}else{base=path;bl=strlen(path);}if(!bl||bl>PATH_MAX-16)return;char prefix[PATH_MAX];memcpy(prefix,base,bl);memcpy(prefix+bl,".compact.",10);size_t dl=(size_t)(base-path);char dir[PATH_MAX];if(dl==0)dir[0]=0;else if(dl==1){dir[0]='/';dir[1]=0;}else{if(dl-1>sizeof dir-1)return;memcpy(dir,path,dl-1);dir[dl-1]=0;}DIR*x=opendir(dl?dir:".");if(!x)return;struct dirent*e;while((e=readdir(x)))if(!strncmp(e->d_name,prefix,bl+9)){char full[PATH_MAX];int n=snprintf(full,sizeof full,"%s%s%s",dl?dir:"",(dl&&dir[0]&&dir[strlen(dir)-1]!='/')?"/":"",e->d_name);if(n>0&&n<(int)sizeof full)unlink(full);}closedir(x);}
-StreamStore *stream_store_open(const char*path){StreamStore*s=calloc(1,sizeof*s);if(!s)return NULL;pthread_mutex_init(&s->mu,NULL);pthread_cond_init(&s->sync_cond,NULL);s->fd=-1;if(path){remove_stale_temps(path);s->path=strdup(path);if(!s->path){stream_store_close(s);return NULL;}s->fd=open(path,O_RDWR|O_CREAT|O_APPEND|O_NOFOLLOW,0600);if(s->fd<0||fchmod(s->fd,0600)){stream_store_close(s);return NULL;}struct stat st;if(fstat(s->fd,&st)||!S_ISREG(st.st_mode)){stream_store_close(s);return NULL;}unsigned char h[9];lseek(s->fd,0,SEEK_SET);off_t good=0;for(;;){ssize_t r=read(s->fd,h,9);if(r==0)break;if(r!=9)break;uint32_t n=g32(h+1);if(n>(64u<<20))break;unsigned char*b=malloc(n?n:1);if(!b)break;size_t got=0;while(got<n){r=read(s->fd,b+got,n-got);if(r<=0)break;got+=(size_t)r;}uint32_t c=crc32(h,1)^crc32(b,n);int ok=got==n&&c==g32(h+5)&&replay(s,h[0],b,n)==0;free(b);if(!ok)break;good+=9+n;}if(ftruncate(s->fd,good)){stream_store_close(s);return NULL;}s->wal_bytes=(uint64_t)good;lseek(s->fd,0,SEEK_END);{/* Legacy declarations carry no identity record: assign one and durably
+StreamStore *stream_store_open(const char*path){StreamStore*s=calloc(1,sizeof*s);if(!s)return NULL;pthread_mutex_init(&s->mu,NULL);pthread_cond_init(&s->sync_cond,NULL);s->fd=-1;if(path){remove_stale_temps(path);s->path=strdup(path);if(!s->path){stream_store_close(s);return NULL;}/* No O_APPEND: writes address wal_off so they can land inside a reservation. */
+    s->fd=open(path,O_RDWR|O_CREAT|O_NOFOLLOW,0600);if(s->fd<0||fchmod(s->fd,0600)){stream_store_close(s);return NULL;}struct stat st;if(fstat(s->fd,&st)||!S_ISREG(st.st_mode)){stream_store_close(s);return NULL;}unsigned char h[9];lseek(s->fd,0,SEEK_SET);off_t good=0;for(;;){ssize_t r=read(s->fd,h,9);if(r==0)break;if(r!=9)break;uint32_t n=g32(h+1);if(n>(64u<<20))break;unsigned char*b=malloc(n?n:1);if(!b)break;size_t got=0;while(got<n){r=read(s->fd,b+got,n-got);if(r<=0)break;got+=(size_t)r;}uint32_t c=crc32(h,1)^crc32(b,n);int ok=got==n&&c==g32(h+5)&&replay(s,h[0],b,n)==0;free(b);if(!ok)break;good+=9+n;}if(ftruncate(s->fd,good)){stream_store_close(s);return NULL;}s->wal_bytes=(uint64_t)good;s->wal_off=good;lseek(s->fd,0,SEEK_END);{/* Legacy declarations carry no identity record: assign one and durably
      * persist it before the store is exposed, so a replay of this WAL never
      * regenerates it. An old binary that encounters S_IDENTITY truncates at
      * the break point (see PROTOCOL.md) — in-place downgrade is unsafe. */
-      int upgraded=0;for(StreamTopic*t=s->topics;t;t=t->next)if(!t->id_persisted){unsigned char*ident=malloc(18u+t->len);if(!ident){stream_store_close(s);return NULL;}u16(ident,t->len);memcpy(ident+2,t->name,t->len);memcpy(ident+2+t->len,t->id,STREAM_ID_LEN);int wr=log_record(s,S_IDENTITY,ident,18u+t->len);free(ident);if(wr){stream_store_close(s);return NULL;}t->id_persisted=1;s->live_bytes+=identity_live(t);upgraded=1;}if(upgraded){if(fsync(s->fd)){stream_store_close(s);return NULL;}s->synced_seq=s->wal_seq;struct stat st;if(fstat(s->fd,&st)){stream_store_close(s);return NULL;}s->wal_bytes=(uint64_t)st.st_size;}}for(StreamTopic*t=s->topics;t;t=t->next)if(enforce(s,t,0)){stream_store_close(s);return NULL;}}return s;}
-void stream_store_close(StreamStore*s){if(!s)return;pthread_mutex_lock(&s->mu);s->failed=1;pthread_cond_broadcast(&s->sync_cond);pthread_mutex_unlock(&s->mu);if(s->fd>=0)close(s->fd);free(s->path);free_topic(s->topics);pthread_mutex_destroy(&s->mu);pthread_cond_destroy(&s->sync_cond);free(s);}
+      int upgraded=0;for(StreamTopic*t=s->topics;t;t=t->next)if(!t->id_persisted){unsigned char*ident=malloc(18u+t->len);if(!ident){stream_store_close(s);return NULL;}u16(ident,t->len);memcpy(ident+2,t->name,t->len);memcpy(ident+2+t->len,t->id,STREAM_ID_LEN);int wr=log_record(s,S_IDENTITY,ident,18u+t->len);free(ident);if(wr){stream_store_close(s);return NULL;}t->id_persisted=1;s->live_bytes+=identity_live(t);upgraded=1;}if(upgraded){if(wal_flush_locked(s)||fsync(s->fd)){stream_store_close(s);return NULL;}s->synced_seq=s->wal_seq;s->wal_bytes=(uint64_t)s->wal_off;}}for(StreamTopic*t=s->topics;t;t=t->next)if(enforce(s,t,0)){stream_store_close(s);return NULL;}}return s;}
+void stream_store_close(StreamStore*s){if(!s)return;pthread_mutex_lock(&s->mu);s->failed=1;pthread_cond_broadcast(&s->sync_cond);pthread_mutex_unlock(&s->mu);
+  if(s->fd>=0)close(s->fd);
+  free(s->wal_buf);free(s->path);free_topic(s->topics);pthread_mutex_destroy(&s->mu);pthread_cond_destroy(&s->sync_cond);free(s);}
 /* A new declaration assigns and durably persists the topic identity before
  * the response, so replay never generates a different one. */
 int stream_declare(StreamStore*s,const char*n,uint32_t l,uint32_t p,uint64_t maxb,uint64_t age){if(!s)return-1;pthread_mutex_lock(&s->mu);if(s->failed||s->fd<0||compact_maybe_locked(s)){pthread_mutex_unlock(&s->mu);return-1;}int exists=topic(s,n,l)!=NULL;int rc=add_topic(s,n,l,p,maxb,age);if(rc){pthread_mutex_unlock(&s->mu);return rc;}if(!exists){StreamTopic*t=topic(s,n,l);unsigned char*b=malloc(22+l);unsigned char*ident=malloc(18u+l);if(!b||!ident){free(b);free(ident);pthread_mutex_unlock(&s->mu);return-1;}u16(b,l);memcpy(b+2,n,l);u32(b+2+l,p);u64(b+6+l,maxb);u64(b+14+l,age);int wr=log_record(s,S_DECLARE,b,22+l);free(b);if(!wr){u16(ident,l);memcpy(ident+2,n,l);memcpy(ident+2+l,t->id,STREAM_ID_LEN);wr=log_record(s,S_IDENTITY,ident,18u+l);}free(ident);if(wr){pthread_mutex_unlock(&s->mu);return-1;}t->id_persisted=1;s->live_bytes+=identity_live(t);rc=stream_wait_durable_locked(s,s->wal_seq);if(rc){pthread_mutex_unlock(&s->mu);return rc;}}pthread_mutex_unlock(&s->mu);return 0;}
