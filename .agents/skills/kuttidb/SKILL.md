@@ -609,6 +609,23 @@ make bench-quick   # performance gates (p50/p95/p99 batch latency)
 pnpm lint && pnpm test   # required when apps/ or packages/ change
 ```
 
+Verified queue benchmark (one client, exact payload/message-ID/ACK checks):
+
+```sh
+python3 src/bench_queue_net.py 17411 200000 \
+  --data-dir /absolute/path/on/ssd --threads 1 --batch 256 \
+  --repeats 5 --single-count 0 --jsonl /absolute/path/to/new-results.jsonl
+```
+
+Use `--binary /absolute/path/to/kuttidb` to compare separate builds with the
+same harness. Linux tmpfs/ramfs data directories are refused. Every result
+records binary/harness hashes, batch latency and available CPU/RSS counters;
+failed runs exit nonzero, record failure and retain their logs/WALs. Durable
+queue publish, delivery and ACK replies remain fsync-covered regardless of
+the cache's periodic setting. See `docs/operations/BENCHMARKS.md` for the
+comparison audit; do not rank different persistence modes or workloads as
+equivalent.
+
 Go client gates (from `clients/go`; embedding needs the built
 `libkuttidb_embed` and a C toolchain):
 
