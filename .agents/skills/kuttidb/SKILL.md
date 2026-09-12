@@ -140,7 +140,11 @@ Official release tarballs come in two variants per platform: the plain
 compiled in), and `kuttidb-<version>-telemetry-<os>-<arch>.tar.gz` is
 telemetry-capable **with reporting on by default** (build flag
 `KUTTIDB_TELEMETRY_DEFAULT_ON`; `make TELEMETRY=1 TELEMETRY_DEFAULT=1`
-reproduces it). The `install.sh` community opt-in question selects the
+reproduces it). Both variants ship `kuttidb-cli` as a self-contained
+PyInstaller onefile binary (no `python3` at runtime; built per platform by
+`make kuttidb-cli-bin` — pinned Python 3.12 + `pyinstaller==6.22.2` in CI —
+with a live round-trip gate; the repo-root script stays the dev client).
+The `install.sh` community opt-in question selects the
 tarball; the opt-in build also writes `~/.config/kuttidb/telemetry.env`
 (`KUTTIDB_TELEMETRY=on`, private state dir) for shells and older binaries.
 Standalone servers resolve a default state dir under

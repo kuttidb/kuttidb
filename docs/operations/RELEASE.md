@@ -86,7 +86,8 @@ There is no time-based cadence yet; releases follow project milestones.
    including crash-recovery) on the telemetry-free build, the telemetry
    configuration test on the telemetry build → verification that OpenSSL is
    really linked → `--features` gate (`telemetry=off` / `telemetry=v1` +
-   `telemetry-default=on`) → two tarballs + SHA-256 each.
+   `telemetry-default=on`) → a standalone `kuttidb-cli` binary with a live
+   round-trip gate → two tarballs + SHA-256 each.
 
 4. **Release job publishes.** When all builds pass, it aggregates
    `SHASUMS256.txt` (eight tarballs) and creates the GitHub Release with the
@@ -132,7 +133,7 @@ Both variants contain:
 | `kuttidb` | Server binary (TLS via OpenSSL linked in) |
 | `kuttidb-bench` | Benchmark client |
 | `libkuttidb_embed.so` / `.dylib` | Embedded library for SDK managed mode |
-| `kuttidb-cli` | Python CLI client (needs `python3` at runtime) |
+| `kuttidb-cli` | Standalone CLI binary (self-contained; no `python3` needed at runtime) |
 | `libkuttidb_client.so` / `.dylib` | Public C companion client for atomic job completion |
 | `kuttidb_client.h` | Public C header for the companion (ownership, timeouts, typed errors) |
 | `README.md`, `LICENSE` | Pointers and license terms |
@@ -142,6 +143,27 @@ on `PATH`; the C companion installs as
 `libkuttidb_client.so`/`.dylib` + `kuttidb_client.h` (see
 [CLIENT_PUBLISHING.md](CLIENT_PUBLISHING.md)). See
 [GETTING_STARTED.md](../guides/GETTING_STARTED.md).
+
+### The `kuttidb-cli` release binary
+
+The `kuttidb-cli` shipped in release tarballs is a standalone PyInstaller
+onefile executable compiled from the repo-root `kuttidb-cli` script, so it
+runs without `python3` on the user's machine. Per platform job:
+
+- Builds with the pinned recipe `make kuttidb-cli-bin`
+  (Python 3.12 via `actions/setup-python`, `pyinstaller==6.22.2`) — the
+  bundled interpreter sets the binary's floor: glibc 2.35 on Linux, macOS
+  10.9+ (x86_64) / 11.0+ (arm64), both inside the documented release floors.
+- Gate: the binary must pass a live round trip against the freshly built
+  `build-release/kuttidb` (`--help`, `put`/`get`, `health`) before packaging.
+- Both tarball variants ship the same telemetry-free binary; only the
+  `kuttidb` server differs between variants.
+- The repo-root `kuttidb-cli` script remains the development client (needs
+  `python3`); the binary is a build artifact under `dist-cli/` (gitignored).
+- Onefile binaries self-extract on first start (~a few hundred ms) and, being
+  packed executables, may trigger antivirus false positives — point users at
+  the release `SHASUMS256.txt`. macOS binaries are unsigned like the server
+  (see Operational notes).
 
 ## Hotfixes
 

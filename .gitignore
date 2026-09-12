@@ -23,6 +23,7 @@
 /telemetry_config_test
 /queue_tsan_test
 /build/
+/dist-cli/
 clients/rust/target/
 clients/java/target/
 clients/java/*.class

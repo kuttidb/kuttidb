@@ -149,6 +149,18 @@ job_client_cpp_test: src/test_job_client_cpp.cpp src/kuttidb_client.c src/kuttid
 kuttidb-bench: src/kuttidb_bench.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+# Standalone kuttidb-cli executable: the same script compiled into a
+# self-contained PyInstaller onefile binary that needs no python3 at runtime.
+# Release CI builds this per platform and ships it in the release tarballs;
+# the repo-root kuttidb-cli script remains the development client. Requires
+# `python3 -m pip install pyinstaller` (the workflow pins the exact version).
+kuttidb-cli-bin:
+	@python3 -c "import PyInstaller" 2>/dev/null || { \
+		echo "kuttidb-cli-bin needs PyInstaller: python3 -m pip install pyinstaller"; exit 1; }
+	python3 -m PyInstaller --onefile --clean --noconfirm \
+		--distpath dist-cli --workpath build/pyinstaller \
+		--specpath build/pyinstaller --name kuttidb-cli kuttidb-cli
+
 src/%.o: src/%.c src/kuttidb.h src/kuttidb_int.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -162,9 +174,11 @@ src/managed_lifecycle.o: src/managed_lifecycle.c src/managed_lifecycle.h
 src/managed_launcher.o: src/managed_launcher.c src/managed_launcher.h src/instance_lock.h
 
 clean:
+	rm -rf dist-cli
 	rm -f libkuttidb_client.dylib libkuttidb_client.so job_client_test job_client_cpp_test
 	rm -f kuttidb kuttidb_sanitize kuttidb-bench core_test core_test_sanitize platform_test queue_test queue_failure_test queue_crash_test queue_concurrency_test exchange_test atomic_test job_state_test job_completion_test job_crash_test job_crash_test_jobfailpoints stream_test stream_test_sanitize fuzz_test fuzz_test_sanitize embed_aslr_test \
-		libkuttidb_embed.dylib libkuttidb_embed.so managed_lifecycle_test managed_lock_test telemetry_config_test src/*.o clients/java/target
+		libkuttidb_embed.dylib libkuttidb_embed.so managed_lifecycle_test managed_lock_test telemetry_config_test src/*.o
+	rm -rf clients/java/target
 
 install: all
 	install -m 0755 kuttidb /usr/local/bin/kuttidb
@@ -338,7 +352,7 @@ sanitize-server: src/server.c src/admin_http.c src/admin_json.c src/kuttidb.c sr
 	@ASAN_OPTIONS=detect_leaks=0 KUTTIDB_SERVER=./kuttidb_sanitize \
 		python3 src/test_management_api.py
 
-.PHONY: all clean test managed-sdk-test bench bench-matrix bench-quick bench-single bench-exchange bench-stream bench-queue sanitize sanitize-stream sanitize-fuzz sanitize-tsan-queue sanitize-tsan-server sanitize-server
+.PHONY: all clean test managed-sdk-test kuttidb-cli-bin bench bench-matrix bench-quick bench-single bench-exchange bench-stream bench-queue sanitize sanitize-stream sanitize-fuzz sanitize-tsan-queue sanitize-tsan-server sanitize-server
 
 src/test_job_state.o: src/job_int.h
 src/test_job_completion.o: src/job_int.h

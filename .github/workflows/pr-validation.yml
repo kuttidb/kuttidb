@@ -87,6 +87,35 @@ jobs:
           printf '%s\n' "$FEAT" | grep -qx 'telemetry=v1'
           printf '%s\n' "$FEAT" | grep -qx 'telemetry-default=on'
 
+  cli:
+    name: kuttidb-cli standalone binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the standalone CLI binary
+        # The release workflow ships this binary in every tarball; keep the
+        # recipe green on every push instead of first failing at tag time.
+        run: |
+          set -e
+          python3 -m pip install --disable-pip-version-check pyinstaller==6.22.2
+          make kuttidb-cli-bin
+      - name: Smoke test the binary against a fresh server
+        run: |
+          set -e
+          make -j4 kuttidb
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          ./kuttidb 7417 "$tmp/k.wal" 2>/dev/null & pid=$!
+          sleep 1
+          ./dist-cli/kuttidb-cli --help >/dev/null
+          ./dist-cli/kuttidb-cli -p 7417 put pr-smoke ok
+          [ "$(./dist-cli/kuttidb-cli -p 7417 get pr-smoke)" = "ok" ]
+          ./dist-cli/kuttidb-cli -p 7417 health
+          kill "$pid"; wait "$pid" || true
+
   go:
     name: Go client (incl. job completion)
     runs-on: ubuntu-latest

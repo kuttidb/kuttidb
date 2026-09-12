@@ -375,9 +375,11 @@ def _uuid_bytes(text):
 def _manifest_rows(c):
     status, value = _job_call(c, OP_QUEUE_MANIFEST, b"", b"")
     if status == ST_ERR:
-        raise CLIError("manifest failed")
+        # Surface the typed error (e.g. unsupported_feature on a server
+        # without --job-completion) instead of a bare failure message.
+        return None, _job_error_body(value) if len(value) >= 2 else (2, "manifest failed")
     if status != ST_OK:
-        raise CLIError("manifest failed")
+        return None, (2, "manifest failed")
     (n,) = struct.unpack("<H", value[:2])
     at, rows = 2, []
     for _ in range(n):
@@ -390,12 +392,18 @@ def _manifest_rows(c):
                      "incarnation": str(inc), "depth": str(depth),
                      "inflight": str(inflight), "max_depth": str(maxd),
                      "revision": str(rev)})
-    return rows
+    return rows, None
 
 
 def cmd_manifest(c):
-    for row in _manifest_rows(c):
+    rows, error = _manifest_rows(c)
+    if error is not None:
+        code, text = error
+        print(f"kuttidb-cli: {text}", file=sys.stderr)
+        return code
+    for row in rows:
         _json_out(row)
+    return 0
 
 
 def cmd_consumer_register(c, rest):
@@ -877,7 +885,8 @@ def main(argv):
         elif cmd == "groups":
             cmd_groups(c)
         elif cmd == "manifest":
-            cmd_manifest(c)
+            rc = cmd_manifest(c)
+            return rc
         elif cmd == "consumer-register":
             rc = cmd_consumer_register(c, rest)
             return rc

@@ -154,17 +154,46 @@ jobs:
             || { echo "telemetry build must default to reporting on"; exit 1; }
           echo "telemetry-free reports telemetry=off; telemetry build reports telemetry=v1 and telemetry-default=on"
 
+      - name: Build the standalone kuttidb-cli binary
+        # setup-python pins the interpreter PyInstaller bundles, which sets
+        # the binary's runtime floor (Linux: the runner's glibc 2.35; macOS:
+        # 10.9+ x86_64 / 11.0+ arm64) — inside the documented release floors.
+        # The pinned pyinstaller version keeps the recipe reproducible.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Smoke-test the kuttidb-cli binary
+        run: |
+          set -e
+          python3 -m pip install --disable-pip-version-check pyinstaller==6.22.2
+          make kuttidb-cli-bin
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          ./build-release/kuttidb 7413 "$tmp/k.wal" 2>/dev/null & pid=$!
+          sleep 1
+          ./dist-cli/kuttidb-cli --help >/dev/null
+          ./dist-cli/kuttidb-cli -p 7413 put ci-smoke ok
+          [ "$(./dist-cli/kuttidb-cli -p 7413 get ci-smoke)" = "ok" ] \
+            || { echo "kuttidb-cli binary round-trip failed"; exit 1; }
+          ./dist-cli/kuttidb-cli -p 7413 health
+          kill "$pid"; wait "$pid" || true
+          echo "kuttidb-cli binary smoke passed"
+
       - name: Package
         run: |
           PKG_PLAIN="kuttidb-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
           PKG_TELE="kuttidb-${VERSION}-telemetry-${{ matrix.os }}-${{ matrix.arch }}"
           # Shared artifacts come from the telemetry-free build; only the
-          # kuttidb server differs between the two variants.
+          # kuttidb server differs between the two variants. kuttidb-cli is
+          # the standalone PyInstaller binary built above — no python3 needed
+          # at runtime.
           for PKG in "$PKG_PLAIN" "$PKG_TELE"; do
             mkdir -p "dist/${PKG}"
             cp -p "build-release/kuttidb-bench" "dist/${PKG}/"
             cp -p "build-release/${EMBED_LIB}" "dist/${PKG}/"
-            cp -p kuttidb-cli README.md LICENSE "dist/${PKG}/"
+            cp -p dist-cli/kuttidb-cli "dist/${PKG}/"
+            cp -p README.md LICENSE "dist/${PKG}/"
           done
           cp -p build-release/kuttidb "dist/${PKG_PLAIN}/kuttidb"
           cp -p build-telemetry/kuttidb "dist/${PKG_TELE}/kuttidb"
