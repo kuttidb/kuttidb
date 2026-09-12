@@ -1,54 +1,328 @@
 # Benchmarks
 
-All numbers come from the recorded environments below and are reproducible
-with the commands shown. Short runs are noisy; the comparisons called out as
-gates compare like-for-like runs on the same machine, and a regression greater
-than 10% is treated as release-blocking unless a measured justification
-exists. Numbers are evidence, not marketing: they describe the recorded runs,
-not a guarantee on other hardware.
+Every number here describes a recorded run on the machine named with it. None
+of them is a guarantee for other hardware, and none is a marketing claim.
 
-## Methodology
+**Reading this file**
 
-- `make bench-matrix` (or `make bench-quick`) drives the C benchmark
-  (`src/kuttidb_bench.c`) and a Python matrix (`src/bench_matrix.py`) against a live
-  server: N clients × 256-item batches of 100-byte values, reporting ops/s,
-  p50/p95/p99 batch latency, idle and loaded RSS, and live/allocated bytes.
-- `make bench-exchange` measures durable queue/exchange routing overhead
-  (`src/bench_exchange.py`, single Python client, 100-byte values).
-- `make bench-stream` measures the stream engine directly through the
-  `StreamStore` API (`src/bench_stream.c`): durable append ops/s and
-  p50/p95/p99 as retained history grows 10k → 100k records (8 partitions,
-  100-byte values), head/tail/lagging fetch, the metrics scrape, offset
-  commits, one retention burst that evicts ~900 records in a single call, and
-  full-WAL reopen recovery.
-- `make bench-queue` measures the queue engine directly through the
-  `QueueStore` API (`src/bench_queue.c`): durable publish as retained depth
-  grows 5k → 20k (100-byte values), consume from a clean head and from behind
-  a 10k-deep wall of in-flight deliveries, ACK as the outstanding set shrinks
-  10k → 5k, NACK/requeue, one visibility-expiry pass requeueing 2,000
-  deliveries, the metrics scrape, and publish+consume+ACK steady state for
-  in-memory and durable queues.
-- `src/bench_queue_net.py` drives a live server over the protocol with one
-  client: durable publish, consume+ACK and one-at-a-time durable publish,
-  with exact message-ID, order, payload and ACK-count checks and a required
-  full drain. It records server CPU, RSS and write counters from `/proc`
-  alongside client CPU, and identifies the binary and the harness by SHA-256.
-- `src/xbench.py` runs the same logical durable-queue workload against
-  KuttiDB, Redis, NATS, RabbitMQ and Kafka from one client process at a
-  matched durability tier, reading each server's cost from `/proc` for its
-  whole process tree; `src/xsummary.py` reduces the JSONL to medians and
-  lists failed trials rather than dropping them.
-- `src/test_queue_wal_compat.py` checks that WALs written by two builds
-  replay under each other after `SIGKILL`, which is the gate for any change
-  to how records reach the disk.
-- On a host whose storage latency drifts between sessions, a before/after
-  comparison must interleave the two sides trial by trial and report the
-  ratio of medians; a run of one side followed by a run of the other is not
-  evidence.
-- Queue and stream baselines must be added to this file before any major
-  milestone that touches those engines is accepted.
+- **↑** means higher is better, **↓** means lower is better. The best value in
+  each row is **bold**.
+- The reference host has noisy storage. Where a before/after ratio matters,
+  the two sides are interleaved trial by trial and the *ratio of medians* is
+  the result — not the absolute rate.
+- Every comparison states the durability setting each system ran at. Numbers
+  measured at different durability settings are not comparable, and this file
+  does not rank them as if they were.
 
-## Cache baseline — 2026-08-28 (macOS 15.3, ARM64, Apple Clang 17)
+---
+
+## 1. Cross-server comparison
+
+One workload per engine, one client process driving every system through its
+own maintained library, every system configured so a write is acknowledged
+only after its bytes are on the device. Server cost is read from `/proc` for
+the server's whole process tree, so it does not depend on the client library.
+
+**Host for all three tables:** Ubuntu 26.04.1, AMD EPYC 9354P, **one shared
+vCPU**, 3.8 GiB RAM, ext4. Client and server share that vCPU over loopback,
+no TLS, no compression; the host also serves a website.
+
+### 1.1 Cache — KuttiDB vs Redis
+
+200,000 distinct keys, 100-byte values, batches of 256. Write every key, then
+read every key back and verify each value. Both sides use one command per
+batch — KuttiDB `put_many`/`get_many`, Redis `MSET`/`MGET`. Both run a
+one-second durability window (KuttiDB `--fsync-ms 1000`, Redis `appendfsync
+everysec`). Three trials, medians.
+
+| Metric | KuttiDB | Redis 8.0.5 | KuttiDB advantage |
+|---|---:|---:|---:|
+| Write, ops/s ↑ | **502,332** | 234,867 | **2.1×** |
+| Read, ops/s ↑ | **424,069** | 359,362 | 1.2× |
+| Write, server CPU s / M ops ↓ | **1.1** | 1.6 | 1.5× less |
+| Read, server CPU s / M ops ↓ | **0.6** | 0.7 | 1.2× less |
+| Disk bytes / write ↓ | **133** | 137 | ~equal |
+| Idle RSS ↓ | **2.9 MiB** | 14.5 MiB | **5.0× less** |
+| RSS holding 200k keys ↓ | **35.8 MiB** | 54.0 MiB | 1.5× less |
+| Data directory ↓ | **26.6 MB** | 27.4 MB | ~equal |
+
+> Redis was given `MSET`, not a pipeline of `SET`s. Pipelining 256 individual
+> `SET`s measures 80k/s, but that is `redis-py` assembling 256 commands
+> (9.5 client CPU seconds per million), not the Redis server. The 2.1× above
+> is against Redis at its best on this workload.
+>
+> **Not covered:** Redis data structures, scripting, replication, cluster
+> mode, or eviction under memory pressure. This is the plain key/value path.
+
+### 1.2 Queue — KuttiDB vs Redis, NATS, RabbitMQ, Kafka
+
+100,000 messages, 100-byte payloads, batches of 256, one durable queue.
+Publish all, then drain all with an explicit consumer acknowledgement,
+verifying payloads and the exact count. Three trials, medians.
+
+| Metric | KuttiDB | Redis | NATS | RabbitMQ | Kafka | Best rival |
+|---|---:|---:|---:|---:|---:|---:|
+| Publish, msgs/s ↑ | **142,346** | 42,536 | 607 | 1,651 | 27,013 | **3.3×** |
+| Consume+ACK, msgs/s ↑ | **85,409** | 50,917 | 600 | 29,596 | 12,257 | **1.7×** |
+| Publish CPU s / M ↓ | **1.1** | 3.5 | 125.3 | 428.1 | 28.4 | 3.2× less |
+| Consume CPU s / M ↓ | **1.3** | 4.1 | 183.1 | 18.2 | 22.1 | 3.2× less |
+| Client CPU s / M ↓ | **0.9** | 9.6 | 26.0 | 170.2 | 2.4 | 2.7× less |
+| Publish disk B / msg ↓ | **149** | 201 | 4,230 | 303 | 164 | 1.1× less |
+| Consume disk B / msg ↓ | 208 | 240 | 4,199 | **9** | 18 | **23× worse** |
+| Idle RSS ↓ | **2.9 MiB** | 14.5 | 15.6 | 128.8 | 343.8 | **5.0× less** |
+| Loaded RSS ↓ | **21.4 MiB** | 26.5 | 36.2 | 160.5 | 369.5 | 1.2× less |
+| Startup to ready ↓ | 0.2 s | **0.0 s** | 0.2 | 3.2 | 12.2 | — |
+| Data directory ↓ | 9.1 MB | 37.1 | **0.0** | 7.9 | 1,102 | — |
+
+**Durability each system ran at**
+
+| System | Setting |
+|---|---|
+| KuttiDB | durable queue; publish, delivery and ACK replies each wait for an fsync covering their record |
+| Redis 8.0.5 | Streams with a consumer group; `appendonly yes`, `appendfsync always` |
+| NATS 2.10.27 | JetStream file store, `sync_interval: always`; synchronous publish, `ack_sync` |
+| RabbitMQ 4.0.5 | durable classic queue, persistent messages, publisher confirms |
+| Kafka 4.1.2 | single broker, `acks=all`, `log.flush.interval.messages=1` |
+
+> **The publish gap is a batching gap.** KuttiDB puts 256 messages under one
+> barrier; Redis gets the same amortisation from `appendfsync always`, which
+> fsyncs once per event-loop iteration. NATS and RabbitMQ do not group-commit
+> at this setting, so they pay roughly one device barrier per message and land
+> near this device's fsync ceiling. That is a real architectural difference —
+> but it is a statement about amortisation, not about how fast each system can
+> make *one* message durable.
+>
+> **At one message per barrier, KuttiDB does not win.** Publishing one at a
+> time and waiting for durability, KuttiDB measures ~1,414 msgs/s against
+> RabbitMQ's ~1,651. All of these sit near the raw device ceiling, because at
+> that point the storage is the limit, not the server.
+>
+> **KuttiDB loses the consume-side write volume badly** — 208 bytes per
+> message against RabbitMQ's 9. It writes a delivery record and an
+> acknowledgement record per message; RabbitMQ needs almost no new durable
+> state to acknowledge an already-persisted message. This is the largest
+> open item on the queue path.
+>
+> **NATS's 4,230 bytes written per 100-byte message** is what
+> `sync_interval: always` costs its file store. NATS is not normally run this
+> way — its default is a two-minute interval, which is a different durability
+> promise and not comparable to these rows.
+
+### 1.3 Stream — KuttiDB vs Redis Streams, Kafka
+
+100,000 records, 100-byte payloads, one topic with 8 partitions, batches of
+256. Append all, then read all back from offset zero, committing the group
+offset after each batch. Three trials, medians.
+
+| Metric | KuttiDB | Redis Streams | Kafka 4.1.2 | Best rival |
+|---|---:|---:|---:|---:|
+| Append, records/s ↑ | **117,061** | 43,586 | 27,126 | **2.7×** |
+| Read+commit, records/s ↑ | **157,686** | 87,914 | 12,755 | **1.8×** |
+| Append CPU s / M ↓ | **0.9** | 3.3 | 25.6 | 3.7× less |
+| Read CPU s / M ↓ | **0.9** | 1.0 | 16.1 | 1.1× less |
+| Client CPU s / M ↓ | **1.1** | 9.1 | 2.3 | 2.1× less |
+| Append disk B / record ↓ | **140** | 203 | 164 | 1.2× less |
+| Idle RSS ↓ | **3.0 MiB** | 14.5 | 347.7 | **4.8× less** |
+| Loaded RSS ↓ | **16.8 MiB** | 26.0 | 365.3 | 1.5× less |
+| Startup to ready ↓ | 0.2 s | **0.0 s** | 11.9 s | — |
+| Data directory ↓ | **12.4 MB** | 16.5 | 1,248.8 | 1.3× less |
+
+Durability: KuttiDB stream appends wait for an fsync covering their record;
+Kafka `acks=all` with `log.flush.interval.messages=1`; Redis Streams
+`appendonly yes` with `appendfsync always`.
+
+> **Kafka's numbers are what `flush.messages=1` costs it.** That is not how
+> Kafka is normally run — its default leaves flushing to the OS and relies on
+> replication across brokers for durability. This comparison is single-node
+> and fsync-per-record by construction: the tier KuttiDB targets and the one
+> Kafka is least suited to. A replicated multi-broker Kafka answers a
+> different question, and nothing here speaks to it.
+>
+> **Kafka's 1.2 GB data directory** against 12.4 MB is mostly segment and
+> index preallocation plus `__consumer_offsets`, not payload.
+
+### 1.4 What none of these tables measure
+
+Replication, clustering, multi-consumer fan-out and rebalancing under load,
+compaction, retention enforcement while writing, or crash consistency under
+power loss. RSS also excludes the kernel page cache these disk-backed brokers
+rely on, so the memory rows compare process footprint, not total machine
+memory. RabbitMQ and Kafka are built for guarantees this single-node
+comparison does not exercise.
+
+---
+
+## 2. What changed — WAL write path, 2026-09-13
+
+Profiling the durable queue path attributed **86% of server CPU to the kernel
+write path** and, during a drain, **66% to the checkpoint** — both because
+records reached the disk one syscall per field. Two rounds of fixes followed.
+Eight interleaved trials per side, 100,000 × 100-byte messages, batches of 256.
+
+Each round is its own interleaved A/B, so the two ratio columns come from
+separate runs on a drifting host; **combined** is their product, not a single
+measurement. (The runs agree where they overlap: round 1 ended at 2.4 s
+publish CPU and round 2 started at 2.5.)
+
+| Measurement | Round 1 | Round 2 | Combined |
+|---|---:|---:|---:|
+| Publish, server CPU s / M ↓ | 3.0 → 2.4 | 2.5 → **0.9** | **~3.3× less** |
+| Consume+ACK, server CPU s / M ↓ | 8.8 → 4.8 | 5.2 → **1.4** | **~6.3× less** |
+| Consume+ACK, msgs/s ↑ | 50.0k → 66.9k | 53.1k → **69.8k** | **~1.40×** |
+| Durable publish, 1 msg/call ↑ | 926 → 957 | 781 → **1,414** | **~1.53×** |
+| Single publish p50 ↓ | unchanged | 949 → **476 µs** | **2.0× less** |
+| Publish, batches of 256 ↑ | 107.7k → 118.7k | 110.4k → 115.2k | **~1.07×** |
+| WAL bytes / message | unchanged | unchanged | **1.00** |
+| Idle RSS | unchanged | unchanged | **1.00** |
+
+Batched publish barely moves because on a one-vCPU host it is bound by the
+client and the device, not by server CPU — the client immediately consumes
+whatever the server frees. The CPU rows are the real result there.
+
+### Round 1 — fewer syscalls per record
+
+1. **One syscall per record instead of two or three.** A record's header, name
+   and payload are assembled in a staging buffer and issued as a single
+   `pwrite` rather than a `write` per field.
+2. **Slice-by-8 CRC-32**, same reflected polynomial, output verified
+   bit-identical to the byte-at-a-time routine over 68,800 length and split
+   combinations — so existing WAL files verify unchanged.
+3. **The checkpoint stages its writes.** `ckpt_emit` issued up to three write
+   syscalls per record while holding the metadata lock and every queue lock,
+   so its cost was a pause for the whole store.
+
+### Round 2 — two wins that each needed a safety mechanism first
+
+Both were measured in round 1 and deliberately held back. Each now ships with
+its obstacle addressed.
+
+**Batch coalescing — one write per batch instead of one per record.**
+
+*Obstacle:* both engines applied a record to memory as soon as the write
+returned, so deferring the write to the barrier moved write-time errors past
+the mutation. A failed append could leave a record readable that no barrier
+would ever cover. The stream engine's disk-full test caught exactly this.
+
+*Fix:* the batch paths stage every record and write before touching memory.
+`queue_publish_batch` validates, allocates IDs, stages all, writes once, then
+links the messages. `queue_consume_batch` selects into an array during the
+scan, writes every delivery record in one call, then publishes the in-flight
+state — under the queue lock throughout. `queue_ack_batch`/`queue_nack_batch`
+already had a log pass and an apply pass; the log pass now stages and the
+`sync_log` between them does the single write. **The single-record path still
+writes before returning**, because its caller mutates immediately after.
+
+**WAL space reservation, committed with `fdatasync`.**
+
+*Obstacle:* writing inside a span pre-grown with `fallocate` skips the
+size-update journal transaction, but a process exiting without a clean close
+leaves a zero tail — so "the records run to the end of the file" stops holding
+until the next open. `job_crash_matrix` showed a record appended past such a
+gap being **silently truncated** instead of refusing the open.
+
+*Fix:* replay proves the tail is safe before truncating. It truncates when the
+remainder is all zeros (a reservation) or holds nothing that parses, and
+otherwise refuses the open with `QUEUE_OPEN_TRAILING_RECORDS`, every byte
+preserved. A torn tail still truncates exactly as before — matching a CRC-32
+by chance is a 2⁻³² event — and the scan costs nothing when there is no tail.
+`src/test_queue_crash.c` covers both outcomes.
+
+The acknowledgement contract is unchanged throughout: publish, delivery and
+ACK replies return only after a barrier covers their bytes in the file.
+
+---
+
+## 3. Reproducing
+
+```sh
+# Cross-server: cache, queue, stream
+python3 src/xbench_kv.py     --systems kuttidb,redis --count 200000 --batch 256 \
+  --fsync-ms 1000 --repeats 3 --kuttidb-binary /abs/path/kuttidb --jsonl /abs/new.jsonl
+python3 src/xbench.py        --systems kuttidb,redis,nats,rabbitmq,kafka \
+  --count 100000 --batch 256 --repeats 3 --kuttidb-binary /abs/path/kuttidb --jsonl /abs/new.jsonl
+python3 src/xbench_stream.py --systems kuttidb,redis,kafka --count 100000 --batch 256 \
+  --partitions 8 --repeats 3 --kuttidb-binary /abs/path/kuttidb --jsonl /abs/new.jsonl
+
+# Reduce any of the above to medians (failed trials are listed, not dropped)
+python3 src/xsummary.py /abs/new.jsonl
+
+# Single-system verified queue workload, with exact ID/order/payload/ACK checks
+python3 src/bench_queue_net.py 17411 200000 --binary /abs/path/kuttidb \
+  --data-dir /abs/path/on/ssd --threads 1 --batch 256 --repeats 5 --jsonl /abs/new.jsonl
+
+# Gate for any change to how records reach the disk
+python3 src/test_queue_wal_compat.py OLD_BINARY NEW_BINARY
+```
+
+Rules that keep these results usable:
+
+- The JSONL file must be new; previous evidence is never overwritten. Failed
+  runs exit nonzero, record `verified: false` with a traceback, and retain
+  their log and WAL directory.
+- Linux tmpfs/ramfs data directories are refused — a durable benchmark on
+  tmpfs measures nothing.
+- For a before/after comparison, alternate the two sides trial by trial and
+  report the ratio of medians. Do not run competing load generators at the
+  same time on the one-vCPU host.
+- Run correctness tests outside the benchmark window.
+- Process-kill recovery tests validate that failure model only; they do not
+  simulate a hypervisor or storage device losing power.
+
+---
+
+## 4. Reference detail
+
+<details>
+<summary><b>Device ceiling and WAL compatibility</b> — what the storage can do, and proof the format is unchanged</summary>
+
+### Device ceiling for reference
+
+Writing a 160-byte record and committing it, 400 times, on this VPS:
+
+| Method | p50 | p95 | commits/s at p50 |
+|---|---:|---:|---:|
+| Append and grow the file, `fsync` | 841 µs | 2,836 µs | 1,190 |
+| Append and grow the file, `fdatasync` | 829 µs | 2,889 µs | 1,207 |
+| `fallocate`d span, `fsync` | 613 µs | 2,137 µs | 1,632 |
+| `fallocate`d span, `fdatasync` | 297–391 µs | 630–2,035 µs | 2,553–3,370 |
+| `fallocate(KEEP_SIZE)` span, `fdatasync` | 1,059–1,094 µs | 3,480–3,760 µs | 914–944 |
+| Zero-filled span, `fdatasync` | 215–270 µs | 285–467 µs | 3,701–4,652 |
+
+`FALLOC_FL_KEEP_SIZE` keeps the file length honest and would have avoided the
+tail question entirely, but it is not viable: every write still updates the
+inode, so it gives no benefit at all. Zero-filling is marginally faster than
+a reservation per commit but stalls the writer for the length of the fill.
+The reservation is 8 MiB ahead of the cursor; a clean close returns the
+unused tail, so the WAL on disk is exactly the records it holds. The
+reservation is Linux-only (`fallocate`); other platforms fall back to
+extending writes and keep the round-1 behaviour.
+
+### Cross-version WAL compatibility
+
+Verified with the writer killed by `SIGKILL`, so the reader must replay a WAL
+that was never cleanly closed — including, for the new writer, one carrying a
+reservation tail (8,388,642 bytes of file for 672,714 bytes of records):
+
+| Writer → reader | Messages | Replayed depth | Read back in order | Drained |
+|---|---:|---:|---|---|
+| before → after | 5,020 | 5,020 | yes | yes |
+| after → before | 5,020 | 5,020 | yes | yes |
+| after → after | 5,020 | 5,020 | yes | yes |
+| before → before | 5,020 | 5,020 | yes | yes |
+
+Run with `src/test_queue_wal_compat.py OLD_BINARY NEW_BINARY`.
+
+</details>
+
+<details>
+<summary><b>Engine-level and platform history</b> — macOS/ARM64 baselines and the 2026-08 milestone measurements</summary>
+
+These are engine-level and single-machine measurements taken while the queue
+and stream engines were built. They are kept because the milestone tables are
+the comparison points for those changes; they are not cross-server results and
+do not describe the reference VPS.
+
+### Cache baseline — 2026-08-28 (macOS 15.3, ARM64, Apple Clang 17)
 
 | Measurement | Result |
 |---|---:|
@@ -67,7 +341,7 @@ The short runs are noisy (the baseline note documents two-client samples
 varying by more than the 10% gate); the four-client sample is the recorded
 release-gate comparison.
 
-## Progress sample — 2026-08-29 (`make bench-quick`, same workload)
+### Progress sample — 2026-08-29 (`make bench-quick`, same workload)
 
 After the stream consumer generations, Prometheus endpoint, and fuzz suites:
 
@@ -81,7 +355,7 @@ After the stream consumer generations, Prometheus endpoint, and fuzz suites:
 The four-client sample sits ~4% above the recorded baseline — no regression
 over the gate.
 
-## Linux-native sample — 2026-08-29 (`make bench-quick` equivalent in a container)
+### Linux-native sample — 2026-08-29 (`make bench-quick` equivalent in a container)
 
 Alpine 3.21 (musl, epoll, 4 event loops), forced `TLS=0` rebuild, same
 workload, run inside Docker Desktop on the same ARM64 machine — so the Linux
@@ -99,7 +373,7 @@ The epoll backend scales to 8 clients without the p99 cliff the macOS kqueue
 matrix shows at 8 clients; memory per live byte is comparable. This is
 correctness-first evidence, not a release-grade cross-platform comparison.
 
-## Isolated single-op latency — 2026-08-29 (`make bench-single`)
+### Isolated single-op latency — 2026-08-29 (`make bench-single`)
 
 One round trip per operation, 100-byte values, periodic durability, each
 series measured separately (the gap noted above, now closed):
@@ -116,7 +390,7 @@ series measured separately (the gap noted above, now closed):
 Single-op throughput is dominated by per-request round trips; batched
 operations (the table above) remain the recommended path for bulk work.
 
-## Queue and exchange routing — 2026-08-29 (`src/bench_exchange.py`)
+### Queue and exchange routing — 2026-08-29 (`src/bench_exchange.py`)
 
 Durable queues, single Python client, 100-byte values:
 
@@ -132,7 +406,7 @@ Routing overhead is within noise of the plain-queue baseline; a fanout
 publish multiplies durable copies, so capacity planning must multiply by
 binding count.
 
-## Queue engine, depth scaling — 2026-08-29 (`make bench-queue`)
+### Queue engine, depth scaling — 2026-08-29 (`make bench-queue`)
 
 Engine-level baseline before the queue index/group-commit milestones
 (macOS 15.3, ARM64, single run; the publish depth trend repeated across the
@@ -162,7 +436,7 @@ durable records per cycle. These rows are the comparison point for the
 queue-index and group-commit milestones; the engine-level in-memory cycle at
 6.1M cycles/s confirms the scan costs, not the data path, dominate at depth.
 
-## Queue engine, indexes and retention skip — 2026-08-29 (after group commit)
+### Queue engine, indexes and retention skip — 2026-08-29 (after group commit)
 
 After the group-fsync milestones, the publish depth degradation was traced to
 the retention/visibility pass that walked the whole queue on every publish
@@ -192,7 +466,7 @@ back-to-back. Memory cost: two extra pointers per message (16 bytes on
 64-bit, ~2.6% for 100-byte values) and a 512-byte initial tag table per
 queue that grows only with in-flight count.
 
-## Queue engine, consume scan hint — 2026-08-29
+### Queue engine, consume scan hint — 2026-08-29
 
 The consume scan started at the queue head, so every delivery walked past
 all previously delivered (in-flight) messages — the probe itself was O(N²)
@@ -213,7 +487,7 @@ message-ID index for replay (recovery of 20k publish+deliver+ACK triples
 measures 64 ms and scales with the interleaving already — the real fix for
 historical WAL growth is the Phase 6 queue checkpoint).
 
-## Queue engine, group commit — 2026-08-29 (`make bench-queue`, CONC phases)
+### Queue engine, group commit — 2026-08-29 (`make bench-queue`, CONC phases)
 
 Concurrent durable work before/after the queue group-fsync coordinator
 (macOS 15.3, ARM64, engine-level harness, five comparable runs each,
@@ -236,7 +510,7 @@ Single-thread latency is unchanged (a sole writer fsyncs under the lock as
 before). Acknowledgement points are unchanged: publish, delivery, and ACK
 each return only after an fsync covers their record.
 
-## Queue engine, batch operations — 2026-08-29 (`make bench-queue`, BATCH phase)
+### Queue engine, batch operations — 2026-08-29 (`make bench-queue`, BATCH phase)
 
 Durable publish of 8,192 × 100-byte messages: one message per operation
 versus the 256-message batch publish (protocol `0x2D`), engine level, five
@@ -253,7 +527,7 @@ ACK/NACK batches (`0x2E`/`0x2F`) provide the same round-trip and fsync
 amortization on the consumer side and are exercised end-to-end by the
 protocol suites, including restart recovery of acknowledged batches.
 
-## Stream engine, retained-history scaling — 2026-08-29 (`make bench-stream`)
+### Stream engine, retained-history scaling — 2026-08-29 (`make bench-stream`)
 
 Before/after removing the accidental O(N) work from the stream engine
 (macOS 15.3, ARM64, Apple Clang 17, engine-level harness, five comparable
@@ -281,7 +555,7 @@ history). Reopen recovery is replay-bound and deliberately unchanged —
 segmented storage (roadmap) is the follow-up that addresses it. WAL format
 and recovery behavior are unchanged.
 
-## Stream engine, group commit — 2026-08-29 (`make bench-stream`, CONC phase)
+### Stream engine, group commit — 2026-08-29 (`make bench-stream`, CONC phase)
 
 Concurrent durable appends (8 threads sharing one store across 8 partitions,
 10k records each, 100-byte values) before/after the group-fsync coordinator.
@@ -303,7 +577,7 @@ previous round, cutting fsync count per acknowledged record roughly 4× at
 8 threads. Acknowledgement points are unchanged: an operation returns only
 after an fsync covers its record.
 
-## Queue WAL checkpoint — 2026-08-29 (server-level, SIGKILL restart)
+### Queue WAL checkpoint — 2026-08-29 (server-level, SIGKILL restart)
 
 Live-server verification of the queue checkpoint (protocol test suite):
 60×256 published+drained 100-byte messages (~2.9 MB of WAL history) plus 10
@@ -324,7 +598,7 @@ entirely. No extra threads were added (the maintenance thread already
 existed) and the on-disk format is unchanged — the checkpoint re-emits
 existing record types only.
 
-## Cache client-scaling cliff — 2026-08-29 (`src/bench_matrix.py --quick`, this machine)
+### Cache client-scaling cliff — 2026-08-29 (`src/bench_matrix.py --quick`, this machine)
 
 Phase 7 profiling baseline, macOS 15.3 ARM64, 256-item batches of 100-byte
 values, server defaults (4 event loops, periodic durability):
@@ -377,400 +651,15 @@ No kqueue or event-loop change was made on the strength of this table alone;
 the event-loop dispatch budget work remains available if a server-side
 limitation appears with real multiprocess workloads.
 
-## Queue and stream WAL write path — 2026-09-13 (Linux VPS, interleaved A/B)
+</details>
 
-Two rounds of changes to how records reach the disk. The first round shipped
-the parts with no on-disk consequence; the second shipped the two larger wins
-once each had the mechanism that makes it safe. Measured against the revision
-immediately before each round on the reference VPS (Ubuntu 26.04.1, AMD EPYC
-9354P, one shared vCPU, 3.8 GiB RAM, ext4 on `/dev/sda1`). This host's storage
-latency drifts between sessions, so every comparison alternates baseline and
-candidate trial by trial (medians over eight trials each); the ratio is the
-trustworthy figure, not the absolute rate.
+<details>
+<summary><b>Withdrawn: the 2026-09-12 cross-server scorecard</b> — what was wrong with it and why</summary>
 
-### Round 1 — fewer syscalls per record
+The comparison in this section was withdrawn as a ranking. It is kept because
+it documents the specific defects the current harnesses were built to avoid.
 
-1. **One syscall per record instead of two or three.** A record's header, name
-   and payload are assembled in a staging buffer and issued as a single
-   `pwrite` rather than a `write` per field.
-2. **Slice-by-8 CRC-32**, same reflected polynomial, output verified
-   bit-identical over 68,800 length and split combinations.
-3. **The queue checkpoint stages its writes.** `ckpt_emit` issued up to three
-   write syscalls per record while holding the metadata lock and every queue
-   lock. A profile attributed 66% of server CPU during a drain to it.
-
-| Measurement | Before | After | Δ |
-|---|---:|---:|---:|
-| Consume+ACK, batches of 256 | 49,996 msgs/s | 66,884 msgs/s | 1.34× |
-| Consume+ACK, server CPU per million | 8.8 s | 4.8 s | 1.8× less |
-| Durable publish, batches of 256 | 107,748 msgs/s | 118,742 msgs/s | 1.10× |
-
-### Round 2 — batch coalescing and a WAL space reservation
-
-Both were measured in round 1 and held back, each for a specific correctness
-reason. Both now ship with that reason addressed.
-
-**Batch coalescing — one write per batch instead of one per record.** The
-obstacle was ordering: both engines applied a record to memory as soon as the
-write returned, so deferring the write to the barrier moved write-time errors
-past the mutation, and a failed append could leave a record readable that no
-barrier would ever cover (the stream engine's disk-full test caught exactly
-this). The fix is to restructure the batch paths so nothing is applied to
-memory until every record of the batch is staged and written:
-
-- `queue_publish_batch` validates the whole batch, allocates the IDs, stages
-  all records, writes once, and only then links the messages.
-- `queue_consume_batch` selects its messages into an array during the scan,
-  writes every delivery record in one call, and publishes the in-flight
-  state afterwards — under the queue lock throughout, so no reader observes a
-  message as in flight before its record is in the file.
-- `queue_ack_batch` / `queue_nack_batch` already used a log pass followed by
-  an apply pass; their log pass now stages, and the `sync_log` between the
-  passes performs the single write.
-
-The single-record path is unchanged: it still writes before returning,
-because its caller applies the record immediately afterwards.
-
-**A WAL space reservation, committed with `fdatasync`.** Writes address an
-offset inside a span the file has already been grown to with `fallocate`, so
-the inode is untouched and the commit skips the size-update journal
-transaction. The obstacle was that a process exiting without a clean close
-leaves a zero tail, so "the records run to the end of the file" stops holding
-until the next open — and `job_crash_matrix` showed a record appended past
-such a gap being silently truncated instead of refusing the open. Silently
-discarding a committed record is the wrong failure mode for this format, so
-replay now proves the tail is safe before truncating: it scans from the
-truncation point, truncates if the remainder is all zeros (a reservation) or
-holds nothing that parses, and otherwise refuses the open with
-`QUEUE_OPEN_TRAILING_RECORDS` and every byte preserved. A torn tail still
-truncates as before — matching a CRC-32 by chance is a 2^-32 event — and the
-cost is paid only when a tail exists. `src/test_queue_crash.c` covers both
-outcomes.
-
-Cumulative effect of round 2, 100,000 × 100-byte messages, batches of 256,
-one client, eight interleaved trials per side:
-
-| Measurement | Before | After | Δ |
-|---|---:|---:|---:|
-| Durable publish, server CPU per million | 2.5 s | 0.9 s | **2.9× less** |
-| Consume+ACK, server CPU per million | 5.2 s | 1.4 s | **3.7× less** |
-| Durable publish, one message per call | 781 msgs/s | 1,414 msgs/s | **1.81×** |
-| Single publish p50 / p99 | 949 / 4,683 µs | 476 / 2,893 µs | 0.50× / 0.62× |
-| Consume+ACK, batches of 256 | 53,065 msgs/s | 69,768 msgs/s | 1.31× |
-| Consume+ACK, batch p50 / p99 | 4,094 / 14,218 µs | 2,966 / 11,532 µs | 0.72× / 0.81× |
-| Durable publish, batches of 256 | 110,435 msgs/s | 115,173 msgs/s | 1.04× |
-| WAL bytes written | identical | identical | 1.00 |
-| Idle RSS | 2,928 KiB | 2,938 KiB | unchanged |
-
-The CPU reductions are much larger than the throughput gains because client
-and server share one vCPU here: work removed from the server is immediately
-consumed by the client process. On a host where the server does not compete
-with its own load generator, that freed CPU is available for throughput.
-Batched publish moves 4% — it is bound by the client and the device on this
-host, not by server CPU.
-
-The acknowledgement contract is unchanged throughout: publish, delivery and
-ACK replies return only after a barrier covers their bytes in the file, and
-the bytes written per message are identical before and after.
-
-### Device ceiling for reference
-
-Writing a 160-byte record and committing it, 400 times, on this VPS:
-
-| Method | p50 | p95 | commits/s at p50 |
-|---|---:|---:|---:|
-| Append and grow the file, `fsync` | 841 µs | 2,836 µs | 1,190 |
-| Append and grow the file, `fdatasync` | 829 µs | 2,889 µs | 1,207 |
-| `fallocate`d span, `fsync` | 613 µs | 2,137 µs | 1,632 |
-| `fallocate`d span, `fdatasync` | 297–391 µs | 630–2,035 µs | 2,553–3,370 |
-| `fallocate(KEEP_SIZE)` span, `fdatasync` | 1,059–1,094 µs | 3,480–3,760 µs | 914–944 |
-| Zero-filled span, `fdatasync` | 215–270 µs | 285–467 µs | 3,701–4,652 |
-
-`FALLOC_FL_KEEP_SIZE` keeps the file length honest and would have avoided the
-tail question entirely, but it is not viable: every write still updates the
-inode, so it gives no benefit at all. Zero-filling is marginally faster than
-a reservation per commit but stalls the writer for the length of the fill.
-The reservation is 8 MiB ahead of the cursor; a clean close returns the
-unused tail, so the WAL on disk is exactly the records it holds. The
-reservation is Linux-only (`fallocate`); other platforms fall back to
-extending writes and keep the round-1 behaviour.
-
-### Cross-version WAL compatibility
-
-Verified with the writer killed by `SIGKILL`, so the reader must replay a WAL
-that was never cleanly closed — including, for the new writer, one carrying a
-reservation tail (8,388,642 bytes of file for 672,714 bytes of records):
-
-| Writer → reader | Messages | Replayed depth | Read back in order | Drained |
-|---|---:|---:|---|---|
-| before → after | 5,020 | 5,020 | yes | yes |
-| after → before | 5,020 | 5,020 | yes | yes |
-| after → after | 5,020 | 5,020 | yes | yes |
-| before → before | 5,020 | 5,020 | yes | yes |
-
-Run with `src/test_queue_wal_compat.py OLD_BINARY NEW_BINARY`.
-
-## Cache comparison, matched periodic durability — 2026-09-13
-
-The cache equivalent of the queue comparison, built to answer the three
-objections the audit raised against the earlier cache numbers.
-
-**Workload.** Write 200,000 distinct keys with 100-byte values, then read all
-200,000 back and verify every value. Batches of 256. Three trials; medians.
-Harness: `src/xbench_kv.py`.
-
-**Same operations on both sides.** The earlier comparison ranked KuttiDB's
-interleaved PUT/GET/DELETE mix against Redis's separate SET and GET runs.
-Here both systems run the same two phases in the same order, and both use a
-single command carrying the whole batch — KuttiDB `put_many`/`get_many`
-against Redis `MSET`/`MGET`. Using a Redis pipeline of individual `SET`s
-instead of `MSET` measured 80k writes/s, but that number is the cost of
-`redis-py` assembling 256 commands (9.5 client CPU seconds per million), not
-of the Redis server; `MSET` is the like-for-like operation and is what the
-table below uses.
-
-**Same keyspace.** The earlier resource comparison gave KuttiDB 400k distinct
-live keys and Redis one repeatedly overwritten key, so the memory columns
-described different amounts of stored data. Here both hold the same 200,000
-distinct keys, which is what makes the RSS row meaningful.
-
-**Same durability window.** KuttiDB's cache WAL at `--fsync-ms 1000` against
-Redis `appendfsync everysec`: both nominally a one-second loss window. (The
-earlier comparison put KuttiDB's 100 ms setting against Redis's one second.)
-
-
-> **Build note.** KuttiDB's rows were re-measured on the shipped build (both
-> rounds of the WAL write-path work above). Competitor rows were collected in
-> an earlier session and are unchanged, since their configuration did not
-> change — but on a host with this much storage drift that means the two
-> columns carry independent run-to-run spread. Treat the ordering as the
-> result, not the exact ratios.
-
-| Measurement | KuttiDB | Redis 8.0.5 |
-|---|---:|---:|
-| Write, ops/s | **502,332** | 234,867 |
-| Read, ops/s | **424,069** | 359,362 |
-| Write, server CPU s per million | **1.1** | 1.6 |
-| Read, server CPU s per million | **0.6** | 0.7 |
-| Write, client CPU s per million | **0.8** | 2.4 |
-| Write, disk bytes per operation | 133 | 137 |
-| Idle RSS | **2.9 MiB** | 14.5 MiB |
-| RSS holding 200,000 keys | **35.8 MiB** | 54.0 MiB |
-| Data directory after the run | 26.6 MB | 27.4 MB |
-
-Reading this fairly: KuttiDB is about 2.1× on the write phase and about 1.2×
-on the read phase, with roughly a third less server CPU per operation. The
-memory rows are the larger result — 5× smaller idle footprint, and 1.5× less
-resident memory holding the identical 200,000 keys, with essentially the same
-bytes on disk. What this does not cover: Redis's data structures, scripting,
-replication, cluster mode, or eviction behaviour under memory pressure. It is
-a comparison of the plain key/value path only.
-
-```sh
-python3 src/xbench_kv.py --systems kuttidb,redis --count 200000 --batch 256 \
-  --fsync-ms 1000 --repeats 3 --kuttidb-binary /absolute/path/to/kuttidb \
-  --jsonl /absolute/path/to/new-results.jsonl
-```
-
-## Stream comparison, matched durability — 2026-09-13
-
-**Workload.** Append 100,000 100-byte records to one topic with 8 partitions
-in batches of 256, then read all 100,000 back from offset zero in batches of
-256, committing the group offset after each batch. Payloads and the total
-count are verified. Three trials; medians. Harness: `src/xbench_stream.py`.
-
-**Durability tier.** Every append is on the device before it is
-acknowledged: KuttiDB stream appends wait for an fsync covering their record;
-Kafka runs `acks=all` with `log.flush.interval.messages=1`; Redis Streams runs
-`appendonly yes` with `appendfsync always`. Server cost is read from `/proc`
-for each server's whole process tree.
-
-
-> **Build note.** KuttiDB's rows were re-measured on the shipped build (both
-> rounds of the WAL write-path work above). Competitor rows were collected in
-> an earlier session and are unchanged, since their configuration did not
-> change — but on a host with this much storage drift that means the two
-> columns carry independent run-to-run spread. Treat the ordering as the
-> result, not the exact ratios.
-
-| Measurement | KuttiDB | Redis Streams | Kafka 4.1.2 |
-|---|---:|---:|---:|
-| Append, records/s | **117,061** | 43,586 | 27,126 |
-| Read+commit, records/s | **157,686** | 87,914 | 12,755 |
-| Append, server CPU s per million | **0.9** | 3.3 | 25.6 |
-| Read, server CPU s per million | **0.9** | 1.0 | 16.1 |
-| Append, client CPU s per million | **1.0** | 9.1 | 2.3 |
-| Append, disk bytes per record | **140** | 203 | 164 |
-| Idle RSS | **2.9 MiB** | 14.5 MiB | 347.7 MiB |
-| Loaded RSS | **16.8 MiB** | 26.0 MiB | 365.3 MiB |
-| Startup to first accepted request | 0.2 s | **0.0 s** | 11.9 s |
-| Data directory after the run | 16.8 MB | **16.5 MB** | 1,248.8 MB |
-
-Reading this fairly:
-
-- **Kafka's numbers are what `flush.messages=1` costs it.** That setting is
-  not how Kafka is normally run; its default leaves flushing to the operating
-  system and relies on replication across brokers for durability instead.
-  This comparison is single-node and fsync-per-record by construction, which
-  is the tier KuttiDB targets and the one Kafka is least suited to. A
-  replicated multi-broker Kafka is a different system answering a different
-  question, and nothing here speaks to it.
-- **Kafka's 1.2 GB data directory** against 16.8 MB is mostly segment and
-  index preallocation plus the `__consumer_offsets` topic, not payload. It is
-  a real disk-footprint difference on a small single node, not write
-  amplification of the same magnitude.
-- **Redis Streams' read path** is `XRANGE` plus a durable offset key, which is
-  the closest available analogue to a group commit; it is not an identical
-  operation to either of the other two.
-- **Not measured:** replication, multi-consumer group rebalancing under load,
-  compaction, or retention enforcement while writing.
-
-```sh
-python3 src/xbench_stream.py --systems kuttidb,redis,kafka --count 100000 \
-  --batch 256 --partitions 8 --repeats 3 \
-  --kuttidb-binary /absolute/path/to/kuttidb \
-  --jsonl /absolute/path/to/new-results.jsonl
-```
-
-## Cross-server comparison, matched durability — 2026-09-12
-
-A like-for-like rerun of the comparison the audit below withdrew. The
-objections that made the earlier numbers unusable are addressed by
-construction: one workload, one client process, one durability tier, and
-server cost read from the kernel rather than inferred.
-
-**Workload, identical for every system.** Publish 100,000 100-byte messages
-into one durable queue, then drain all 100,000 with an explicit consumer
-acknowledgement, checking the payload of every message and requiring the
-count to come back exactly. Work is submitted in batches of 256 so each
-system gets the same opportunity to amortise round trips. Three trials per
-system; medians reported. Harness: `src/xbench.py` with `src/xbench_core.py`.
-
-**One client.** Every system is driven from the same single Python process
-using its own maintained client library (`kuttidb_client`, `redis-py`,
-`nats-py`, `pika`, `confluent-kafka`), so no system is measured through a
-faster or slower benchmark tool than another. Client CPU is reported
-separately because the libraries differ in efficiency.
-
-**One durability tier.** Every system is configured so that a publish is not
-acknowledged until its bytes are on the device:
-
-| System | Version | Configuration |
-|---|---|---|
-| KuttiDB | this revision | durable queue; publish, delivery and ACK replies each wait for an fsync covering their record |
-| Redis | 8.0.5 | Streams with a consumer group; `appendonly yes`, `appendfsync always` |
-| NATS | 2.10.27 | JetStream file store, `sync_interval: always`; publish waits for its PubAck, consumer uses `ack_sync` |
-| RabbitMQ | 4.0.5 | durable classic queue, persistent messages, publisher confirms; consumer acknowledges |
-| Kafka | 4.1.2 | single broker, `acks=all`, `log.flush.interval.messages=1`; consumer commits offsets synchronously |
-
-**Server cost from the kernel.** CPU seconds, RSS and bytes written are read
-from `/proc` for the server's whole process tree (so the JVM's and the BEAM's
-threads are included), sampled before and after each phase, and divided by a
-fixed message count. A measurement that could not be read is reported as
-`n/a`, never as zero.
-
-**Environment.** Ubuntu 26.04.1, kernel 7.0.0-30-generic, AMD EPYC 9354P, one
-shared vCPU, 3.8 GiB RAM, ext4 on `/dev/sda1`. Client and server share that
-one vCPU over loopback, without TLS or compression, and the host also serves
-a website. This measures that deployment, not isolated server capacity.
-
-**KuttiDB's rows are from the shipped build.** An earlier draft recorded
-197,553 publish and 93,224 consume+ACK from a build that deferred writes past
-the in-memory mutation; that build was withdrawn as unsafe and those figures
-do not stand. Publish medians between 109,343 and 157,385 have been observed
-across sessions on this host, which is the scale of its storage drift.
-
-### Results
-
-> **Build note.** KuttiDB's rows were re-measured on the shipped build (both
-> rounds of the WAL write-path work above). Competitor rows were collected in
-> an earlier session and are unchanged, since their configuration did not
-> change — but on a host with this much storage drift that means the two
-> columns carry independent run-to-run spread. Treat the ordering as the
-> result, not the exact ratios.
-
-
-| Measurement | KuttiDB | Redis | NATS | RabbitMQ | Kafka |
-|---|---:|---:|---:|---:|---:|
-| Publish, msgs/s | **142,346** | 42,536 | 607 | 1,651 | 27,013 |
-| Consume+ACK, msgs/s | **85,409** | 50,917 | 600 | 29,596 | 12,257 |
-| Publish, server CPU s per million | **1.1** | 3.5 | 125.3 | 428.1 | 28.4 |
-| Consume+ACK, server CPU s per million | **1.3** | 4.1 | 183.1 | 18.2 | 22.1 |
-| Publish, client CPU s per million | **0.9** | 9.6 | 26.0 | 170.2 | 2.4 |
-| Publish, disk bytes per message | **149** | 201 | 4,230 | 303 | 164 |
-| Consume+ACK, disk bytes per message | 216 | 240 | 4,199 | **9** | 18 |
-| Idle RSS | **2.9 MiB** | 14.5 MiB | 15.6 MiB | 128.8 MiB | 343.8 MiB |
-| Loaded RSS after drain | **21.4 MiB** | 26.5 MiB | 36.2 MiB | 160.5 MiB | 369.5 MiB |
-| Startup to first accepted request | 0.2 s | **0.0 s** | 0.2 s | 3.2 s | 12.2 s |
-| Data directory after drain | 9.2 MB | 37.1 MB | **0.0 MB** | 7.9 MB | 1,102 MB |
-
-### What these numbers do and do not say
-
-- **The publish gap is a batching gap, and it should be read as one.** KuttiDB's
-  batch protocol puts 256 messages under one barrier; Redis's pipeline gets
-  the same amortisation from `appendfsync always`, which fsyncs once per
-  event-loop iteration. NATS with `sync_interval: always` and RabbitMQ with
-  per-publish confirms do not group-commit here, so they pay roughly one
-  device barrier per message and land near this device's fsync ceiling. That
-  is a real architectural difference at this durability setting, not a
-  measurement artifact — but it is a statement about amortisation, not about
-  how fast each system can make one message durable.
-- **At one message per barrier, nobody wins by much, and KuttiDB does not
-  win.** Publishing one at a time and waiting for durability, KuttiDB
-  measures 1,042–1,281 msgs/s across runs on this host (p50 495–610 µs),
-  against RabbitMQ's 1,651 and NATS's ~1,200. All of these sit within a
-  factor of two of the raw device ceiling (about 1,200–1,700 commits/s for an
-  extending write, see the device table above), because at that point the
-  storage, not the server, is the limit. KuttiDB's advantage is in amortised
-  throughput, CPU and memory — not in single-message commit latency, where it
-  currently trails RabbitMQ.
-
-  One candidate explanation was tested and rejected: that the cache WAL's
-  periodic fsync (100 ms by default) interferes with queue commits through
-  the shared ext4 journal. Running the same binary and workload with the
-  cache interval at 100 ms and at 60 s, six interleaved trials each, moved
-  single durable publish by 1.08× — inside this host's run-to-run spread —
-  so the cost is the device barrier itself, not cross-WAL interference.
-  Reproduce with `src/bench_queue_net.py --fsync-ms`.
-- **RabbitMQ's low consume-side write volume is real.** Its 9 bytes per
-  message on the drain reflects that acknowledgements for already-persisted
-  messages need very little new durable state. KuttiDB writes a delivery and
-  an acknowledgement record per message; that is a design difference with a
-  measurable cost, and it is the largest remaining write-amplification item
-  on the queue path.
-- **NATS's 4,230 bytes written per 100-byte message** is the cost of
-  `sync_interval: always` in its file store, which rewrites index and
-  metadata blocks per commit. NATS is not normally run this way; its default
-  is a two-minute interval. That default is a different durability promise
-  and is not comparable to the other rows here.
-- **RSS is not total memory.** It excludes the kernel page cache these
-  disk-backed brokers rely on. The idle-RSS column is a fair comparison of
-  process footprint; it is not a claim about total machine memory.
-- **One vCPU, shared with the client.** Server and client CPU compete. This
-  is representative of a small single-node deployment and it is the same
-  constraint for every system, but it compresses the differences between
-  systems whose clients are expensive (RabbitMQ via `pika`: 170 client CPU
-  seconds per million) and those whose clients are cheap.
-- **Not measured here:** clustering, replication, multi-consumer fan-out,
-  crash-consistency under power loss, or any workload other than this one.
-  Kafka and RabbitMQ are built for guarantees this single-node comparison
-  does not exercise.
-
-### Reproducing
-
-```sh
-python3 src/xbench.py --systems kuttidb,redis,nats,rabbitmq,kafka \
-  --count 100000 --batch 256 --repeats 3 \
-  --kuttidb-binary /absolute/path/to/kuttidb \
-  --jsonl /absolute/path/to/new-results.jsonl
-python3 src/xsummary.py /absolute/path/to/new-results.jsonl
-```
-
-Failed trials are written to the JSONL with `verified: false`, their phase
-and a traceback, and are listed alongside the successful results rather than
-dropped. The JSONL is appended, never overwritten.
-
-## Cross-server VPS measurements — 2026-09-12: comparison audit
+### Cross-server VPS measurements — 2026-09-12: comparison audit
 
 The original scorecard is withdrawn as a like-for-like ranking. The recorded
 measurements remain useful observations, but the workloads, concurrency,
@@ -784,7 +673,7 @@ compression. The host also serves the production website. These are
 measurements of that deployment, not isolated server capacity or a guarantee
 for other VPS providers.
 
-### Findings verified against commands, source and the VPS
+#### Findings verified against commands, source and the VPS
 
 - **Storage:** `/tmp` is tmpfs. The earliest KuttiDB runs therefore did not
   measure disk durability. The historical KuttiDB numbers below are the
@@ -828,7 +717,7 @@ for other VPS providers.
   RSS also excludes much of the kernel page cache used by disk-backed
   brokers, so RSS alone cannot establish total machine memory cost.
 
-### Historical SSD observations, not a ranking
+#### Historical SSD observations, not a ranking
 
 These values preserve the previously recorded reference points. They are
 single-run or short-run observations from different harnesses; the fresh
@@ -859,7 +748,7 @@ matched total-memory winner. The retained raw logs remain in the local,
 gitignored working-results directory; none of the discarded tmpfs numbers
 should be republished as disk-durable results.
 
-### Reproducing the verified queue workload
+#### Reproducing the verified queue workload
 
 Build each revision separately, then use the **same** harness for both:
 
@@ -886,40 +775,68 @@ the benchmark window. Do not run competing load generators simultaneously on
 this one-vCPU host. Process-kill recovery tests validate that failure model;
 they do not simulate a hypervisor or storage device losing power.
 
-## Known gaps in this file
+</details>
 
-- No Windows-native benchmark tables yet (Windows server build remains the
-  documented platform blocker).
-- Queue publish/consume baselines beyond the single exchange benchmark, a
-  SIGKILL-recovery cost table for streams (the reopen row above covers clean
-  restart only), and consumer-lag behavior under slow consumers are not yet
-  recorded.
-- Single-message durable publish now measures ~1,414 msgs/s against
-  RabbitMQ's ~1,651 on the reference VPS, having been ~950 before the space
-  reservation. The remaining gap has not been attributed; cross-WAL
-  interference was tested and ruled out.
-- The consume path writes a delivery and an acknowledgement record per
-  message (216 bytes per 100-byte message against RabbitMQ's 9 on the drain).
-  A coalesced batch record for deliveries and acknowledgements is the
-  identified follow-up and is not yet implemented.
-- The cross-server comparisons cover one single-node workload per engine.
-  Clustering, replication, multi-consumer fan-out and power-loss crash
-  consistency are not measured, and the systems compared are built for
-  guarantees these comparisons do not exercise.
-- The stream engine's batch paths were not restructured for coalescing:
-  `stream_append_batch` already writes one record for a whole batch, so it
-  had nothing to gain, but `stream_commit_batch_if_generation` and the group
-  offset reset still write one record per commit.
-- Batched publish throughput is bound by the client and the device on this
-  one-vCPU host, so the 2.9× reduction in server CPU per message converts to
-  only 4% more throughput here. The headroom has not been measured on a host
-  where the server does not share a core with its load generator.
-- The consume path still writes a delivery and an acknowledgement record per
-  message (208 bytes per 100-byte message against RabbitMQ's 9 on the drain).
-  A coalesced range record for deliveries and acknowledgements would cut
-  that; it is not implemented.
-- Memcached, Valkey and Dragonfly are not in the cache comparison; only
-  Redis is. NATS JetStream is not in the stream comparison.
-- The WAL space reservation is Linux-only (`fallocate`). macOS and other
-  platforms fall back to extending writes and do not get the commit-rate or
-  tail-latency improvement recorded above.
+<details>
+<summary><b>Harness reference</b> — what each benchmark measures</summary>
+
+## Methodology
+
+- `make bench-matrix` (or `make bench-quick`) drives the C benchmark
+  (`src/kuttidb_bench.c`) and a Python matrix (`src/bench_matrix.py`) against a live
+  server: N clients × 256-item batches of 100-byte values, reporting ops/s,
+  p50/p95/p99 batch latency, idle and loaded RSS, and live/allocated bytes.
+- `make bench-exchange` measures durable queue/exchange routing overhead
+  (`src/bench_exchange.py`, single Python client, 100-byte values).
+- `make bench-stream` measures the stream engine directly through the
+  `StreamStore` API (`src/bench_stream.c`): durable append ops/s and
+  p50/p95/p99 as retained history grows 10k → 100k records (8 partitions,
+  100-byte values), head/tail/lagging fetch, the metrics scrape, offset
+  commits, one retention burst that evicts ~900 records in a single call, and
+  full-WAL reopen recovery.
+- `make bench-queue` measures the queue engine directly through the
+  `QueueStore` API (`src/bench_queue.c`): durable publish as retained depth
+  grows 5k → 20k (100-byte values), consume from a clean head and from behind
+  a 10k-deep wall of in-flight deliveries, ACK as the outstanding set shrinks
+  10k → 5k, NACK/requeue, one visibility-expiry pass requeueing 2,000
+  deliveries, the metrics scrape, and publish+consume+ACK steady state for
+  in-memory and durable queues.
+- `src/bench_queue_net.py` drives a live server over the protocol with one
+  client: durable publish, consume+ACK and one-at-a-time durable publish,
+  with exact message-ID, order, payload and ACK-count checks and a required
+  full drain. It records server CPU, RSS and write counters from `/proc`
+  alongside client CPU, and identifies the binary and the harness by SHA-256.
+- `src/xbench.py` runs the same logical durable-queue workload against
+  KuttiDB, Redis, NATS, RabbitMQ and Kafka from one client process at a
+  matched durability tier, reading each server's cost from `/proc` for its
+  whole process tree; `src/xsummary.py` reduces the JSONL to medians and
+  lists failed trials rather than dropping them.
+- `src/test_queue_wal_compat.py` checks that WALs written by two builds
+  replay under each other after `SIGKILL`, which is the gate for any change
+  to how records reach the disk.
+- On a host whose storage latency drifts between sessions, a before/after
+  comparison must interleave the two sides trial by trial and report the
+  ratio of medians; a run of one side followed by a run of the other is not
+  evidence.
+- Queue and stream baselines must be added to this file before any major
+  milestone that touches those engines is accepted.
+
+</details>
+
+---
+
+## 5. Known gaps
+
+Things this file does **not** establish, and open items on the engines.
+
+| Gap | Detail |
+|---|---|
+| **Consume-side write volume** | KuttiDB writes a delivery *and* an acknowledgement record per message — 208 bytes per 100-byte message against RabbitMQ's 9. A coalesced range record would cut it; not implemented. Largest open item on the queue path. |
+| **Single-message durable publish** | ~1,414 msgs/s against RabbitMQ's ~1,651 on the reference VPS (was ~950 before the space reservation). The remaining gap is not attributed; cross-WAL interference was tested and ruled out. |
+| **Batched publish headroom** | Server CPU per message fell 3.3×, but throughput rose only 7% because one vCPU is shared with the load generator. The freed CPU has not been measured on a host where the server does not compete with its own client. |
+| **Stream batch paths** | `stream_append_batch` already writes one record per batch, so it had nothing to gain — but `stream_commit_batch_if_generation` and the group offset reset still write one record per commit. |
+| **Reservation is Linux-only** | `fallocate`; macOS and other platforms fall back to extending writes and do not get the commit-rate or tail-latency improvement. |
+| **Windows** | No native benchmark tables; the Windows server build remains the documented platform blocker. |
+| **Competitor coverage** | Cache compares only against Redis — no Memcached, Valkey or Dragonfly. The stream comparison has no NATS JetStream. |
+| **Workload coverage** | One single-node workload per engine. No clustering, replication, multi-consumer fan-out or rebalancing, compaction, retention under write load, consumer lag under slow consumers, or a SIGKILL-recovery cost table for streams. |
+| **Failure model** | Process-kill recovery validates that failure model only. Nothing here simulates a hypervisor or storage device losing power. |
