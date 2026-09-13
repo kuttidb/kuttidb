@@ -1,11 +1,12 @@
 # Client SDK publishing
 
-How the native client libraries are packaged and published to the language
-registries. The scheme mirrors the server pipeline
-([RELEASE.md](RELEASE.md)) and is fully tag-driven: **a tag is the release**.
-Server binaries use plain `v*` tags; each client uses a language-prefixed tag
-so every SDK versions independently — clients only need to agree on the wire
-protocol, not on the server version number.
+How the native client libraries (plus the management console, which follows
+the same npm scheme) are packaged and published to the language registries.
+The scheme mirrors the server pipeline ([RELEASE.md](RELEASE.md)) and is
+fully tag-driven: **a tag is the release**. Server binaries use plain `v*`
+tags; each client uses a language-prefixed tag so every SDK versions
+independently — clients only need to agree on the wire protocol, not on the
+server version number.
 
 ## Packages and tags
 
@@ -16,9 +17,11 @@ protocol, not on the server version number.
 | Rust | [crates.io](https://crates.io/crates/kuttidb) | `kuttidb` | `rust-vX.Y.Z` | `clients/rust/Cargo.toml` | `release-rust.yml` |
 | Go | git only (no registry) | `github.com/kuttidb/kuttidb/clients/go` | `go-vX.Y.Z` | — | `release-go.yml` (gate) |
 | Java | Maven Central | `io.github.kuttidb:kuttidb-client` | `java-vX.Y.Z` | `clients/java/pom.xml` | `release-java.yml` |
+| Console | [npm](https://www.npmjs.com/package/@kuttidb/management-ui) | `@kuttidb/management-ui` | `console-vX.Y.Z` | `apps/management-ui/package.json` | `release-management-ui.yml` |
 
 Tag names use the manifest version string, e.g. `node-v0.0.1-beta`,
-`rust-v0.0.1-beta`, `py-v0.0.1b0` (PEP 440 spelling of the same version).
+`rust-v0.0.1-beta`, `py-v0.0.1b0` (PEP 440 spelling of the same version),
+`console-v0.0.1-beta`.
 
 The C companion (`libkuttidb_client` + `src/kuttidb_client.h`) is distributed
 inside the server release tarballs (see
@@ -46,6 +49,7 @@ go get github.com/kuttidb/kuttidb/clients/go
 # Maven Central (io.github.kuttidb.client package):
 #   <dependency><groupId>io.github.kuttidb</groupId>
 #              <artifactId>kuttidb-client</artifactId></dependency>
+npx @kuttidb/management-ui     # management console, no install needed
 ```
 
 ## Cutting a release
@@ -81,6 +85,20 @@ Per-language notes:
 - **Go** — publishing *is* the tag (see [Go modules](#go-modules)); the
   workflow is a build/vet/smoke gate so a `go-v*` tag carries the same
   guarantees as the other clients.
+- **Console** — not a client SDK but published the same way. The gate runs
+  `pnpm --filter @kuttidb/management-ui lint` and `test`, then `pnpm --filter
+  @kuttidb/management-ui build` (Vite for the static client, `tsc` for the
+  Fastify gateway and the `kuttidb-management-ui` CLI entry point), then
+  `npm publish` ships only `dist/` and `README.md` — the React/Radix/Tailwind
+  build-time packages stay in `devDependencies` and are never installed by
+  `npx`. The build step also chmods the compiled CLI entry point executable
+  as a defensive measure (npm and pnpm both fix the bit themselves on
+  install, but a bare `node_modules/.bin` symlink or a manual tarball
+  extraction should not depend on that). Keep the `bin` path in
+  `package.json` without a leading `./` — with one, `npm publish` logs a
+  `"bin[...] script name ... was invalid and removed"` warning; the mapping
+  itself still survives (npm only normalizes the path), but the warning is
+  worth avoiding.
 
 ## First-release checklist
 
@@ -92,8 +110,9 @@ release in this order once the manifests land on `main`:
    pipeline without touching the real name.
 2. **`rust-v0.0.1-beta`** — claims `kuttidb` on crates.io.
 3. **`node-v0.0.1-beta`** — claims `@kuttidb/client` on npm.
-4. **`py-v0.0.1b0`** — claims `kuttidb` on PyPI.
-5. **`go-v0.1.0`** — any time; the module was made fetchable when
+4. **`console-v0.0.1-beta`** — claims `@kuttidb/management-ui` on npm.
+5. **`py-v0.0.1b0`** — claims `kuttidb` on PyPI.
+6. **`go-v0.1.0`** — any time; the module was made fetchable when
    `go.mod` moved to the `github.com/kuttidb/kuttidb/clients/go` path.
 
 ## Registry configuration (one-time setup, already done)
@@ -104,8 +123,9 @@ release in this order once the manifests land on `main`:
   `pypi` environment exists in repo settings. If a publish fails OIDC
   validation, check these four values first — the workflow and the pending
   publisher must match exactly.
-- **npm.** Org `kuttidb` exists; the scoped package publishes as public via
-  `publishConfig`. Auth currently uses the `NPM_TOKEN` granular token.
+- **npm.** Org `kuttidb` exists; both scoped packages (`@kuttidb/client` and
+  `@kuttidb/management-ui`) publish as public via `publishConfig`. Auth
+  currently uses the same `NPM_TOKEN` granular token for both.
 - **crates.io.** `CRATES_IO_TOKEN` is stored; the token is only exposed to
   the release workflow.
 
@@ -114,9 +134,11 @@ release in this order once the manifests land on `main`:
 npm attaches trusted publishers per package, so the package must exist
 first. On npmjs.com → package `@kuttidb/client` → Settings → **Trusted
 Publisher**: owner `kuttidb`, repository `kuttidb`, workflow filename
-`release-node.yml`, environment *empty*. Then delete `NPM_TOKEN` from the
-repo secrets. No workflow change is needed — `id-token: write` and
-`--provenance` are already in place.
+`release-node.yml`, environment *empty*. Repeat for `@kuttidb/management-ui`
+with workflow filename `release-management-ui.yml`. Only delete `NPM_TOKEN`
+from the repo secrets once every package that uses it has switched — no
+workflow change is needed either way, `id-token: write` and `--provenance`
+are already in place for both.
 
 ## Maven Central
 
@@ -189,8 +211,8 @@ enters the shared-memory path:
 
 - **A tag must exactly match its manifest version.** The release workflows
   reject mismatches before any registry upload: for example,
-  `py-v0.0.7b0`, `node-v0.0.7-beta`, `rust-v0.0.7-beta`, and
-  `java-v0.0.9-beta`.
+  `py-v0.0.7b0`, `node-v0.0.7-beta`, `rust-v0.0.7-beta`,
+  `java-v0.0.9-beta`, and `console-v0.0.7-beta`.
 - **Never re-push a tag** — registries reject duplicate versions and
   re-publishing is treated as a broken release (same policy as
   [RELEASE.md](RELEASE.md)).
@@ -199,8 +221,9 @@ enters the shared-memory path:
   time.
 - **Workflow file names are contractual.** The PyPI/TestPyPI pending
   publishers and (later) the npm trusted publisher reference
-  `release-python.yml` / `release-node.yml` by name; renaming a workflow
-  breaks publishing until the registry side is updated.
+  `release-python.yml` / `release-node.yml` / `release-management-ui.yml` by
+  name; renaming a workflow breaks publishing until the registry side is
+  updated.
 
 ## Troubleshooting
 
@@ -208,9 +231,11 @@ enters the shared-memory path:
 |---|---|
 | PyPI: "Invalid or non-existent authentication information" / OIDC rejected | Workflow filename or environment no longer matches the pending publisher on pypi.org |
 | PyPI: "File already exists" | That version was already uploaded — bump and re-tag (a new tag, not a re-push) |
-| npm: "You must specify a tag using --tag when publishing a prerelease version" | A prerelease cannot land on `latest` — `release-node.yml` derives the dist-tag automatically now; older runs need a version bump and a new tag |
-| npm: 403 Forbidden | `NPM_TOKEN` expired or lacks write scope for `@kuttidb/client` |
+| npm: "You must specify a tag using --tag when publishing a prerelease version" | A prerelease cannot land on `latest` — `release-node.yml`/`release-management-ui.yml` derive the dist-tag automatically now; older runs need a version bump and a new tag |
+| npm: 403 Forbidden | `NPM_TOKEN` expired or lacks write scope for `@kuttidb/client` or `@kuttidb/management-ui` |
 | npm: provenance failure | `id-token: write` missing or the package's repository field does not point at this repo |
+| npm publish: `"bin[...] script name ... was invalid and removed"` warning | The `bin` path in `package.json` had a leading `./`; drop it — the mapping itself is not actually removed, npm only normalizes the path |
+| `npx @kuttidb/management-ui`: command not found or does nothing | The published tarball is missing `dist/` — check that the gate's build step ran before `npm publish` (it does in `release-management-ui.yml`; a manual `npm publish` outside CI relies on the `prepublishOnly` script) |
 | crates.io: "crate `kuttidb` already exists" | Version already published; bump `Cargo.toml` |
 | PyPI wheel missing `kuttidb/__init__.py` or import fails after install | Hatchling applied repository `.gitignore` patterns (anchored at the package root) and pruned the package — keep `ignore-vcs = true` in `clients/python/pyproject.toml` |
 | Go: "module ... not found" after tagging | Tag pushed before the `go.mod` path fix landed on `main` — re-tag from a commit that contains it |

@@ -1,0 +1,64 @@
+# Publishes the management console to npm when a console-v* tag is pushed.
+#
+# Auth: NPM_TOKEN (granular access token). After the first release, switch to
+# npm Trusted Publishing — the `id-token: write` permission is already in
+# place, so only the npm-side configuration changes.
+# See docs/operations/CLIENT_PUBLISHING.md.
+name: Release management console (npm)
+
+on:
+  push:
+    tags: ['console-v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+# npm rejects re-publishing an existing version; one run at a time is enough.
+concurrency:
+  group: release-management-ui
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          expected="${GITHUB_REF_NAME#console-v}"
+          actual=$(node -p "require('./apps/management-ui/package.json').version")
+          test "$actual" = "$expected" || { echo "tag console-v$expected does not match package version $actual"; exit 1; }
+
+      - name: Lint and test gate
+        run: |
+          pnpm --filter @kuttidb/management-ui lint
+          pnpm --filter @kuttidb/management-ui test
+
+      - name: Build
+        run: pnpm --filter @kuttidb/management-ui build
+
+      - name: Publish
+        working-directory: apps/management-ui
+        # Prerelease versions must not land on the `latest` dist-tag (npm
+        # rejects that), so derive it from the semver: 1.2.3 -> latest,
+        # 1.2.3-beta -> beta.
+        run: |
+          dist_tag=$(node -p "require('./package.json').version.includes('-') ? 'beta' : 'latest'")
+          npm publish --access public --provenance --tag "$dist_tag"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

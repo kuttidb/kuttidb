@@ -6,6 +6,6 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": fileURLToPath(new URL("./src/client", import.meta.url)) } },
-  build: { outDir: "dist/client", emptyOutDir: false },
+  build: { outDir: "dist/client", emptyOutDir: true },
   server: { proxy: { "/ui-api": "http://127.0.0.1:8080", "/health": "http://127.0.0.1:8080" } }
 });

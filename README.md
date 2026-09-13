@@ -279,17 +279,27 @@ printf '%s\n' 'replace-with-a-long-random-token' > admin.token
   --admin-audit-log admin-audit.jsonl
 ```
 
-**2. In a second terminal, run the console from the repository root
-(Node 24+ and pnpm):**
+**2. In a second terminal, run the console** (Node 20+, no clone or build
+required):
+
+```sh
+npx @kuttidb/management-ui
+```
+
+This opens `http://127.0.0.1:8080` in your browser. Connect to
+`http://127.0.0.1:7380` and use the token from `admin.token`. The token is
+held in the console's memory for this session only and is never saved with a
+profile. Run `npx @kuttidb/management-ui --help` for options (port, host,
+target allowlist, and more).
+
+Building from source instead (repository root, pnpm):
 
 ```sh
 pnpm install
 ALLOW_LOOPBACK_HTTP=true pnpm ui:dev
 ```
 
-**3. Open `http://localhost:5173`**, connect to `http://127.0.0.1:7380`, and use
-the token from `admin.token`. The token is held in the console gateway's memory
-for this browser session and is never saved with a profile.
+Open `http://localhost:5173` for the dev server variant.
 
 The API is disabled by default. It requires a bearer-token file with `0600`
 permissions, audits mutations before dispatch, and permits plaintext
@@ -297,7 +307,8 @@ administration only on loopback. The console gateway keeps administrator tokens
 in bounded process memory; browser storage contains profile metadata only.
 
 [Management API and security model](docs/api/MANAGEMENT_API.md) ·
-[Console source](apps/management-ui)
+[Console source](apps/management-ui) ·
+[Console on npm](https://www.npmjs.com/package/@kuttidb/management-ui)
 
 ## Run it with Docker
 
